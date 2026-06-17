@@ -1,0 +1,2 @@
+data downloaded from https://topotools.cr.usgs.gov/gmted_viewer/viewer.htm is put here for
+plotting scripts
