@@ -7,8 +7,8 @@ Environment: `conda run -n FM4PDEbaseline`
 
 ```bash
 python -m compileall -q baselines
-pytest
-bash scripts/baselines/smoke_all.sh
+conda run -n FM4PDEbaseline pytest -q
+conda run -n FM4PDEbaseline bash scripts/baselines/smoke_all.sh
 python -m baselines.run --baseline fno --pde darcy --task forward --dry-run --synthetic-data --synthetic-resolution 16 --train-size 2 --batch-size 1
 python -m baselines.run --baseline fno --pde darcy --task forward --data-root /home/tat512/C01Python/PDEdata --prefer-test --dry-run --train-size 1 --batch-size 1
 python -m baselines.run --baseline fno --pde nsnonbounded --task forward --dry-run --synthetic-data --synthetic-resolution 16 --train-size 2 --batch-size 1
@@ -18,10 +18,10 @@ python -m baselines.run --baseline fno --pde reaction_diffusion --task forward -
 ## Results
 
 - `compileall`: passed.
-- `pytest`: 33 passed.
+- `pytest`: 51 passed.
 - `scripts/baselines/smoke_all.sh`: passed for all 11 baseline wrappers on deterministic synthetic data.
 - Real Darcy test-file dry-run: passed, with input/target/prediction shape `[1,1,128,128]`.
-- Navier-Stokes and Reaction-Diffusion dry-runs produce finite `pde_residual` values through the shared residual registry.
+- Structured physics metrics produce finite `pde_residual`, `bc_residual`, `ic_residual`, and `physics_loss` values for the current PDE set.
 - Per-instance methods (`pinn_sparse`, `pc_bnn`, `pde_opt`, `var4d`, `vivid`) write nonzero `inference_optimization_time`; amortized methods write `0.0`.
 - Outputs were written under `outputs/baselines/debug` and `outputs/baselines/smoke`.
 
@@ -61,5 +61,7 @@ python -m baselines.run --baseline fno --pde reaction_diffusion --task forward -
 - Smoke tests use synthetic data to avoid multi-GB real data reads; final paper numbers should be produced with the real `PDEdata` root and fixed experiment configs.
 - Tiny native fixtures validate adapter file-format logic for all current PDEs, but not full-scale I/O throughput.
 - NS/RD/SWE residuals are implemented from the data-generation summary and smoke-tested for finite values. They are finite-difference diagnostics and should be reported with the exact metadata/mesh assumptions from `baselines/README.md`.
+- Final-state tasks for RD/SWE build `mode="two_level"` residuals from input/background and final prediction. Full trajectory states use `mode="full_trajectory"` when available, such as in full-space 4D-Var/VIVID state optimization.
+- PINN-Sparse, PC-BNN, PDE-Opt, 4D-Var, and VIVID now optimize structured physics total loss by default; old `lambda_pde` configs scale interior, BC, and IC terms together unless `lambda_int`, `lambda_bc`, or `lambda_ic` are explicitly set.
 - Optional advanced variants not included in the unified runner are iFNO VAE posterior inference and POD-reduced VIVID.
 - The original `PDEdata/data_summary.md` reports a Burgers train/test distribution shift; experiments should verify whether this is intentional before comparing final test metrics.

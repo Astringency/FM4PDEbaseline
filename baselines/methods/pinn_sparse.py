@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from baselines.common.data_adapter import PDEBatch
-from baselines.common.metrics import NotImplementedWarning, pde_residual_metric
+from baselines.common.metrics import NotImplementedWarning, physics_loss_metric
 
 from .base import BaselineModel
 from .shared import NeuralField
@@ -37,7 +37,6 @@ class PINNSparseBaseline(BaselineModel):
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
         lam_obs = float(self.config.get("lambda_obs", 1.0))
-        lam_pde = float(self.config.get("lambda_pde", 0.01))
         hidden = self.hidden
         depth = self.depth
         opt_name = str(self.config.get("optimizer", "adam")).lower()
@@ -54,11 +53,12 @@ class PINNSparseBaseline(BaselineModel):
             def closure():
                 optimizer.zero_grad(set_to_none=True)
                 pred = model(coords).T.reshape_as(target)
-                loss = lam_obs * _observation_loss(pred, target, batch.mask)
-                if lam_pde:
-                    residual = pde_residual_metric(pred, batch.pde_name, _single_meta(batch, item))
-                    if torch.isfinite(residual):
-                        loss = loss + lam_pde * residual
+                loss = lam_obs * observation_loss_from_batch(pred, batch, item=item)
+                meta = _single_meta(batch, item)
+                meta.update(_physics_weight_metadata(self.config))
+                physics_value = _select_physics_loss(physics_loss_metric(pred, batch.pde_name, meta), self.config, pred)
+                if torch.isfinite(physics_value):
+                    loss = loss + physics_value
                 loss.backward()
                 return loss
 
@@ -81,11 +81,51 @@ def residual_supported(pde_name: str) -> bool:
     return False
 
 
-def _observation_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def observation_loss_from_batch(pred: torch.Tensor, batch: PDEBatch, item: int | None = None) -> torch.Tensor:
+    target = batch.target_fields[item : item + 1] if item is not None else batch.target_fields
+    obs_values = batch.obs_values[item : item + 1] if item is not None and batch.obs_values is not None else batch.obs_values
+    return _observation_loss(pred, target.to(pred.device, pred.dtype), batch.mask, obs_values)
+
+
+def _observation_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor | None,
+    obs_values: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if obs_values is not None and mask is not None:
+        c = min(pred.shape[1], obs_values.shape[-1])
+        spatial_mask = mask[0].bool().reshape(-1).to(pred.device)
+        flat_idx = spatial_mask.nonzero(as_tuple=False).squeeze(-1)
+        pred_obs = pred.reshape(pred.shape[0], pred.shape[1], -1).permute(0, 2, 1)[:, flat_idx, :c]
+        obs = obs_values.to(pred.device, pred.dtype)[..., :c]
+        return F.mse_loss(pred_obs, obs)
     if mask is None:
         return F.mse_loss(pred, target)
     local_mask = mask[: pred.shape[1]].unsqueeze(0).to(pred.device, pred.dtype)
     return (((pred - target) ** 2) * local_mask).sum() / local_mask.sum().clamp_min(1.0)
+
+
+def _physics_weight_metadata(config: dict) -> dict:
+    lam_pde = float(config.get("lambda_pde", config.get("lambda_dynamics", 0.01)))
+    return {
+        "lambda_int": float(config.get("lambda_int", lam_pde)),
+        "lambda_bc": float(config.get("lambda_bc", lam_pde)),
+        "lambda_ic": float(config.get("lambda_ic", lam_pde)),
+    }
+
+
+def _select_physics_loss(losses: dict, config: dict, ref: torch.Tensor) -> torch.Tensor:
+    mode = str(config.get("physics_loss_mode", "total")).lower()
+    if mode == "interior":
+        lam_int = float(config.get("lambda_int", config.get("lambda_pde", config.get("lambda_dynamics", 0.01))))
+        return lam_int * losses["interior"]
+    if mode != "total":
+        raise ValueError(f"Unsupported physics_loss_mode '{mode}'")
+    total = losses["total"]
+    if isinstance(total, torch.Tensor):
+        return total
+    return ref.sum() * 0.0
 
 
 def _single_meta(batch: PDEBatch, item: int) -> dict:

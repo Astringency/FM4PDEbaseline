@@ -91,21 +91,38 @@ All sparse tasks use `baselines/common/sensors.py` to create reusable masks, obs
 
 Detailed paper/code sources are in `baselines/BASELINE_SOURCES.md`.
 
-## Residual Status
+## Physics Loss Status
 
-Implemented residual paths:
+`baselines/common/physics.py` exposes structured physics losses:
 
-- Poisson: `-Delta phi - f`.
-- Helmholtz: `-Delta psi - k^2 psi - f`, with `k` from metadata.
-- Darcy: conservative form `-div(a grad p) - 1`.
-- Burgers: `u_t + u u_x - nu u_xx`.
-- Navier-Stokes nonbounded: periodic vorticity transport `omega_t + u dot grad omega - nu Delta omega - forcing`, with velocity recovered from the streamfunction Poisson solve in Fourier space.
-- Reaction-Diffusion: two-channel `[u,v]` residual with train/test `D_u`, `D_v`, and `k` metadata from the data-generation summary.
-- Shallow Water: conservative `[h,hu,hv]` mass and momentum residuals with tensor fluxes.
+```python
+physics_losses(pred, pde_name, metadata) -> {
+    "interior": tensor,
+    "bc": tensor,
+    "ic": tensor,
+    "total": tensor,
+    "residual": tensor | None,
+    "mode": str,
+}
+```
+
+`residual_loss(...)` is kept for backward compatibility and still returns the interior PDE residual loss. `physics_loss(...)` returns the weighted total. `pde_residual_metric`, `bc_residual_metric`, and `ic_residual_metric` record the three scalar terms separately.
+
+Implemented equations and condition terms:
+
+- Darcy: `-div(a grad p) - 1`, interior grid only, homogeneous Dirichlet loss on `p`, no IC term.
+- Poisson: `-Delta phi - f`, interior grid only, homogeneous Dirichlet loss on `phi`, no IC term.
+- Helmholtz: `(-Delta - k^2) psi - f`, interior grid only, homogeneous Dirichlet loss on `psi`, no IC term.
+- Burgers: `u_t + u u_x - nu u_xx`, periodic x-boundary loss, IC loss against `initial_1d` or the first stored frame.
+- Navier-Stokes nonbounded: periodic vorticity transport `omega_t + u dot grad omega - nu Delta omega - forcing`, Fourier streamfunction velocity recovery, periodic x/y boundary loss, IC loss against `omega0`.
+- Reaction-Diffusion: FitzHugh-Nagumo `[u,v]` residual on `[-1,1]^2`, homogeneous Neumann boundary loss, IC loss against the segment input state.
+- Shallow Water: conservative `[h,hu,hv]` mass and momentum residuals on `[-2.5,2.5]^2`, zero-order Neumann boundary loss, IC loss against the input state.
+
+Time-dependent residuals use `mode="full_trajectory"` when `pred` is a trajectory tensor such as `[N,C,T,H,W]`. If a task only predicts the final state, the code builds a two-frame segment from the input/background state and the prediction and returns `mode="two_level"`. This is useful for optimization and diagnostics, but it is not equivalent to a full multi-step dynamics residual.
+
+PINN-Sparse, PC-BNN, PDE-Opt, 4D-Var, and VIVID use structured physics loss by default with `physics_loss_mode: "total"`. Supported weights are `lambda_int` or backward-compatible `lambda_pde`, plus `lambda_bc` and `lambda_ic`. If only `lambda_pde` is present, all three physics terms use that same scale.
 
 For future PDEs (`heat`, `wave`, `advection_diffusion`) or missing metadata, residual calls return `nan` with an explicit warning instead of silently computing an invalid quantity.
-
-The implemented time-dependent residuals are finite-difference residuals aligned to the stored trajectories. If a task only predicts a final state, the metric builds the residual on the available initial/final segment from adapter metadata; full trajectory residuals are used whenever trajectory tensors are available.
 
 ## Running Smoke Tests
 
@@ -150,7 +167,7 @@ conda run -n FM4PDEbaseline bash scripts/baselines/run_sparse_main.sh
 
 Results are written to JSONL and CSV with fields:
 
-`pde`, `task`, `baseline`, `seed`, `train_size`, `num_sensors`, `sensor_mode`, `noise_level`, `relative_l2_input_or_coeff`, `relative_l2_solution`, `obs_mse`, `pde_residual`, `train_time`, `inference_time`, `inference_optimization_time`, `num_params`, `config_path`, `checkpoint_path`, `commit_hash`, `mask_id`.
+`pde`, `task`, `baseline`, `seed`, `train_size`, `num_sensors`, `sensor_mode`, `noise_level`, `relative_l2_input_or_coeff`, `relative_l2_solution`, `obs_mse`, `pde_residual`, `bc_residual`, `ic_residual`, `physics_loss`, `residual_mode`, `train_time`, `inference_time`, `inference_optimization_time`, `num_params`, `config_path`, `checkpoint_path`, `commit_hash`, `mask_id`.
 
 ## Adding New PDE Adapters
 

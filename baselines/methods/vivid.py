@@ -7,10 +7,11 @@ import torch
 import torch.nn.functional as F
 
 from baselines.common.data_adapter import PDEBatch
-from baselines.common.metrics import pde_residual_metric
+from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel
-from .var4d import _background_view, _initial_trajectory, _obs_loss, _optimized_state_numel
+from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, observation_loss_from_batch
+from .var4d import _background_view, _initial_trajectory, _optimized_state_numel
 from .voronoicnn import VoronoiCNNBaseline
 
 
@@ -48,18 +49,18 @@ class VIVIDBaseline(BaselineModel):
         lam_inv = float(self.config.get("lambda_inverse_operator", 0.25))
         lam_obs = float(self.config.get("lambda_obs", 1.0))
         lam_b = float(self.config.get("lambda_background", 0.05))
-        lam_dyn = float(self.config.get("lambda_dynamics", self.config.get("lambda_pde", 0.01)))
         opt = torch.optim.Adam([state], lr=lr)
         for _ in range(steps):
             opt.zero_grad(set_to_none=True)
             output = output_view(state)
-            obs = _obs_loss(output, batch.target_fields, batch.mask)
+            obs = observation_loss_from_batch(output, batch)
             inv = F.mse_loss(output, learned_state)
             bg = F.mse_loss(_background_view(state, batch), background)
-            dyn = pde_residual_metric(state, batch.pde_name, dyn_meta)
+            dyn_meta = {**dyn_meta, **_physics_weight_metadata(self.config)}
+            dyn = _select_physics_loss(physics_loss_metric(state, batch.pde_name, dyn_meta), self.config, state)
             if not torch.isfinite(dyn):
                 dyn = torch.tensor(0.0, device=state.device)
-            loss = lam_obs * obs + lam_inv * inv + lam_b * bg + lam_dyn * dyn
+            loss = lam_obs * obs + lam_inv * inv + lam_b * bg + dyn
             loss.backward()
             opt.step()
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start

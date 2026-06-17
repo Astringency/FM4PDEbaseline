@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from baselines.common.data_adapter import build_default_registry
+from baselines.methods.pinn_sparse import observation_loss_from_batch
 from baselines.run import BASELINES, build_data_spec
 
 
@@ -34,3 +35,14 @@ def test_baseline_predict_shape(baseline, pde, task):
         pred = model.predict(batch)
     assert tuple(pred.shape) == tuple(batch.target_fields.shape)
 
+
+def test_per_instance_observation_loss_uses_noisy_obs_values():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("poisson", n=1, resolution=8)
+    batch = registry.make_task(raw, "poisson", "sparse_solution", num_sensors=6, seed=4, noise_level=0.0)
+    pred = batch.target_fields.clone()
+    clean_loss = observation_loss_from_batch(pred, batch)
+    batch.obs_values = batch.obs_values + 1.0
+    noisy_loss = observation_loss_from_batch(pred, batch)
+    assert clean_loss.item() == pytest.approx(0.0)
+    assert noisy_loss.item() > 0.0

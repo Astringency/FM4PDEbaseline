@@ -1,0 +1,125 @@
+{
+  "args": {
+    "baseline": "pinn_sparse",
+    "pde": "burger",
+    "task": "sparse_solution",
+    "data_root": "/home/tat512/C01Python/PDEdata",
+    "config": null,
+    "num_sensors": 50,
+    "sensor_mode": "random",
+    "noise_level": 0.0,
+    "train_size": 4,
+    "test_size": 2,
+    "batch_size": 2,
+    "epochs": 1,
+    "lr": 0.001,
+    "seed": 1,
+    "device": "cpu",
+    "output_dir": "outputs/baselines/smoke",
+    "dry_run": true,
+    "synthetic_data": true,
+    "synthetic_resolution": 32,
+    "prefer_test": false,
+    "save_checkpoint": false
+  },
+  "method": {
+    "epochs": 1,
+    "lr": 0.001,
+    "device": "cpu",
+    "max_steps": 1,
+    "steps": 1,
+    "refine_steps": 1
+  },
+  "data_spec": {
+    "pde": "burger",
+    "task": "sparse_solution",
+    "input_shape": [
+      2,
+      1,
+      32,
+      32
+    ],
+    "target_shape": [
+      2,
+      1,
+      32,
+      32
+    ],
+    "input_channels": 1,
+    "target_channels": 1,
+    "input_numel": 1024,
+    "target_numel": 1024,
+    "branch_numel": 50,
+    "metadata": {
+      "source": "synthetic",
+      "canonical_layout": "NCTX",
+      "axes": [
+        "time",
+        "x"
+      ],
+      "time_values": [
+        0.0,
+        0.03225806451612903,
+        0.06451612903225806,
+        0.0967741935483871,
+        0.12903225806451613,
+        0.16129032258064516,
+        0.1935483870967742,
+        0.22580645161290322,
+        0.25806451612903225,
+        0.2903225806451613,
+        0.3225806451612903,
+        0.3548387096774194,
+        0.3870967741935484,
+        0.41935483870967744,
+        0.45161290322580644,
+        0.4838709677419355,
+        0.5161290322580645,
+        0.5483870967741935,
+        0.5806451612903226,
+        0.6129032258064516,
+        0.6451612903225806,
+        0.6774193548387096,
+        0.7096774193548387,
+        0.7419354838709677,
+        0.7741935483870968,
+        0.8064516129032258,
+        0.8387096774193549,
+        0.8709677419354839,
+        0.9032258064516129,
+        0.9354838709677419,
+        0.967741935483871,
+        1.0
+      ],
+      "final_time": 1.0,
+      "nu": 0.01,
+      "time_dependent": true,
+      "supports_trajectory": true,
+      "sensor_mode": "random",
+      "num_sensors": 50,
+      "noise_level": 0.0,
+      "mask_id": "86e7ebca042519f9",
+      "input_shape": [
+        4,
+        1,
+        32,
+        32
+      ],
+      "target_shape": [
+        4,
+        1,
+        32,
+        32
+      ],
+      "full_shape": [
+        4,
+        1,
+        32,
+        32
+      ],
+      "task_channel_names": [
+        "u"
+      ]
+    }
+  }
+}

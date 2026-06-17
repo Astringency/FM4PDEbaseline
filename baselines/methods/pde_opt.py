@@ -3,12 +3,12 @@ from __future__ import annotations
 import time
 
 import torch
-import torch.nn.functional as F
 
 from baselines.common.data_adapter import PDEBatch
-from baselines.common.metrics import pde_residual_metric
+from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel
+from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, observation_loss_from_batch
 
 
 class PDEOptBaseline(BaselineModel):
@@ -30,7 +30,6 @@ class PDEOptBaseline(BaselineModel):
         pred = torch.nn.Parameter(batch.metadata.get("voronoi_grid", batch.input_fields).detach().clone())
         steps = int(self.config.get("steps", 3))
         lam_obs = float(self.config.get("lambda_obs", 1.0))
-        lam_pde = float(self.config.get("lambda_pde", 0.01))
         lam_reg = float(self.config.get("lambda_reg", 1e-5))
         opt_name = str(self.config.get("optimizer", "adam")).lower()
         if opt_name == "lbfgs":
@@ -38,7 +37,7 @@ class PDEOptBaseline(BaselineModel):
 
             def closure():
                 opt.zero_grad(set_to_none=True)
-                loss = self._objective(pred, batch, lam_obs, lam_pde, lam_reg)
+                loss = self._objective(pred, batch, lam_obs, lam_reg)
                 loss.backward()
                 return loss
 
@@ -47,22 +46,17 @@ class PDEOptBaseline(BaselineModel):
             opt = torch.optim.Adam([pred], lr=float(self.config.get("lr", 5e-2)))
             for _ in range(steps):
                 opt.zero_grad(set_to_none=True)
-                loss = self._objective(pred, batch, lam_obs, lam_pde, lam_reg)
+                loss = self._objective(pred, batch, lam_obs, lam_reg)
                 loss.backward()
                 opt.step()
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         return pred.detach()
 
-    def _objective(self, pred, batch, lam_obs, lam_pde, lam_reg):
-        if batch.mask is not None:
-            obs = (((pred - batch.target_fields) ** 2) * batch.mask.unsqueeze(0)).mean()
-        else:
-            obs = F.mse_loss(pred, batch.target_fields)
-        residual = pde_residual_metric(
-            pred,
-            batch.pde_name,
-            {"input_fields": batch.input_fields, "full_tensor": batch.full_tensor, "task": batch.task, **batch.metadata},
-        )
-        pde = residual if torch.isfinite(residual) else torch.tensor(0.0, device=pred.device)
+    def _objective(self, pred, batch, lam_obs, lam_reg):
+        obs = observation_loss_from_batch(pred, batch)
+        meta = {"input_fields": batch.input_fields, "full_tensor": batch.full_tensor, "task": batch.task, **batch.metadata}
+        meta.update(_physics_weight_metadata(self.config))
+        physics_value = _select_physics_loss(physics_loss_metric(pred, batch.pde_name, meta), self.config, pred)
+        pde = physics_value if torch.isfinite(physics_value) else torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
         reg = (pred[..., 1:, :] - pred[..., :-1, :]).pow(2).mean() + (pred[..., :, 1:] - pred[..., :, :-1]).pow(2).mean()
-        return lam_obs * obs + lam_pde * pde + lam_reg * reg
+        return lam_obs * obs + pde + lam_reg * reg

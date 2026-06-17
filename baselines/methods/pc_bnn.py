@@ -3,13 +3,12 @@ from __future__ import annotations
 import time
 
 import torch
-import torch.nn.functional as F
 
 from baselines.common.data_adapter import PDEBatch
-from baselines.common.metrics import pde_residual_metric
+from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel
-from .pinn_sparse import _observation_loss, _single_meta
+from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, _single_meta, observation_loss_from_batch
 from .shared import NeuralField
 
 
@@ -41,7 +40,6 @@ class PCBNNBaseline(BaselineModel):
         hidden = self.hidden
         depth = self.depth
         lam_obs = float(self.config.get("lambda_obs", 1.0))
-        lam_pde = float(self.config.get("lambda_pde", 0.01))
         for item in range(batch.target_fields.shape[0]):
             coords = batch.coords[item].to(batch.target_fields.device, batch.target_fields.dtype)
             target = batch.target_fields[item : item + 1]
@@ -59,11 +57,12 @@ class PCBNNBaseline(BaselineModel):
                 thetas = []
                 for particle in particles:
                     pred = particle(coords).T.reshape_as(target)
-                    loss = lam_obs * _observation_loss(pred, target, batch.mask)
-                    if lam_pde:
-                        residual = pde_residual_metric(pred, batch.pde_name, _single_meta(batch, item))
-                        if torch.isfinite(residual):
-                            loss = loss + lam_pde * residual
+                    loss = lam_obs * observation_loss_from_batch(pred, batch, item=item)
+                    meta = _single_meta(batch, item)
+                    meta.update(_physics_weight_metadata(self.config))
+                    physics_value = _select_physics_loss(physics_loss_metric(pred, batch.pde_name, meta), self.config, pred)
+                    if torch.isfinite(physics_value):
+                        loss = loss + physics_value
                     grad = torch.autograd.grad(loss, tuple(particle.parameters()), retain_graph=False, create_graph=False)
                     losses.append(loss.detach())
                     grads.append(torch.cat([g.detach().reshape(-1) for g in grad]))

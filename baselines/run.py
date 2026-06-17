@@ -18,7 +18,7 @@ from baselines.common.metrics import (
     mse,
     num_parameters,
     obs_mse,
-    pde_residual_metric,
+    physics_loss_metric,
     relative_l2,
 )
 from baselines.methods.deeponet import DeepONetBaseline
@@ -173,6 +173,7 @@ def main() -> None:
         **first_batch.metadata,
     }
     rel = relative_l2(pred.detach(), first_batch.target_fields)
+    physics_metrics = physics_loss_metric(pred.detach(), args.pde, dict(metric_meta))
     inference_optimization_time = float(first_batch.metadata.get("inference_optimization_time", 0.0) or 0.0)
     row = {
         "pde": args.pde,
@@ -188,7 +189,11 @@ def main() -> None:
         "mse": float(mse(pred.detach(), first_batch.target_fields).detach().cpu()),
         "mae": float(mae(pred.detach(), first_batch.target_fields).detach().cpu()),
         "obs_mse": float(obs_mse(pred.detach(), first_batch.target_fields, first_batch.mask).detach().cpu()),
-        "pde_residual": float(pde_residual_metric(pred.detach(), args.pde, metric_meta).detach().cpu()),
+        "pde_residual": float(physics_metrics["interior"].detach().cpu()),
+        "bc_residual": float(physics_metrics["bc"].detach().cpu()),
+        "ic_residual": float(physics_metrics["ic"].detach().cpu()),
+        "physics_loss": float(physics_metrics["total"].detach().cpu()),
+        "residual_mode": str(physics_metrics["mode"]),
         "train_time": train_time,
         "inference_time": inference_time,
         "inference_optimization_time": inference_optimization_time,

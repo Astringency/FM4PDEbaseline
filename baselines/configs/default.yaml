@@ -72,5 +72,8 @@ method:
   refine_steps: 2
   lambda_obs: 1.0
   lambda_pde: 0.01
+  lambda_int: 0.01
+  lambda_bc: 0.01
+  lambda_ic: 0.01
+  physics_loss_mode: total
   lambda_reg: 0.00001
-

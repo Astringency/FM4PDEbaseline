@@ -11,7 +11,7 @@ from typing import Iterator
 import torch
 import torch.nn.functional as F
 
-from .physics import residual_loss
+from .physics import physics_losses, residual_loss
 
 
 class NotImplementedWarning(Warning):
@@ -58,16 +58,53 @@ def pde_residual_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None
         return _nan(pred)
 
 
-def bc_residual_metric(*args, **kwargs) -> torch.Tensor:
-    ref = _first_tensor(args, kwargs)
-    warnings.warn("Boundary-condition residual metric is not implemented for this PDE.", NotImplementedWarning, stacklevel=2)
-    return _nan(ref)
+def bc_residual_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None = None) -> torch.Tensor:
+    metadata = metadata or {}
+    try:
+        return physics_losses(pred, pde_name, metadata)["bc"]
+    except NotImplementedError:
+        warnings.warn(f"No boundary-condition residual implemented for '{pde_name}'. Returning nan.", NotImplementedWarning, stacklevel=2)
+        return _nan(pred)
+    except Exception as exc:
+        warnings.warn(f"Could not compute {pde_name} boundary-condition residual: {exc}", RuntimeWarning, stacklevel=2)
+        return _nan(pred)
 
 
-def ic_residual_metric(*args, **kwargs) -> torch.Tensor:
-    ref = _first_tensor(args, kwargs)
-    warnings.warn("Initial-condition residual metric is not implemented for this PDE.", NotImplementedWarning, stacklevel=2)
-    return _nan(ref)
+def ic_residual_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None = None) -> torch.Tensor:
+    metadata = metadata or {}
+    try:
+        return physics_losses(pred, pde_name, metadata)["ic"]
+    except NotImplementedError:
+        warnings.warn(f"No initial-condition residual implemented for '{pde_name}'. Returning nan.", NotImplementedWarning, stacklevel=2)
+        return _nan(pred)
+    except Exception as exc:
+        warnings.warn(f"Could not compute {pde_name} initial-condition residual: {exc}", RuntimeWarning, stacklevel=2)
+        return _nan(pred)
+
+
+def physics_loss_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None = None) -> dict[str, torch.Tensor | str]:
+    metadata = metadata or {}
+    try:
+        losses = physics_losses(pred, pde_name, metadata)
+    except NotImplementedError:
+        warnings.warn(f"No structured physics loss implemented for '{pde_name}'. Returning nan.", NotImplementedWarning, stacklevel=2)
+        nan = _nan(pred)
+        return {"interior": nan, "bc": nan, "ic": nan, "total": nan, "mode": "not_implemented"}
+    except Exception as exc:
+        warnings.warn(f"Could not compute {pde_name} structured physics loss: {exc}", RuntimeWarning, stacklevel=2)
+        nan = _nan(pred)
+        return {"interior": nan, "bc": nan, "ic": nan, "total": nan, "mode": "error"}
+    return {
+        "interior": losses["interior"],
+        "bc": losses["bc"],
+        "ic": losses["ic"],
+        "total": losses["total"],
+        "mode": losses["mode"],
+    }
+
+
+def physics_residual_metrics(pred: torch.Tensor, pde_name: str, metadata: dict | None = None) -> dict[str, torch.Tensor | str]:
+    return physics_loss_metric(pred, pde_name, metadata)
 
 
 @contextmanager

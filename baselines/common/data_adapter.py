@@ -262,7 +262,14 @@ class PDEDataRegistry:
         elif pde_name == "burger":
             x = torch.randn(n, 1, h, w, generator=gen)
             channels = ["u"]
-            meta = {"source": "synthetic", "canonical_layout": "NCTX", "axes": ["time", "x"]}
+            meta = {
+                "source": "synthetic",
+                "canonical_layout": "NCTX",
+                "axes": ["time", "x"],
+                "time_values": [i / max(h - 1, 1) for i in range(h)],
+                "final_time": 1.0,
+                "nu": 0.01,
+            }
         elif pde_name == "reaction_diffusion":
             x = torch.randn(n, 2, 10, h, w, generator=gen)
             channels = ["u", "v"]
@@ -591,7 +598,15 @@ def _load_burger(root: Path, split: str, max_samples: int | None, prefer_test: b
             remaining -= n
             if remaining <= 0:
                 break
-    meta = {"files": [str(p) for p in files], "canonical_layout": "NCTX", "axes": ["time", "x"]}
+    t_steps = parts[0].shape[-2] if parts else 0
+    meta = {
+        "files": [str(p) for p in files],
+        "canonical_layout": "NCTX",
+        "axes": ["time", "x"],
+        "time_values": [i / max(t_steps - 1, 1) for i in range(t_steps)],
+        "final_time": 1.0,
+        "nu": 0.01,
+    }
     if initials:
         meta["initial_1d"] = torch.cat(initials, dim=0)
     return {"full_tensor": torch.cat(parts, dim=0), "channel_names": ["u"], "metadata": meta}
