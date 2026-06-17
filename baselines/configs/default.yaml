@@ -1,0 +1,76 @@
+data_root: /home/tat512/C01Python/PDEdata
+output_dir: outputs/baselines
+
+pdes:
+  - darcy
+  - poisson
+  - helmholtz
+  - nsnonbounded
+  - burger
+  - reaction_diffusion
+  - shallow_water
+reserved_pdes:
+  - heat
+  - wave
+  - advection_diffusion
+
+tasks:
+  - forward
+  - inverse
+  - sparse_solution
+
+baselines:
+  - fno
+  - deeponet
+  - ifno
+  - recfno
+  - senseiver
+  - voronoicnn
+  - pinn_sparse
+  - pc_bnn
+  - pde_opt
+  - var4d
+  - vivid
+
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+
+batch_size: 16
+epochs: 1
+learning_rate: 0.001
+optimizer: adam
+
+sensor_counts: [50, 100, 250, 500, 1000]
+sensor_modes: [random, fixed, grid, time_varying]
+noise_levels: [0.0, 0.01, 0.05, 0.10]
+seeds: [1, 2, 3]
+
+smoke:
+  synthetic_data: true
+  synthetic_resolution: 32
+  sensor_counts: [50]
+  sensor_modes: [random]
+  noise_levels: [0.0]
+  seeds: [1]
+  epochs: 1
+  max_train_samples: 16
+  max_test_samples: 4
+
+method:
+  width: 24
+  modes1: 12
+  modes2: 12
+  layers: 3
+  hidden: 128
+  basis: 64
+  token_dim: 64
+  num_latents: 64
+  heads: 4
+  steps: 2
+  refine_steps: 2
+  lambda_obs: 1.0
+  lambda_pde: 0.01
+  lambda_reg: 0.00001
+
