@@ -1,0 +1,130 @@
+{
+  "args": {
+    "baseline": "fno",
+    "pde": "advection_diffusion",
+    "task": "forward",
+    "data_root": "/home/tat512/C01Python/PDEdata",
+    "config": null,
+    "num_sensors": 8,
+    "sensor_mode": "random",
+    "noise_level": 0.0,
+    "train_size": 1,
+    "test_size": 1,
+    "batch_size": 1,
+    "epochs": 1,
+    "lr": 0.001,
+    "seed": 2,
+    "device": "cpu",
+    "output_dir": "outputs/baselines/real_smoke",
+    "dry_run": false,
+    "synthetic_data": false,
+    "allow_synthetic_fallback": false,
+    "synthetic_resolution": 32,
+    "prefer_test": true,
+    "save_checkpoint": false
+  },
+  "method": {
+    "epochs": 1,
+    "lr": 0.001,
+    "device": "cpu",
+    "max_steps": null
+  },
+  "data_spec": {
+    "pde": "advection_diffusion",
+    "task": "forward",
+    "input_shape": [
+      1,
+      4,
+      128,
+      128
+    ],
+    "target_shape": [
+      1,
+      4,
+      128,
+      128
+    ],
+    "input_channels": 4,
+    "target_channels": 4,
+    "input_numel": 65536,
+    "target_numel": 65536,
+    "branch_numel": 32,
+    "metadata": {
+      "files": [
+        "/home/tat512/C01Python/PDEdata/advection_diffusion/advection_diffusion_test_10000-128-128.h5"
+      ],
+      "canonical_layout": "NCHW",
+      "T": 1.0,
+      "base_seed": 10000000,
+      "boundary_condition": "periodic",
+      "channel_names_input": "[\"u0\"]",
+      "channel_names_model": "[\"u0\", \"b_x\", \"b_y\", \"kappa\", \"uT\", \"b_x\", \"b_y\", \"kappa\"]",
+      "channel_names_output": "[\"uT\"]",
+      "created_at": "2026-06-17T13:08:52.715641+00:00",
+      "dtype": "float32",
+      "equation": "u_t + b_x u_x + b_y u_y = kappa * Delta u on [0,1]^2",
+      "generation_git_commit": "d7f4ae48013c3bc9fa6691514b790791cd8dc4a5",
+      "hdf5_schema": "{\"b_x\": \"[N]\", \"b_y\": \"[N]\", \"input_data\": \"[N,1,H,W] u0\", \"kappa\": \"[N]\", \"output_data\": \"[N,1,H,W] uT\"}",
+      "initial_condition_type": "periodic Gaussian random field",
+      "materialized_constant_fields": false,
+      "n_samples": 10000,
+      "n_time": 11,
+      "no_data_leakage_note": "Train and test samples are generated independently. Each sample uses seed=base_seed+global_sample_id, and train/test base_seed ranges do not overlap.",
+      "parameter_ranges": "{\"b_x\": {\"max\": 1.0, \"min\": -1.0}, \"b_y\": {\"max\": 1.0, \"min\": -1.0}, \"kappa\": {\"max\": 0.005, \"min\": 0.0005}}",
+      "pde_name": "advection_diffusion",
+      "resolution": "128x128",
+      "sample_id_end": 9999,
+      "sample_id_start": 0,
+      "save_trajectory": true,
+      "seed_end": 10009999,
+      "seed_start": 10000000,
+      "shard_id": 0,
+      "split": "test",
+      "time_values": [
+        0.0,
+        0.10000000149011612,
+        0.20000000298023224,
+        0.30000001192092896,
+        0.4000000059604645,
+        0.5,
+        0.6000000238418579,
+        0.699999988079071,
+        0.800000011920929,
+        0.8999999761581421,
+        1.0
+      ],
+      "final_time": 1.0,
+      "bc": "periodic",
+      "time_dependent": true,
+      "supports_trajectory": false,
+      "sensor_mode": "random",
+      "num_sensors": 8,
+      "noise_level": 0.0,
+      "mask_id": "315788470340070e",
+      "input_shape": [
+        1,
+        4,
+        128,
+        128
+      ],
+      "target_shape": [
+        1,
+        4,
+        128,
+        128
+      ],
+      "full_shape": [
+        1,
+        8,
+        128,
+        128
+      ],
+      "task_channel_names": [
+        "uT",
+        "b_x_T",
+        "b_y_T",
+        "kappa_T"
+      ]
+    }
+  }
+}

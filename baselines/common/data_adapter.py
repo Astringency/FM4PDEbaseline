@@ -250,11 +250,50 @@ class PDEDataRegistry:
         pde_name = pde_name.lower()
         gen = torch.Generator().manual_seed(17)
         h = w = resolution
-        if pde_name in {"darcy", "poisson", "helmholtz", "heat", "wave", "advection_diffusion"}:
+        if pde_name in {"darcy", "poisson", "helmholtz"}:
             c = 2
             x = torch.randn(n, c, h, w, generator=gen)
             channels = self.get(pde_name).channel_names
             meta = {"source": "synthetic", "canonical_layout": "NCHW"}
+        elif pde_name == "heat":
+            u0 = torch.randn(n, 1, h, w, generator=gen)
+            uT = torch.randn(n, 1, h, w, generator=gen)
+            alpha = torch.full((n, 1, h, w), 1e-3)
+            x = torch.cat([u0, alpha, uT, alpha], dim=1)
+            channels = self.get(pde_name).channel_names
+            meta = {"source": "synthetic", "canonical_layout": "NCHW", "alpha": torch.full((n,), 1e-3), "final_time": 1.0, "bc": "periodic"}
+        elif pde_name == "wave":
+            u0 = torch.randn(n, 1, h, w, generator=gen)
+            v0 = torch.zeros(n, 1, h, w)
+            uT = torch.randn(n, 1, h, w, generator=gen)
+            vT = torch.randn(n, 1, h, w, generator=gen)
+            x = torch.cat([u0, v0, uT, vT], dim=1)
+            channels = self.get(pde_name).channel_names
+            meta = {"source": "synthetic", "canonical_layout": "NCHW", "fixed_c": 1.0, "final_time": 1.0, "bc": "periodic"}
+        elif pde_name == "advection_diffusion":
+            u0 = torch.randn(n, 1, h, w, generator=gen)
+            uT = torch.randn(n, 1, h, w, generator=gen)
+            bx = torch.full((n, 1, h, w), 0.25)
+            by = torch.full((n, 1, h, w), -0.15)
+            kappa = torch.full((n, 1, h, w), 1e-3)
+            x = torch.cat([u0, bx, by, kappa, uT, bx, by, kappa], dim=1)
+            channels = self.get(pde_name).channel_names
+            meta = {
+                "source": "synthetic",
+                "canonical_layout": "NCHW",
+                "b_x": torch.full((n,), 0.25),
+                "b_y": torch.full((n,), -0.15),
+                "kappa": torch.full((n,), 1e-3),
+                "final_time": 1.0,
+                "bc": "periodic",
+            }
+        elif pde_name in {"steady_heat_conduction", "steady_heat"}:
+            source = torch.randn(n, 1, h, w, generator=gen)
+            u_d = torch.full((n, 1, h, w), 298.0)
+            solution = 298.0 + torch.randn(n, 1, h, w, generator=gen) * 0.01
+            x = torch.cat([source, u_d, solution, u_d], dim=1)
+            channels = self.get(pde_name).channel_names
+            meta = {"source": "synthetic", "canonical_layout": "NCHW", "u_D": torch.full((n,), 298.0)}
         elif pde_name == "nsnonbounded":
             x = torch.randn(n, 1, 11, h, w, generator=gen)
             channels = ["w"]
@@ -383,17 +422,51 @@ class PDEDataRegistry:
                 supports_trajectory=True,
             )
         )
-        for future in ("heat", "wave", "advection_diffusion"):
-            self.register(
-                PDESpec(
-                    future,
-                    ["input", "solution"],
-                    [0],
-                    [1],
-                    _missing_future_loader(future),
-                    notes="Reserved future PDE key. Add a concrete adapter when files are available.",
-                )
+        self.register(
+            PDESpec(
+                "heat",
+                ["u0", "alpha", "uT", "alpha_T"],
+                [0, 1],
+                [2, 3],
+                _load_heat,
+                time_dependent=True,
+                notes="Random/fixed-alpha HDF5 layout materialized as [u0, alpha, uT, alpha].",
             )
+        )
+        self.register(
+            PDESpec(
+                "wave",
+                ["u0", "v0", "uT", "vT"],
+                [0, 1],
+                [2, 3],
+                _load_wave,
+                time_dependent=True,
+                notes="Fixed-c HDF5 layout is [u0, v0, uT, vT].",
+            )
+        )
+        self.register(
+            PDESpec(
+                "advection_diffusion",
+                ["u0", "b_x", "b_y", "kappa", "uT", "b_x_T", "b_y_T", "kappa_T"],
+                [0, 1, 2, 3],
+                [4, 5, 6, 7],
+                _load_advection_diffusion,
+                aliases=("advdiff",),
+                time_dependent=True,
+                notes="HDF5 layout materialized as [u0, b_x, b_y, kappa, uT, b_x, b_y, kappa].",
+            )
+        )
+        self.register(
+            PDESpec(
+                "steady_heat_conduction",
+                ["f", "u_D", "u", "u_D_T"],
+                [0, 1],
+                [2, 3],
+                _load_steady_heat_conduction,
+                aliases=("steady_heat", "nonlinear_heat_conduction"),
+                notes="HDF5 layout materialized as [f, u_D, u, u_D].",
+            )
+        )
 
 
 class PDEBatchDataset(Dataset):
@@ -686,6 +759,156 @@ def _load_shallow_water(root: Path, split: str, max_samples: int | None, prefer_
             "domain_length": 5.0,
         },
     }
+
+
+def _load_heat(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+    files = _candidate_files(
+        root,
+        "heat",
+        split if not prefer_test else "test",
+        ["heat_test*.h5"] if split == "test" or prefer_test else ["heat_10000-128-128_*.h5", "heat_*.h5"],
+    )
+    if not files:
+        raise FileNotFoundError("heat files not found")
+    return _load_future_field_h5(files, max_samples, "heat")
+
+
+def _load_wave(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+    files = _candidate_files(
+        root,
+        "wave",
+        split if not prefer_test else "test",
+        ["wave_test*.h5"] if split == "test" or prefer_test else ["wave_10000-128-128_*.h5", "wave_*.h5"],
+    )
+    if not files:
+        raise FileNotFoundError("wave files not found")
+    return _load_future_field_h5(files, max_samples, "wave")
+
+
+def _load_advection_diffusion(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+    files = _candidate_files(
+        root,
+        "advection_diffusion",
+        split if not prefer_test else "test",
+        ["advection_diffusion_test*.h5"] if split == "test" or prefer_test else ["advection_diffusion_10000-128-128_*.h5", "advection_diffusion_*.h5"],
+    )
+    if not files:
+        raise FileNotFoundError("advection_diffusion files not found")
+    return _load_future_field_h5(files, max_samples, "advection_diffusion")
+
+
+def _load_steady_heat_conduction(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+    train_patterns = ["steady_heat_conduction_10000-128-128_*.h5", "steady_heat_conduction_*.h5"]
+    files = _candidate_files(
+        root,
+        "steady_heat_conduction",
+        split if not prefer_test else "test",
+        ["steady_heat_conduction_test*.h5"] if split == "test" or prefer_test else train_patterns,
+    )
+    if not files and (split == "test" or prefer_test):
+        files = _candidate_files(root, "steady_heat_conduction", "train", train_patterns)
+    if not files:
+        raise FileNotFoundError("steady_heat_conduction files not found")
+    return _load_future_field_h5(files, max_samples, "steady_heat_conduction")
+
+
+def _load_future_field_h5(files: list[Path], max_samples: int | None, pde: str) -> dict[str, Any]:
+    parts: list[torch.Tensor] = []
+    scalar_meta: dict[str, list[torch.Tensor]] = {}
+    meta: dict[str, Any] = {"files": [str(p) for p in files], "canonical_layout": "NCHW"}
+    remaining = max_samples
+    channel_names: list[str]
+    for path in files:
+        try:
+            with h5py.File(path, "r") as f:
+                n_total = int(f["input_data"].shape[0])
+                n = n_total if remaining is None else min(remaining, n_total)
+                inp = _as_float_tensor(f["input_data"][:n])
+                out = _as_float_tensor(f["output_data"][:n])
+                attrs = _h5_attrs_to_python(f)
+                for key, value in attrs.items():
+                    meta.setdefault(key, value)
+                if "t" in f:
+                    meta.setdefault("time_values", np.asarray(f["t"][:], dtype=np.float32).tolist())
+                if "T" in attrs:
+                    meta.setdefault("final_time", float(attrs["T"]))
+                if "boundary_condition" in attrs:
+                    meta.setdefault("bc", str(attrs["boundary_condition"]))
+
+                if pde == "heat":
+                    alpha = _scalar_or_attr_field(f, "alpha", "fixed_alpha", n, inp.shape[-2:], default=1e-3)
+                    parts.append(torch.cat([inp[:, :1], alpha, out[:, :1], alpha.clone()], dim=1))
+                    _append_scalar_meta(scalar_meta, "alpha", alpha)
+                    channel_names = ["u0", "alpha", "uT", "alpha_T"]
+                elif pde == "wave":
+                    parts.append(torch.cat([inp[:, :2], out[:, :2]], dim=1))
+                    if "c" in f:
+                        c = _as_float_tensor(f["c"][:n])
+                        scalar_meta.setdefault("c", []).append(c)
+                    elif "fixed_c" in attrs:
+                        meta.setdefault("fixed_c", float(attrs["fixed_c"]))
+                    channel_names = ["u0", "v0", "uT", "vT"]
+                elif pde == "advection_diffusion":
+                    bx = _scalar_or_attr_field(f, "b_x", "b_x", n, inp.shape[-2:], default=0.0)
+                    by = _scalar_or_attr_field(f, "b_y", "b_y", n, inp.shape[-2:], default=0.0)
+                    kappa = _scalar_or_attr_field(f, "kappa", "kappa", n, inp.shape[-2:], default=1e-3)
+                    parts.append(torch.cat([inp[:, :1], bx, by, kappa, out[:, :1], bx.clone(), by.clone(), kappa.clone()], dim=1))
+                    _append_scalar_meta(scalar_meta, "b_x", bx)
+                    _append_scalar_meta(scalar_meta, "b_y", by)
+                    _append_scalar_meta(scalar_meta, "kappa", kappa)
+                    channel_names = ["u0", "b_x", "b_y", "kappa", "uT", "b_x_T", "b_y_T", "kappa_T"]
+                elif pde == "steady_heat_conduction":
+                    u_d = _scalar_or_attr_field(f, "u_D", "u_D", n, inp.shape[-2:], default=298.0)
+                    parts.append(torch.cat([inp[:, :1], u_d, out[:, :1], u_d.clone()], dim=1))
+                    _append_scalar_meta(scalar_meta, "u_D", u_d)
+                    channel_names = ["f", "u_D", "u", "u_D_T"]
+                else:
+                    raise ValueError(f"Unsupported future PDE '{pde}'")
+        except OSError as exc:
+            raise OSError(f"Could not read {pde} HDF5 file {path}: {exc}") from exc
+
+        if remaining is not None:
+            remaining -= n
+            if remaining <= 0:
+                break
+
+    for key, values in scalar_meta.items():
+        meta[key] = torch.cat(values, dim=0)
+    return {"full_tensor": torch.cat(parts, dim=0), "channel_names": channel_names, "metadata": meta}
+
+
+def _scalar_or_attr_field(
+    f: h5py.File,
+    dataset_key: str,
+    attr_key: str,
+    n: int,
+    spatial_shape: tuple[int, int],
+    default: float,
+) -> torch.Tensor:
+    if dataset_key in f:
+        scalar = _as_float_tensor(f[dataset_key][:n])
+    elif attr_key in f.attrs:
+        scalar = torch.full((n,), float(f.attrs[attr_key]), dtype=torch.float32)
+    else:
+        scalar = torch.full((n,), float(default), dtype=torch.float32)
+    return scalar.reshape(n, 1, 1, 1).expand(n, 1, spatial_shape[0], spatial_shape[1]).clone()
+
+
+def _append_scalar_meta(target: dict[str, list[torch.Tensor]], key: str, field: torch.Tensor) -> None:
+    scalar = field[:, 0, 0, 0].detach().clone()
+    target.setdefault(key, []).append(scalar)
+
+
+def _h5_attrs_to_python(f: h5py.File) -> dict[str, Any]:
+    attrs: dict[str, Any] = {}
+    for key, value in f.attrs.items():
+        if isinstance(value, np.generic):
+            attrs[key] = value.item()
+        elif isinstance(value, bytes):
+            attrs[key] = value.decode("utf-8")
+        else:
+            attrs[key] = value
+    return attrs
 
 
 def _missing_future_loader(name: str) -> Callable[..., dict[str, Any]]:

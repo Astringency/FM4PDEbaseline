@@ -13,6 +13,7 @@ reserved_pdes:
   - heat
   - wave
   - advection_diffusion
+  - steady_heat_conduction
 
 tasks:
   - forward

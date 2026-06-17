@@ -55,4 +55,39 @@ def tiny_data_root(tmp_path: Path) -> Path:
             for key in ("h", "hu", "hv"):
                 g[key] = rng.normal(size=(11, s, s, 1)).astype("float32")
 
+    heat = mkdir("heat")
+    with h5py.File(heat / "heat_10000-128-128_1.h5", "w") as f:
+        f["input_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
+        f["output_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
+        f["alpha"] = np.full(n, 1e-3, dtype="float32")
+        f["t"] = np.linspace(0, 1, 3).astype("float32")
+        f.attrs["T"] = 1.0
+        f.attrs["boundary_condition"] = "periodic"
+
+    wave = mkdir("wave")
+    with h5py.File(wave / "wave_10000-128-128_1.h5", "w") as f:
+        f["input_data"] = rng.normal(size=(n, 2, s, s)).astype("float32")
+        f["output_data"] = rng.normal(size=(n, 2, s, s)).astype("float32")
+        f["t"] = np.linspace(0, 1, 3).astype("float32")
+        f.attrs["T"] = 1.0
+        f.attrs["fixed_c"] = 1.0
+        f.attrs["boundary_condition"] = "periodic"
+
+    adv = mkdir("advection_diffusion")
+    with h5py.File(adv / "advection_diffusion_10000-128-128_1.h5", "w") as f:
+        f["input_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
+        f["output_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
+        f["b_x"] = np.full(n, 0.1, dtype="float32")
+        f["b_y"] = np.full(n, -0.2, dtype="float32")
+        f["kappa"] = np.full(n, 1e-3, dtype="float32")
+        f["t"] = np.linspace(0, 1, 3).astype("float32")
+        f.attrs["T"] = 1.0
+        f.attrs["boundary_condition"] = "periodic"
+
+    shc = mkdir("steady_heat_conduction")
+    with h5py.File(shc / "steady_heat_conduction_10000-128-128_1.h5", "w") as f:
+        f["input_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
+        f["output_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
+        f["u_D"] = np.full(n, 298.0, dtype="float32")
+
     return tmp_path

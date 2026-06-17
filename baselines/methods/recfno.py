@@ -5,7 +5,7 @@ import torch
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .shared import FNO2dNet, grid_channels
+from .shared import OfficialRecFNOVoronoiFNO2dNet, grid_channels
 
 
 class RecFNOBaseline(BaselineModel):
@@ -18,14 +18,16 @@ class RecFNOBaseline(BaselineModel):
         # implemented here; MLP embedding is reserved for future extension.
         in_channels = target_channels + target_channels + 2
         self.embedding = str(self.config.get("embedding", "mask"))
-        self.net = FNO2dNet(
+        modes1, modes2 = _clamped_modes(self.config, data_spec)
+        self.net = OfficialRecFNOVoronoiFNO2dNet(
             in_channels=in_channels,
             out_channels=target_channels,
             width=int(self.config.get("width", 24)),
-            modes1=int(self.config.get("modes1", 12)),
-            modes2=int(self.config.get("modes2", 12)),
+            modes1=modes1,
+            modes2=modes2,
             add_coords=False,
         )
+        self.official_backend = "recfno"
         return self
 
     def fit(self, train_loader, val_loader=None):
@@ -44,3 +46,9 @@ class RecFNOBaseline(BaselineModel):
         x = torch.cat([base, mask_grid, grid_channels(base)], dim=1)
         return self.net(x)
 
+
+def _clamped_modes(config: dict, data_spec: dict) -> tuple[int, int]:
+    shape = tuple(data_spec.get("target_shape", ()))
+    h = int(shape[-2]) if len(shape) >= 2 else 32
+    w = int(shape[-1]) if len(shape) >= 1 else h
+    return max(1, min(int(config.get("modes1", 12)), h)), max(1, min(int(config.get("modes2", 12)), w // 2 + 1))

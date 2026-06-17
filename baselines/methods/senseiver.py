@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import warnings
+
 import torch
 import torch.nn as nn
 
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
+from .official import OfficialImportError, get_senseiver_classes
 from .shared import MLP
 
 
@@ -20,6 +23,38 @@ class SenseiverBaseline(BaselineModel):
         token_dim = int(self.config.get("token_dim", 64))
         num_latents = int(self.config.get("num_latents", 64))
         heads = int(self.config.get("heads", 4))
+        self.official_encoder = None
+        self.official_decoder = None
+        backend = str(self.config.get("official_backend", "auto")).lower()
+        if backend in {"auto", "senseiver", "official"}:
+            try:
+                encoder_cls, decoder_cls = get_senseiver_classes()
+                self.official_encoder = encoder_cls(
+                    input_ch=coord_dim + self.out_channels,
+                    preproc_ch=token_dim,
+                    num_latents=num_latents,
+                    num_latent_channels=token_dim,
+                    num_layers=int(self.config.get("num_layers", 1)),
+                    num_cross_attention_heads=heads,
+                    num_self_attention_heads=heads,
+                    num_self_attention_layers_per_block=int(self.config.get("self_attention_layers", 1)),
+                    dropout=float(self.config.get("dropout", 0.0)),
+                )
+                self.official_decoder = decoder_cls(
+                    ff_channels=coord_dim,
+                    preproc_ch=token_dim,
+                    num_latent_channels=token_dim,
+                    latent_size=1,
+                    num_output_channels=self.out_channels,
+                    num_cross_attention_heads=heads,
+                    dropout=float(self.config.get("dropout", 0.0)),
+                )
+                self.official_backend = "senseiver"
+                return self
+            except OfficialImportError as exc:
+                if backend == "senseiver":
+                    warnings.warn(f"Senseiver official modules unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
+                self.official_backend = "local"
         self.sensor_proj = MLP(coord_dim + self.out_channels, token_dim, hidden=token_dim, depth=2)
         self.query_proj = MLP(coord_dim, token_dim, hidden=token_dim, depth=2)
         self.latents = nn.Parameter(torch.randn(num_latents, token_dim) * 0.02)
@@ -44,14 +79,18 @@ class SenseiverBaseline(BaselineModel):
             if values.shape[-1] != self.out_channels:
                 values = values[..., : self.out_channels]
         b = values.shape[0]
+        query = batch.coords.to(batch.input_fields.device, batch.input_fields.dtype)
+        if self.official_encoder is not None and self.official_decoder is not None:
+            latents = self.official_encoder(torch.cat([coords, values], dim=-1))
+            decoded = self.official_decoder(latents, query)
+            spatial = tuple(self.out_shape[1:])
+            return decoded.permute(0, 2, 1).reshape(b, self.out_channels, *spatial)
         tokens = self.sensor_proj(torch.cat([coords, values], dim=-1))
         latents = self.latents.unsqueeze(0).repeat(b, 1, 1)
         latents = latents + self.enc_attn(latents, tokens, tokens)[0]
         latents = latents + self.self_attn(latents, latents, latents)[0]
-        query = batch.coords.to(batch.input_fields.device, batch.input_fields.dtype)
         q = self.query_proj(query)
         decoded = q + self.dec_attn(q, latents, latents)[0]
         values = self.out(decoded)
         spatial = tuple(self.out_shape[1:])
         return values.permute(0, 2, 1).reshape(b, self.out_channels, *spatial)
-

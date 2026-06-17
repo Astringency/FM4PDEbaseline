@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="outputs/baselines")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--synthetic-data", action="store_true", help="Use deterministic synthetic data for smoke tests.")
+    parser.add_argument("--allow-synthetic-fallback", action="store_true", help="Fall back to synthetic data when requested real files are missing.")
     parser.add_argument("--synthetic-resolution", type=int, default=32)
     parser.add_argument("--prefer-test", action="store_true", help="Load small test files instead of train files when available.")
     parser.add_argument("--save-checkpoint", action="store_true")
@@ -144,7 +145,7 @@ def main() -> None:
             noise_level=args.noise_level,
             seed=args.seed,
             prefer_test=args.prefer_test or args.dry_run,
-            synthetic_if_missing=True,
+            synthetic_if_missing=args.allow_synthetic_fallback,
             synthetic_resolution=args.synthetic_resolution,
         )
         batch_all = dataset.batch

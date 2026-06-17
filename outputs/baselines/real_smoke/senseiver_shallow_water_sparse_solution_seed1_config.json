@@ -1,0 +1,92 @@
+{
+  "args": {
+    "baseline": "senseiver",
+    "pde": "shallow_water",
+    "task": "sparse_solution",
+    "data_root": "/home/tat512/C01Python/PDEdata",
+    "config": null,
+    "num_sensors": 8,
+    "sensor_mode": "random",
+    "noise_level": 0.0,
+    "train_size": 1,
+    "test_size": 1,
+    "batch_size": 1,
+    "epochs": 1,
+    "lr": 0.001,
+    "seed": 1,
+    "device": "cpu",
+    "output_dir": "outputs/baselines/real_smoke",
+    "dry_run": false,
+    "synthetic_data": false,
+    "allow_synthetic_fallback": false,
+    "synthetic_resolution": 32,
+    "prefer_test": true,
+    "save_checkpoint": false
+  },
+  "method": {
+    "epochs": 1,
+    "lr": 0.001,
+    "device": "cpu",
+    "max_steps": null
+  },
+  "data_spec": {
+    "pde": "shallow_water",
+    "task": "sparse_solution",
+    "input_shape": [
+      1,
+      3,
+      128,
+      128
+    ],
+    "target_shape": [
+      1,
+      3,
+      128,
+      128
+    ],
+    "input_channels": 3,
+    "target_channels": 3,
+    "input_numel": 49152,
+    "target_numel": 49152,
+    "branch_numel": 24,
+    "metadata": {
+      "files": [
+        "/home/tat512/C01Python/PDEdata/test1125/swe_test_1000-128-128-10.h5"
+      ],
+      "canonical_layout": "NCTHW",
+      "final_time": 1.0,
+      "g": 1.0,
+      "domain_length": 5.0,
+      "time_dependent": true,
+      "supports_trajectory": true,
+      "sensor_mode": "random",
+      "num_sensors": 8,
+      "noise_level": 0.0,
+      "mask_id": "e0dd41479a54fef9",
+      "input_shape": [
+        1,
+        3,
+        128,
+        128
+      ],
+      "target_shape": [
+        1,
+        3,
+        128,
+        128
+      ],
+      "full_shape": [
+        1,
+        3,
+        11,
+        128,
+        128
+      ],
+      "task_channel_names": [
+        "hT",
+        "huT",
+        "hvT"
+      ]
+    }
+  }
+}

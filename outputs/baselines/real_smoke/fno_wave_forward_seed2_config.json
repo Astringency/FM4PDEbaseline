@@ -1,0 +1,134 @@
+{
+  "args": {
+    "baseline": "fno",
+    "pde": "wave",
+    "task": "forward",
+    "data_root": "/home/tat512/C01Python/PDEdata",
+    "config": null,
+    "num_sensors": 8,
+    "sensor_mode": "random",
+    "noise_level": 0.0,
+    "train_size": 1,
+    "test_size": 1,
+    "batch_size": 1,
+    "epochs": 1,
+    "lr": 0.001,
+    "seed": 2,
+    "device": "cpu",
+    "output_dir": "outputs/baselines/real_smoke",
+    "dry_run": false,
+    "synthetic_data": false,
+    "allow_synthetic_fallback": false,
+    "synthetic_resolution": 32,
+    "prefer_test": true,
+    "save_checkpoint": false
+  },
+  "method": {
+    "epochs": 1,
+    "lr": 0.001,
+    "device": "cpu",
+    "max_steps": null
+  },
+  "data_spec": {
+    "pde": "wave",
+    "task": "forward",
+    "input_shape": [
+      1,
+      2,
+      128,
+      128
+    ],
+    "target_shape": [
+      1,
+      2,
+      128,
+      128
+    ],
+    "input_channels": 2,
+    "target_channels": 2,
+    "input_numel": 32768,
+    "target_numel": 32768,
+    "branch_numel": 16,
+    "metadata": {
+      "files": [
+        "/home/tat512/C01Python/PDEdata/wave/wave_test_10000-128-128.h5"
+      ],
+      "canonical_layout": "NCHW",
+      "T": 1.0,
+      "base_seed": 10000000,
+      "boundary_condition": "periodic",
+      "c_mode": "fixed",
+      "c_random": false,
+      "channel_names_input": "[\"u0\", \"v0\"]",
+      "channel_names_model_fixed_c": "[\"u0\", \"v0\", \"uT\", \"vT\"]",
+      "channel_names_model_random_c": "[\"u0\", \"v0\", \"c\", \"uT\", \"vT\", \"c\"]",
+      "channel_names_output": "[\"uT\", \"vT\"]",
+      "created_at": "2026-06-17T12:45:36.848676+00:00",
+      "dtype": "float32",
+      "equation": "u_tt = c(x,y)^2 * Delta u on [0,1]^2",
+      "fixed_c": 1.0,
+      "generation_git_commit": "b627697118922fe3eec10dae586de32b980f00d7",
+      "hdf5_schema": "{\"c\": \"[N] only when c_mode=random\", \"fixed_c\": \"root attr only when c_mode=fixed\", \"input_data\": \"[N,2,H,W] u0,v0\", \"output_data\": \"[N,2,H,W] uT,vT\"}",
+      "initial_condition_type": "periodic Gaussian random field",
+      "initial_velocity": "zero",
+      "materialized_constant_fields": false,
+      "n_samples": 10000,
+      "n_time": 11,
+      "no_data_leakage_note": "Train and test samples are generated independently. Each sample uses seed=base_seed+global_sample_id, and train/test base_seed ranges do not overlap.",
+      "parameter_ranges": "{\"c\": {\"fixed\": 1.0}}",
+      "pde_name": "wave",
+      "resolution": "128x128",
+      "sample_id_end": 9999,
+      "sample_id_start": 0,
+      "save_trajectory": true,
+      "seed_end": 10009999,
+      "seed_start": 10000000,
+      "shard_id": 0,
+      "split": "test",
+      "variable_c": false,
+      "time_values": [
+        0.0,
+        0.10000000149011612,
+        0.20000000298023224,
+        0.30000001192092896,
+        0.4000000059604645,
+        0.5,
+        0.6000000238418579,
+        0.699999988079071,
+        0.800000011920929,
+        0.8999999761581421,
+        1.0
+      ],
+      "final_time": 1.0,
+      "bc": "periodic",
+      "time_dependent": true,
+      "supports_trajectory": false,
+      "sensor_mode": "random",
+      "num_sensors": 8,
+      "noise_level": 0.0,
+      "mask_id": "0a39be885e659d72",
+      "input_shape": [
+        1,
+        2,
+        128,
+        128
+      ],
+      "target_shape": [
+        1,
+        2,
+        128,
+        128
+      ],
+      "full_shape": [
+        1,
+        4,
+        128,
+        128
+      ],
+      "task_channel_names": [
+        "uT",
+        "vT"
+      ]
+    }
+  }
+}

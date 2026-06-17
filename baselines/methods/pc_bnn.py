@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import time
+import warnings
 
 import torch
+import torch.nn as nn
 
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel
+from .official import OfficialImportError, get_pc_bnn_net_class
 from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, _single_meta, observation_loss_from_batch
 from .shared import NeuralField
 
@@ -22,10 +25,21 @@ class PCBNNBaseline(BaselineModel):
         self.target_channels = int(data_spec["target_channels"])
         self.hidden = int(self.config.get("hidden", 64))
         self.depth = int(self.config.get("depth", 4))
+        self.official_net_cls = None
+        self.official_backend = "local"
+        backend = str(self.config.get("official_backend", "auto")).lower()
+        if self.coord_dim == 2 and self.target_channels == 3 and backend in {"auto", "pc_bnn", "official"}:
+            try:
+                self.official_net_cls = get_pc_bnn_net_class()
+                self.official_backend = "pc_bnn"
+            except OfficialImportError as exc:
+                if backend == "pc_bnn":
+                    warnings.warn(f"PC-BNN official Net unavailable, using local particle fallback: {exc}", RuntimeWarning, stacklevel=2)
+                self.official_backend = "local"
         return self
 
     def parameter_count(self) -> int:
-        proto = NeuralField(self.coord_dim, self.target_channels, hidden=self.hidden, depth=self.depth)
+        proto = self._new_particle(self.coord_dim, self.target_channels)
         return int(self.particles * sum(p.numel() for p in proto.parameters() if p.requires_grad))
 
     def fit(self, train_loader, val_loader=None):
@@ -44,7 +58,7 @@ class PCBNNBaseline(BaselineModel):
             coords = batch.coords[item].to(batch.target_fields.device, batch.target_fields.dtype)
             target = batch.target_fields[item : item + 1]
             particles = [
-                NeuralField(coords.shape[-1], target.shape[1], hidden=hidden, depth=depth).to(target.device)
+                self._new_particle(coords.shape[-1], target.shape[1]).to(target.device)
                 for _ in range(self.particles)
             ]
             for particle_id, particle in enumerate(particles):
@@ -85,6 +99,11 @@ class PCBNNBaseline(BaselineModel):
         batch.metadata["predictive_std"] = std
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         return mean
+
+    def _new_particle(self, coord_dim: int, out_channels: int) -> nn.Module:
+        if self.official_net_cls is not None and coord_dim == 2 and out_channels == 3:
+            return self.official_net_cls(coord_dim, self.hidden)
+        return NeuralField(coord_dim, out_channels, hidden=self.hidden, depth=self.depth)
 
 
 def _flatten_params(model: torch.nn.Module) -> torch.Tensor:

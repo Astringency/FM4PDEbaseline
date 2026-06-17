@@ -61,7 +61,10 @@ Canonical layouts:
 | `burger` | `input` 1D plus `output` `[T,X]` | repeated `u0 -> u(t,x)` | `u(t,x) -> u0` |
 | `reaction_diffusion` | `[u,v]` trajectory | `[u_t0,v_t0] -> [u_T,v_T]` | final -> initial |
 | `shallow_water` | conservative `[h,hu,hv]` trajectory | initial -> final | final -> initial |
-| `heat`, `wave`, `advection_diffusion` | reserved | add adapter when files exist | add adapter when files exist |
+| `heat` | `[u0,alpha,uT,alpha]` synthetic/future layout | `[u0,alpha] -> [uT,alpha]` | add concrete file adapter when files exist |
+| `wave` | `[u0,v0,uT,vT]` synthetic/future layout | `[u0,v0] -> [uT,vT]` | add concrete file adapter when files exist |
+| `advection_diffusion` | `[u0,b_x,b_y,kappa,uT,b_x,b_y,kappa]` synthetic/future layout | params + initial -> final + params | add concrete file adapter when files exist |
+| `steady_heat_conduction` | `[f,u_D,u,u_D]` synthetic/future layout | `[f,u_D] -> [u,u_D]` | add concrete file adapter when files exist |
 
 ## Tasks
 
@@ -91,6 +94,15 @@ All sparse tasks use `baselines/common/sensors.py` to create reusable masks, obs
 
 Detailed paper/code sources are in `baselines/BASELINE_SOURCES.md`.
 
+Official implementation reuse:
+
+- `fno` first tries the vendored `offical/neuraloperator` FNO. If optional dependencies such as `tensorly` are unavailable, it falls back to the vendored RecFNO `VoronoiFNO2d` adapter, and only then to the local compact FNO.
+- `recfno` uses the vendored `offical/RecFNO/model/fno.py::VoronoiFNO2d` as its network core; the local code only builds the sparse mask/Voronoi input tensor expected by the current data adapter.
+- `voronoicnn` uses the vendored RecFNO `UNet` on normal image resolutions; tiny smoke-test grids use the local compact CNN because the official UNet downsamples too deeply for 8x8 inputs.
+- `deeponet` and `pinn_sparse` prefer DeepXDE PyTorch `DeepONetCartesianProd`/`FNN` when DeepXDE optional dependencies are installed. In the default lightweight test environment, they fall back to the local API-compatible networks.
+- `senseiver` and `pc_bnn` prefer their vendored official modules when their optional dependencies and problem-specific channel assumptions are satisfied. Otherwise they keep the local generic Perceiver/SVGD adapters.
+- `ifno`, `pde_opt`, `var4d`, and `vivid` remain API-compatible adaptations because the vendored official scripts are tied to command-line globals, fixed datasets, or external checkpoint/data layouts rather than importable model components.
+
 ## Physics Loss Status
 
 `baselines/common/physics.py` exposes structured physics losses:
@@ -117,12 +129,16 @@ Implemented equations and condition terms:
 - Navier-Stokes nonbounded: periodic vorticity transport `omega_t + u dot grad omega - nu Delta omega - forcing`, Fourier streamfunction velocity recovery, periodic x/y boundary loss, IC loss against `omega0`.
 - Reaction-Diffusion: FitzHugh-Nagumo `[u,v]` residual on `[-1,1]^2`, homogeneous Neumann boundary loss, IC loss against the segment input state.
 - Shallow Water: conservative `[h,hu,hv]` mass and momentum residuals on `[-2.5,2.5]^2`, zero-order Neumann boundary loss, IC loss against the input state.
+- Heat: `u_t - alpha Delta u`, periodic boundary loss by default with homogeneous Neumann available through metadata `bc="neumann"`, IC loss against `u0`.
+- Wave: first-order system residual `[u_t-v, v_t-c^2 Delta u]`, periodic boundary loss by default, IC loss against `[u0,v0]`.
+- Advection-Diffusion: `u_t + b_x u_x + b_y u_y - kappa Delta u`, periodic boundary loss and IC loss against `u0`.
+- Steady Heat Conduction: nonlinear residual `-div(lambda(u) grad u)-f` with `lambda(u)=1+0.05(u-298)`, bottom Dirichlet `u_D` plus zero-Neumann top/left/right boundary loss.
 
 Time-dependent residuals use `mode="full_trajectory"` when `pred` is a trajectory tensor such as `[N,C,T,H,W]`. If a task only predicts the final state, the code builds a two-frame segment from the input/background state and the prediction and returns `mode="two_level"`. This is useful for optimization and diagnostics, but it is not equivalent to a full multi-step dynamics residual.
 
 PINN-Sparse, PC-BNN, PDE-Opt, 4D-Var, and VIVID use structured physics loss by default with `physics_loss_mode: "total"`. Supported weights are `lambda_int` or backward-compatible `lambda_pde`, plus `lambda_bc` and `lambda_ic`. If only `lambda_pde` is present, all three physics terms use that same scale.
 
-For future PDEs (`heat`, `wave`, `advection_diffusion`) or missing metadata, residual calls return `nan` with an explicit warning instead of silently computing an invalid quantity.
+For unknown PDEs or genuinely missing source/solution metadata, residual calls return `nan` through metric wrappers with an explicit warning instead of silently computing an invalid quantity.
 
 ## Running Smoke Tests
 

@@ -33,6 +33,19 @@ def physics_losses(pred: torch.Tensor, pde_name: str, metadata: dict | None = No
         losses = _reaction_diffusion_losses(pred, metadata, reduction=reduction)
     elif pde in {"shallow_water", "swe"}:
         losses = _shallow_water_losses(pred, metadata, reduction=reduction)
+    elif pde == "heat":
+        losses = _heat_losses(pred, metadata, reduction=reduction)
+    elif pde in {"wave", "wave_equation"}:
+        losses = _wave_losses(pred, metadata, reduction=reduction)
+    elif pde in {"advection_diffusion", "advection-diffusion", "advdiff"}:
+        losses = _advection_diffusion_losses(pred, metadata, reduction=reduction)
+    elif pde in {"steady_heat_conduction", "nonlinear_heat_conduction", "steady_heat"}:
+        losses = _steady_heat_conduction_losses(
+            pred,
+            metadata,
+            inverse=task in {"inverse", "sparse_inverse"},
+            reduction=reduction,
+        )
     else:
         raise NotImplementedError(f"No PDE residual registered for {pde_name}")
 
@@ -157,6 +170,139 @@ def shallow_water_residual(q: torch.Tensor, metadata: dict | None = None) -> tor
     res_hu = hu_t + central_diff(flux_x_hu, dim=-1, spacing=dx, boundary="neumann") + central_diff(flux_y_hu, dim=-2, spacing=dx, boundary="neumann")
     res_hv = hv_t + central_diff(flux_x_hv, dim=-1, spacing=dx, boundary="neumann") + central_diff(flux_y_hv, dim=-2, spacing=dx, boundary="neumann")
     return torch.stack([res_h, res_hu, res_hv], dim=1)
+
+
+def heat_residual(
+    u: torch.Tensor,
+    alpha: torch.Tensor | float | None = None,
+    metadata: dict | None = None,
+    pred: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # u: [B,1,T,H,W], default periodic heat equation u_t = alpha Delta u.
+    metadata = metadata or {}
+    alpha_field = _parameter_field(
+        metadata,
+        u[:, :1, 0],
+        ("alpha", "fixed_alpha", "diffusivity"),
+        default=1e-3,
+        input_channel=1,
+        input_min_channels=2,
+        full_channel=1,
+        full_min_channels=3,
+        pred_channel=1,
+        pred_min_channels=2,
+        pred=pred,
+        value=alpha,
+    )
+    final_time = float(metadata.get("final_time", metadata.get("T", 1.0)))
+    dt = _time_step(u.shape[2], final_time, metadata)
+    boundary = _boundary_mode(metadata, default="periodic")
+    dx = _spatial_step(u, metadata, boundary=boundary, default_domain=1.0)
+    u_t = central_diff(u[:, :1], dim=2, spacing=dt, boundary="replicate")
+    lap = _trajectory_laplacian(u[:, :1], spacing=dx, boundary=boundary)
+    return u_t - alpha_field.unsqueeze(2) * lap
+
+
+def wave_residual(
+    q: torch.Tensor,
+    wave_speed: torch.Tensor | float | None = None,
+    metadata: dict | None = None,
+    pred: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # q: [B,2,T,H,W] with channels [u, v=u_t].
+    metadata = metadata or {}
+    c_field = _parameter_field(
+        metadata,
+        q[:, :1, 0],
+        ("c", "fixed_c", "wave_speed"),
+        default=1.0,
+        input_channel=2,
+        input_min_channels=3,
+        full_channel=2,
+        full_min_channels=5,
+        pred_channel=2,
+        pred_min_channels=3,
+        pred=pred,
+        value=wave_speed,
+    )
+    final_time = float(metadata.get("final_time", metadata.get("T", 1.0)))
+    dt = _time_step(q.shape[2], final_time, metadata)
+    boundary = _boundary_mode(metadata, default="periodic")
+    dx = _spatial_step(q, metadata, boundary=boundary, default_domain=1.0)
+    u = q[:, :1]
+    v = q[:, 1:2]
+    u_t = central_diff(u, dim=2, spacing=dt, boundary="replicate")
+    v_t = central_diff(v, dim=2, spacing=dt, boundary="replicate")
+    lap_u = _trajectory_laplacian(u, spacing=dx, boundary=boundary)
+    return torch.cat([u_t - v, v_t - c_field.square().unsqueeze(2) * lap_u], dim=1)
+
+
+def advection_diffusion_residual(u: torch.Tensor, metadata: dict | None = None, pred: torch.Tensor | None = None) -> torch.Tensor:
+    # u: [B,1,T,H,W], periodic advection-diffusion equation.
+    metadata = metadata or {}
+    ref = u[:, :1, 0]
+    bx = _parameter_field(
+        metadata,
+        ref,
+        ("b_x", "bx", "velocity_x"),
+        default=0.0,
+        input_channel=1,
+        input_min_channels=4,
+        full_channel=1,
+        full_min_channels=5,
+        pred_channel=1,
+        pred_min_channels=4,
+        pred=pred,
+    )
+    by = _parameter_field(
+        metadata,
+        ref,
+        ("b_y", "by", "velocity_y"),
+        default=0.0,
+        input_channel=2,
+        input_min_channels=4,
+        full_channel=2,
+        full_min_channels=5,
+        pred_channel=2,
+        pred_min_channels=4,
+        pred=pred,
+    )
+    kappa = _parameter_field(
+        metadata,
+        ref,
+        ("kappa", "diffusivity"),
+        default=1e-3,
+        input_channel=3,
+        input_min_channels=4,
+        full_channel=3,
+        full_min_channels=5,
+        pred_channel=3,
+        pred_min_channels=4,
+        pred=pred,
+    )
+    final_time = float(metadata.get("final_time", metadata.get("T", 1.0)))
+    dt = _time_step(u.shape[2], final_time, metadata)
+    boundary = _boundary_mode(metadata, default="periodic")
+    dx = _spatial_step(u, metadata, boundary=boundary, default_domain=1.0)
+    field = u[:, :1]
+    u_t = central_diff(field, dim=2, spacing=dt, boundary="replicate")
+    u_x = central_diff(field, dim=-1, spacing=dx, boundary=boundary)
+    u_y = central_diff(field, dim=-2, spacing=dx, boundary=boundary)
+    lap_u = _trajectory_laplacian(field, spacing=dx, boundary=boundary)
+    return u_t + bx.unsqueeze(2) * u_x + by.unsqueeze(2) * u_y - kappa.unsqueeze(2) * lap_u
+
+
+def steady_heat_conduction_residual(source: torch.Tensor, solution: torch.Tensor, metadata: dict | None = None) -> torch.Tensor:
+    # -div(lambda(u) grad u) = f, lambda(u)=1+0.05*(u-298).
+    metadata = metadata or {}
+    h = _spatial_step(solution, metadata, boundary="mixed", default_domain=1.0)
+    conductivity = (1.0 + 0.05 * (solution[:, :1] - 298.0)).clamp_min(float(metadata.get("lambda_min", 0.1)))
+    grad_x = central_diff(solution[:, :1], dim=-1, spacing=h, boundary="neumann")
+    grad_y = central_diff(solution[:, :1], dim=-2, spacing=h, boundary="neumann")
+    flux_x = conductivity * grad_x
+    flux_y = conductivity * grad_y
+    div = central_diff(flux_x, dim=-1, spacing=h, boundary="neumann") + central_diff(flux_y, dim=-2, spacing=h, boundary="neumann")
+    return interior_slice_2d(-div - source[:, :1])
 
 
 def interior_slice_2d(x: torch.Tensor) -> torch.Tensor:
@@ -366,6 +512,62 @@ def _shallow_water_losses(pred: torch.Tensor, metadata: dict, reduction: str) ->
     return _loss_dict(pred, residual, bc, ic, mode, reduction)
 
 
+def _heat_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
+    trajectory, mode = _as_heat_trajectory(pred, metadata)
+    residual = heat_residual(trajectory, metadata=metadata, pred=pred)
+    boundary = _boundary_mode(metadata, default="periodic")
+    dx = _spatial_step(trajectory, metadata, boundary=boundary, default_domain=1.0)
+    bc = _trajectory_bc_loss(trajectory, boundary, dx, reduction)
+    initial = _initial_channels_from_metadata(metadata, pred, channels=1, full_channel=0, input_channel=0)
+    ic = _mean_square(trajectory[:, :1, 0] - initial[:, :1], reduction)
+    return _loss_dict(pred, residual, bc, ic, mode, reduction)
+
+
+def _wave_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
+    trajectory, mode = _as_wave_trajectory(pred, metadata)
+    residual = wave_residual(trajectory, metadata=metadata, pred=pred)
+    boundary = _boundary_mode(metadata, default="periodic")
+    dx = _spatial_step(trajectory, metadata, boundary=boundary, default_domain=1.0)
+    bc = _trajectory_bc_loss(trajectory, boundary, dx, reduction)
+    initial = _initial_channels_from_metadata(metadata, pred, channels=2, full_channel=0, input_channel=0)
+    ic = _mean_square(trajectory[:, :2, 0] - initial[:, :2], reduction)
+    return _loss_dict(pred, residual, bc, ic, mode, reduction)
+
+
+def _advection_diffusion_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
+    trajectory, mode = _as_advection_diffusion_trajectory(pred, metadata)
+    residual = advection_diffusion_residual(trajectory, metadata, pred=pred)
+    boundary = _boundary_mode(metadata, default="periodic")
+    dx = _spatial_step(trajectory, metadata, boundary=boundary, default_domain=1.0)
+    bc = _trajectory_bc_loss(trajectory, boundary, dx, reduction)
+    initial = _initial_channels_from_metadata(metadata, pred, channels=1, full_channel=0, input_channel=0)
+    ic = _mean_square(trajectory[:, :1, 0] - initial[:, :1], reduction)
+    return _loss_dict(pred, residual, bc, ic, mode, reduction)
+
+
+def _steady_heat_conduction_losses(pred: torch.Tensor, metadata: dict, inverse: bool, reduction: str) -> dict[str, Any]:
+    if inverse:
+        source = pred[:, :1]
+        solution = _solution_channels_from_metadata(metadata, pred, channels=1, full_channel=2, input_channel=0)
+    else:
+        source = _source_channels_from_metadata(metadata, pred, channels=1, full_channel=0, input_channel=0)
+        solution = pred[:, :1]
+    u_d = _parameter_field(
+        metadata,
+        solution[:, :1],
+        ("u_D", "u_d", "dirichlet_temperature", "sink_temperature"),
+        default=298.0,
+        input_channel=1,
+        full_channel=1 if not inverse else 3,
+        pred_channel=1,
+        pred=pred,
+    )
+    residual = steady_heat_conduction_residual(source, solution, metadata)
+    dx = _spatial_step(solution, metadata, boundary="mixed", default_domain=1.0)
+    bc = _steady_heat_mixed_bc_loss(solution[:, :1], u_d, dx, reduction)
+    return _loss_dict(pred, residual, bc, _zero_scalar(pred), "steady_mixed_bc", reduction)
+
+
 def _loss_dict(ref: torch.Tensor, residual: torch.Tensor, bc: torch.Tensor, ic: torch.Tensor, mode: str, reduction: str) -> dict[str, Any]:
     return {
         "interior": _mean_square(residual, reduction) if residual is not None else _zero_scalar(ref),
@@ -454,6 +656,104 @@ def _as_swe_trajectory(pred: torch.Tensor, metadata: dict) -> tuple[torch.Tensor
     return torch.stack([initial[:, :3], pred[:, :3]], dim=2), "two_level"
 
 
+def _as_heat_trajectory(pred: torch.Tensor, metadata: dict) -> tuple[torch.Tensor, str]:
+    if pred.ndim == 5:
+        return pred[:, :1], "full_trajectory" if pred.shape[2] > 2 else "two_level"
+    if pred.ndim != 4 or pred.shape[1] < 1:
+        raise ValueError(f"Heat residual expects [B,1,H,W] or [B,1,T,H,W], got {tuple(pred.shape)}")
+    initial = _initial_channels_from_metadata(metadata, pred, channels=1, full_channel=0, input_channel=0)
+    return torch.stack([initial[:, :1], pred[:, :1]], dim=2), "two_level"
+
+
+def _as_wave_trajectory(pred: torch.Tensor, metadata: dict) -> tuple[torch.Tensor, str]:
+    if pred.ndim == 5:
+        if pred.shape[1] < 2:
+            raise ValueError(f"Wave trajectory needs [u,v] channels, got {tuple(pred.shape)}")
+        return pred[:, :2], "full_trajectory" if pred.shape[2] > 2 else "two_level"
+    if pred.ndim != 4 or pred.shape[1] < 2:
+        raise ValueError(f"Wave residual expects [B,2,H,W] or [B,2,T,H,W], got {tuple(pred.shape)}")
+    initial = _initial_channels_from_metadata(metadata, pred, channels=2, full_channel=0, input_channel=0)
+    return torch.stack([initial[:, :2], pred[:, :2]], dim=2), "two_level"
+
+
+def _as_advection_diffusion_trajectory(pred: torch.Tensor, metadata: dict) -> tuple[torch.Tensor, str]:
+    if pred.ndim == 5:
+        return pred[:, :1], "full_trajectory" if pred.shape[2] > 2 else "two_level"
+    if pred.ndim != 4 or pred.shape[1] < 1:
+        raise ValueError(f"Advection-diffusion residual expects [B,1,H,W] or [B,1,T,H,W], got {tuple(pred.shape)}")
+    initial = _initial_channels_from_metadata(metadata, pred, channels=1, full_channel=0, input_channel=0)
+    return torch.stack([initial[:, :1], pred[:, :1]], dim=2), "two_level"
+
+
+def _initial_channels_from_metadata(
+    metadata: dict,
+    pred: torch.Tensor,
+    channels: int,
+    full_channel: int = 0,
+    input_channel: int = 0,
+) -> torch.Tensor:
+    if isinstance(metadata.get("background_fields"), torch.Tensor):
+        return metadata["background_fields"].to(pred.device, pred.dtype)[:, :channels]
+    if isinstance(metadata.get("full_tensor"), torch.Tensor):
+        full = metadata["full_tensor"].to(pred.device, pred.dtype)
+        if full.ndim == 5:
+            idx = int(metadata.get("input_time_index", 0))
+            return full[:, :channels, idx]
+        if full.ndim == 4 and full.shape[1] >= full_channel + channels:
+            return full[:, full_channel : full_channel + channels]
+    if isinstance(metadata.get("input_fields"), torch.Tensor):
+        input_fields = metadata["input_fields"].to(pred.device, pred.dtype)
+        if input_fields.ndim == 4 and input_fields.shape[1] >= input_channel + channels:
+            return input_fields[:, input_channel : input_channel + channels]
+    warnings.warn("Missing initial/background state for time-dependent residual; using predicted first frame.", RuntimeWarning, stacklevel=2)
+    if pred.ndim == 5:
+        return pred[:, :channels, 0]
+    return pred[:, :channels]
+
+
+def _source_channels_from_metadata(
+    metadata: dict,
+    pred: torch.Tensor,
+    channels: int,
+    full_channel: int = 0,
+    input_channel: int = 0,
+) -> torch.Tensor:
+    for key in ("source_fields", "coeff_fields"):
+        if isinstance(metadata.get(key), torch.Tensor):
+            return metadata[key].to(pred.device, pred.dtype)[:, :channels]
+    if isinstance(metadata.get("full_tensor"), torch.Tensor):
+        full = metadata["full_tensor"].to(pred.device, pred.dtype)
+        if full.ndim == 4 and full.shape[1] >= full_channel + channels:
+            return full[:, full_channel : full_channel + channels]
+    if isinstance(metadata.get("input_fields"), torch.Tensor):
+        input_fields = metadata["input_fields"].to(pred.device, pred.dtype)
+        if input_fields.ndim == 4 and input_fields.shape[1] >= input_channel + channels:
+            if "sparse" in str(metadata.get("task", "")).lower():
+                warnings.warn("Falling back to sparse input_fields as PDE source; full_tensor metadata is preferred.", RuntimeWarning, stacklevel=2)
+            return input_fields[:, input_channel : input_channel + channels]
+    raise ValueError("Missing source field for PDE residual")
+
+
+def _solution_channels_from_metadata(
+    metadata: dict,
+    pred: torch.Tensor,
+    channels: int,
+    full_channel: int,
+    input_channel: int = 0,
+) -> torch.Tensor:
+    if isinstance(metadata.get("solution_fields"), torch.Tensor):
+        return metadata["solution_fields"].to(pred.device, pred.dtype)[:, :channels]
+    if isinstance(metadata.get("full_tensor"), torch.Tensor):
+        full = metadata["full_tensor"].to(pred.device, pred.dtype)
+        if full.ndim == 4 and full.shape[1] >= full_channel + channels:
+            return full[:, full_channel : full_channel + channels]
+    if isinstance(metadata.get("input_fields"), torch.Tensor):
+        input_fields = metadata["input_fields"].to(pred.device, pred.dtype)
+        if input_fields.ndim == 4 and input_fields.shape[1] >= input_channel + channels:
+            return input_fields[:, input_channel : input_channel + channels]
+    raise ValueError("Missing solution field for inverse PDE residual")
+
+
 def _initial_from_metadata(metadata: dict, pred: torch.Tensor, channels: int) -> torch.Tensor:
     if isinstance(metadata.get("background_fields"), torch.Tensor):
         return metadata["background_fields"].to(pred.device, pred.dtype)
@@ -485,6 +785,128 @@ def _burgers_initial_from_metadata(metadata: dict, pred: torch.Tensor) -> torch.
             return input_fields[:, :1, 0, :]
     warnings.warn("Missing Burgers initial condition metadata; using predicted first time slice.", RuntimeWarning, stacklevel=2)
     return pred[:, :1, 0, :]
+
+
+def _parameter_field(
+    metadata: dict,
+    ref: torch.Tensor,
+    keys: tuple[str, ...],
+    default: float,
+    input_channel: int | None = None,
+    full_channel: int | None = None,
+    pred_channel: int | None = None,
+    input_min_channels: int | None = None,
+    full_min_channels: int | None = None,
+    pred_min_channels: int | None = None,
+    pred: torch.Tensor | None = None,
+    value: torch.Tensor | float | None = None,
+) -> torch.Tensor:
+    if value is not None:
+        return _expand_parameter_field(value, ref)
+    for key in keys:
+        if key in metadata and metadata[key] is not None:
+            return _expand_parameter_field(metadata[key], ref)
+
+    if isinstance(metadata.get("full_tensor"), torch.Tensor) and full_channel is not None:
+        full = metadata["full_tensor"].to(ref.device, ref.dtype)
+        min_channels = full_min_channels or (full_channel + 1)
+        if full.ndim == 4 and full.shape[1] >= max(full_channel + 1, min_channels):
+            return _expand_parameter_field(full[:, full_channel : full_channel + 1], ref)
+
+    if isinstance(metadata.get("input_fields"), torch.Tensor) and input_channel is not None:
+        input_fields = metadata["input_fields"].to(ref.device, ref.dtype)
+        min_channels = input_min_channels or (input_channel + 1)
+        if input_fields.ndim == 4 and input_fields.shape[1] >= max(input_channel + 1, min_channels):
+            return _expand_parameter_field(input_fields[:, input_channel : input_channel + 1], ref)
+
+    if pred is not None and pred_channel is not None:
+        min_channels = pred_min_channels or (pred_channel + 1)
+        if pred.ndim == 4 and pred.shape[1] >= max(pred_channel + 1, min_channels):
+            return _expand_parameter_field(pred[:, pred_channel : pred_channel + 1], ref)
+
+    return torch.ones_like(ref[:, :1]) * float(default)
+
+
+def _expand_parameter_field(value: torch.Tensor | float, ref: torch.Tensor) -> torch.Tensor:
+    target = ref[:, :1]
+    tensor = torch.as_tensor(value, device=ref.device, dtype=ref.dtype)
+    if tensor.ndim == 0:
+        return torch.ones_like(target) * tensor
+    if tensor.ndim == 1:
+        if tensor.numel() == 1:
+            return torch.ones_like(target) * tensor.reshape(())
+        if tensor.shape[0] == target.shape[0]:
+            return tensor.reshape(target.shape[0], 1, 1, 1).expand_as(target)
+    if tensor.ndim == 2:
+        if tuple(tensor.shape) == tuple(target.shape[-2:]):
+            return tensor.reshape(1, 1, *target.shape[-2:]).expand_as(target)
+        if tensor.shape[0] == target.shape[0] and tensor.shape[1] == 1:
+            return tensor.reshape(target.shape[0], 1, 1, 1).expand_as(target)
+    if tensor.ndim == 3 and tuple(tensor.shape[-2:]) == tuple(target.shape[-2:]):
+        if tensor.shape[0] in {1, target.shape[0]}:
+            tensor = tensor.unsqueeze(1)
+    if tensor.ndim >= 4:
+        if tensor.shape[0] not in {1, target.shape[0]}:
+            raise ValueError(f"Parameter batch dimension {tensor.shape[0]} cannot broadcast to {target.shape[0]}")
+        tensor = tensor[:, :1]
+        if tuple(tensor.shape[-2:]) != tuple(target.shape[-2:]):
+            tensor = F.interpolate(tensor, size=target.shape[-2:], mode="nearest")
+        return tensor.expand_as(target)
+    raise ValueError(f"Cannot broadcast parameter shape {tuple(tensor.shape)} to {tuple(target.shape)}")
+
+
+def _trajectory_laplacian(field: torch.Tensor, spacing: float, boundary: str) -> torch.Tensor:
+    if field.ndim != 5:
+        raise ValueError(f"Trajectory laplacian expects [B,C,T,H,W], got {tuple(field.shape)}")
+    b, c, t, h, w = field.shape
+    flat = field.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+    lap = laplacian(flat, spacing=spacing, boundary=boundary)
+    return lap.reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4)
+
+
+def _boundary_mode(metadata: dict, default: str = "periodic") -> str:
+    raw = metadata.get("bc", metadata.get("boundary", metadata.get("boundary_condition", default)))
+    mode = str(raw).lower().replace("-", "_")
+    if "periodic" in mode:
+        return "periodic"
+    if "neumann" in mode or "extrapolation" in mode:
+        return "neumann"
+    if "dirichlet" in mode:
+        return "dirichlet"
+    return default
+
+
+def _spatial_step(field: torch.Tensor, metadata: dict, boundary: str, default_domain: float) -> float:
+    if "dx" in metadata and metadata["dx"] is not None:
+        return float(metadata["dx"])
+    domain = float(metadata.get("domain_length", metadata.get("spatial_domain_length", default_domain)))
+    points = max(field.shape[-1], 1)
+    if boundary == "periodic":
+        return domain / points
+    return domain / max(points - 1, 1)
+
+
+def _trajectory_bc_loss(trajectory: torch.Tensor, boundary: str, spacing: float, reduction: str) -> torch.Tensor:
+    if boundary == "periodic":
+        return periodic_bc_loss(trajectory, dims=(-2, -1), reduction=reduction)
+    if boundary == "neumann":
+        return neumann_zero_bc_loss(trajectory, spacing_x=spacing, spacing_y=spacing, reduction=reduction)
+    if boundary == "dirichlet":
+        return dirichlet_zero_bc_loss(trajectory, reduction=reduction)
+    raise ValueError(f"Unknown boundary mode '{boundary}'")
+
+
+def _steady_heat_mixed_bc_loss(solution: torch.Tensor, u_d: torch.Tensor, spacing: float, reduction: str) -> torch.Tensor:
+    if solution.shape[-2] < 2 or solution.shape[-1] < 2:
+        return _zero_scalar(solution)
+    bottom_target = u_d[..., -1, :]
+    terms = [
+        (solution[..., -1, :] - bottom_target).reshape(-1),
+        ((solution[..., 1, :] - solution[..., 0, :]) / spacing).reshape(-1),
+        ((solution[..., :, 1] - solution[..., :, 0]) / spacing).reshape(-1),
+        ((solution[..., :, -1] - solution[..., :, -2]) / spacing).reshape(-1),
+    ]
+    return _mean_square(torch.cat(terms), reduction)
 
 
 def _time_step(num_steps: int, final_time: float, metadata: dict) -> float:

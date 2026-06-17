@@ -13,6 +13,10 @@ CURRENT_PDES = [
     "burger",
     "reaction_diffusion",
     "shallow_water",
+    "heat",
+    "wave",
+    "advection_diffusion",
+    "steady_heat_conduction",
 ]
 
 
@@ -29,11 +33,10 @@ def test_adapter_loads_tiny_native_formats(tiny_data_root, pde):
     assert batch.obs_coords is not None
 
 
-@pytest.mark.parametrize("pde", ["heat", "wave", "advection_diffusion"])
-def test_reserved_future_pdes_warn_and_synthetic_fallback(tmp_path, pde):
+@pytest.mark.parametrize("pde", ["heat", "wave", "advection_diffusion", "steady_heat_conduction"])
+def test_hdf5_pdes_warn_and_synthetic_fallback_when_files_missing(tmp_path, pde):
     registry = build_default_registry()
     with pytest.warns(RuntimeWarning):
         raw = registry.load_raw(pde, tmp_path, synthetic_if_missing=True, max_samples=2, synthetic_resolution=8)
     batch = registry.make_task(raw, pde, "forward")
     assert batch.target_fields.shape[-2:] == (8, 8)
-

@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .official import OfficialImportError, get_recfno_fno_classes
+
 
 def grid_channels(x: torch.Tensor) -> torch.Tensor:
     b, _, h, w = x.shape
@@ -61,6 +63,65 @@ class FNO2dNet(nn.Module):
         return self.fc2(x)
 
 
+class OfficialRecFNOVoronoiFNO2dNet(nn.Module):
+    """Adapter for the vendored RecFNO VoronoiFNO2d NCHW implementation."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        width: int = 32,
+        modes1: int = 12,
+        modes2: int = 12,
+        add_coords: bool = True,
+    ) -> None:
+        super().__init__()
+        _fno2d, voronoi_fno2d, _spectral = get_recfno_fno_classes()
+        self.add_coords = add_coords
+        self.net = voronoi_fno2d(
+            modes1=modes1,
+            modes2=modes2,
+            width=width,
+            in_channels=in_channels + (2 if add_coords else 0),
+            out_channels=out_channels,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.add_coords:
+            x = torch.cat([x, grid_channels(x)], dim=1)
+        return self.net(x)
+
+
+def make_official_recfno_fno_or_local(
+    in_channels: int,
+    out_channels: int,
+    width: int,
+    modes1: int,
+    modes2: int,
+    layers: int = 4,
+    add_coords: bool = True,
+) -> nn.Module:
+    try:
+        return OfficialRecFNOVoronoiFNO2dNet(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            width=width,
+            modes1=modes1,
+            modes2=modes2,
+            add_coords=add_coords,
+        )
+    except OfficialImportError:
+        return FNO2dNet(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            width=width,
+            modes1=modes1,
+            modes2=modes2,
+            layers=layers,
+            add_coords=add_coords,
+        )
+
+
 class ConvReconNet(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, width: int = 48, depth: int = 7) -> None:
         super().__init__()
@@ -114,4 +175,3 @@ def query_coords_for_shape(shape: tuple[int, int], batch_size: int, device, dtyp
         indexing="ij",
     )
     return torch.stack([yy, xx], dim=-1).reshape(1, h * w, 2).repeat(batch_size, 1, 1)
-

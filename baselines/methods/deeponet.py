@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import warnings
+
 import torch
 
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
+from .official import OfficialImportError, get_deepxde_deeponet_class
 from .shared import MLP, flatten_grid
 
 
@@ -24,6 +27,24 @@ class DeepONetBaseline(BaselineModel):
         self.basis = basis
         self.out_channels = out_channels
         self.branch_in = branch_in
+        self.official_net = None
+        backend = str(self.config.get("official_backend", "auto")).lower()
+        if backend in {"auto", "deepxde", "official"}:
+            try:
+                deeponet = get_deepxde_deeponet_class()
+                self.official_net = deeponet(
+                    [branch_in, hidden, hidden, basis],
+                    [coord_dim, hidden, hidden, basis],
+                    activation=str(self.config.get("activation", "gelu")),
+                    kernel_initializer=str(self.config.get("kernel_initializer", "Glorot normal")),
+                    num_outputs=out_channels,
+                    multi_output_strategy="independent" if out_channels > 1 else None,
+                )
+                self.official_backend = "deepxde"
+            except OfficialImportError as exc:
+                if backend == "deepxde":
+                    warnings.warn(f"DeepXDE DeepONet unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
+                self.official_backend = "local"
         return self
 
     def fit(self, train_loader, val_loader=None):
@@ -39,11 +60,17 @@ class DeepONetBaseline(BaselineModel):
             branch_input = torch.cat([branch_input, pad], dim=1)
         elif branch_input.shape[1] > self.branch_in:
             branch_input = branch_input[:, : self.branch_in]
-        coeff = self.branch(branch_input).reshape(b, self.out_channels, self.basis)
         coords = batch.coords
         if coords is None:
             raise ValueError("DeepONet requires dense query coordinates in batch.coords")
         coords = coords.to(batch.input_fields.device, batch.input_fields.dtype)
+        if self.official_net is not None:
+            values = self.official_net((branch_input, coords[0]))
+            if values.ndim == 2:
+                values = values.unsqueeze(-1)
+            spatial = tuple(self.out_shape[1:])
+            return values.permute(0, 2, 1).reshape(b, self.out_channels, *spatial)
+        coeff = self.branch(branch_input).reshape(b, self.out_channels, self.basis)
         trunk = self.trunk(coords).reshape(b, coords.shape[1], self.out_channels, self.basis)
         values = torch.einsum("bck,bqck->bqc", coeff, trunk) / (self.basis ** 0.5)
         spatial = tuple(self.out_shape[1:])

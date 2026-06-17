@@ -5,11 +5,13 @@ import warnings
 
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import NotImplementedWarning, physics_loss_metric
 
 from .base import BaselineModel
+from .official import OfficialImportError, get_deepxde_fnn_class
 from .shared import NeuralField
 
 
@@ -22,10 +24,20 @@ class PINNSparseBaseline(BaselineModel):
         self.target_channels = int(data_spec["target_channels"])
         self.hidden = int(self.config.get("hidden", 64))
         self.depth = int(self.config.get("depth", 4))
+        self.deepxde_fnn_cls = None
+        backend = str(self.config.get("official_backend", "auto")).lower()
+        if backend in {"auto", "deepxde", "official"}:
+            try:
+                self.deepxde_fnn_cls = get_deepxde_fnn_class()
+                self.official_backend = "deepxde"
+            except OfficialImportError as exc:
+                if backend == "deepxde":
+                    warnings.warn(f"DeepXDE FNN unavailable, using local neural field fallback: {exc}", RuntimeWarning, stacklevel=2)
+                self.official_backend = "local"
         return self
 
     def parameter_count(self) -> int:
-        proto = NeuralField(self.coord_dim, self.target_channels, hidden=self.hidden, depth=self.depth)
+        proto = self._new_field(self.coord_dim, self.target_channels)
         return int(sum(p.numel() for p in proto.parameters() if p.requires_grad))
 
     def fit(self, train_loader, val_loader=None):
@@ -43,7 +55,7 @@ class PINNSparseBaseline(BaselineModel):
         for item in range(batch.target_fields.shape[0]):
             coords = batch.coords[item].to(batch.target_fields.device, batch.target_fields.dtype)
             target = batch.target_fields[item : item + 1]
-            model = NeuralField(coords.shape[-1], target.shape[1], hidden=hidden, depth=depth).to(target.device)
+            model = self._new_field(coords.shape[-1], target.shape[1]).to(target.device)
             optimizer = (
                 torch.optim.LBFGS(model.parameters(), lr=lr, max_iter=steps)
                 if opt_name == "lbfgs"
@@ -72,6 +84,16 @@ class PINNSparseBaseline(BaselineModel):
                 preds.append(model(coords).T.reshape_as(target))
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         return torch.cat(preds, dim=0).detach()
+
+    def _new_field(self, coord_dim: int, out_channels: int) -> nn.Module:
+        if self.deepxde_fnn_cls is not None:
+            layers = [coord_dim] + [self.hidden] * max(self.depth - 1, 1) + [out_channels]
+            return self.deepxde_fnn_cls(
+                layers,
+                str(self.config.get("activation", "gelu")),
+                str(self.config.get("kernel_initializer", "Glorot normal")),
+            )
+        return NeuralField(coord_dim, out_channels, hidden=self.hidden, depth=self.depth)
 
 
 def residual_supported(pde_name: str) -> bool:

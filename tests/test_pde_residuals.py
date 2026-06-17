@@ -8,7 +8,19 @@ from baselines.common.metrics import bc_residual_metric, ic_residual_metric, pde
 from baselines.common.physics import periodic_bc_loss, physics_losses
 
 
-CURRENT_PDES = ["poisson", "helmholtz", "darcy", "burger", "nsnonbounded", "reaction_diffusion", "shallow_water"]
+CURRENT_PDES = [
+    "poisson",
+    "helmholtz",
+    "darcy",
+    "burger",
+    "nsnonbounded",
+    "reaction_diffusion",
+    "shallow_water",
+    "heat",
+    "wave",
+    "advection_diffusion",
+    "steady_heat_conduction",
+]
 
 
 @pytest.mark.parametrize("pde", CURRENT_PDES)
@@ -87,6 +99,37 @@ def test_time_dependent_ic_losses_are_zero_when_prediction_starts_from_metadata_
     swe[:, 0] = 1.0
     swe_meta = {"input_fields": swe.clone(), "task": "forward", "g": 1.0, "domain_length": 5.0}
     assert ic_residual_metric(swe, "shallow_water", swe_meta).item() == pytest.approx(0.0)
+
+
+def test_future_time_dependent_constant_fields_have_zero_residual_terms():
+    heat = torch.ones(1, 1, 8, 8)
+    heat_meta = {"input_fields": heat.clone(), "task": "forward", "alpha": 1e-3, "final_time": 1.0, "bc": "periodic"}
+    assert pde_residual_metric(heat, "heat", heat_meta).item() == pytest.approx(0.0)
+    assert bc_residual_metric(heat, "heat", heat_meta).item() == pytest.approx(0.0)
+    assert ic_residual_metric(heat, "heat", heat_meta).item() == pytest.approx(0.0)
+
+    wave = torch.zeros(1, 2, 8, 8)
+    wave[:, 0] = 1.0
+    wave_meta = {"input_fields": wave.clone(), "task": "forward", "fixed_c": 1.0, "final_time": 1.0, "bc": "periodic"}
+    assert pde_residual_metric(wave, "wave", wave_meta).item() == pytest.approx(0.0)
+    assert bc_residual_metric(wave, "wave", wave_meta).item() == pytest.approx(0.0)
+    assert ic_residual_metric(wave, "wave", wave_meta).item() == pytest.approx(0.0)
+
+    adv = torch.ones(1, 1, 8, 8)
+    adv_meta = {"input_fields": adv.clone(), "task": "forward", "b_x": 0.5, "b_y": -0.25, "kappa": 1e-3, "final_time": 1.0}
+    assert pde_residual_metric(adv, "advection_diffusion", adv_meta).item() == pytest.approx(0.0)
+    assert bc_residual_metric(adv, "advection_diffusion", adv_meta).item() == pytest.approx(0.0)
+    assert ic_residual_metric(adv, "advection_diffusion", adv_meta).item() == pytest.approx(0.0)
+
+
+def test_steady_heat_conduction_constant_solution_satisfies_zero_source_case():
+    solution = torch.full((1, 1, 8, 8), 298.0)
+    source = torch.zeros_like(solution)
+    u_d = torch.full_like(solution, 298.0)
+    meta = {"input_fields": torch.cat([source, u_d], dim=1), "task": "forward", "u_D": 298.0}
+    assert pde_residual_metric(solution, "steady_heat_conduction", meta).item() == pytest.approx(0.0)
+    assert bc_residual_metric(solution, "steady_heat_conduction", meta).item() == pytest.approx(0.0)
+    assert ic_residual_metric(solution, "steady_heat_conduction", meta).item() == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize("pde", CURRENT_PDES)
