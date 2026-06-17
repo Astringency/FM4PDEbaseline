@@ -1,85 +1,129 @@
 {
   "args": {
+    "allow_synthetic_fallback": false,
     "baseline": "recfno",
-    "pde": "poisson",
-    "task": "sparse_solution",
-    "data_root": "/home/tat512/C01Python/PDEdata",
-    "config": null,
-    "num_sensors": 50,
-    "sensor_mode": "random",
-    "noise_level": 0.0,
-    "train_size": 4,
-    "test_size": 2,
     "batch_size": 2,
-    "epochs": 1,
-    "lr": 0.001,
-    "seed": 1,
+    "config": null,
+    "data_root": "/home/tat512/C01Python/PDEdata",
     "device": "cpu",
-    "output_dir": "outputs/baselines/smoke",
     "dry_run": true,
+    "epochs": 1,
+    "experiment_mode": "smoke",
+    "lr": null,
+    "noise_level": 0.0,
+    "num_sensors": 50,
+    "output_dir": "outputs/baselines/smoke",
+    "pde": "poisson",
+    "prefer_test": false,
+    "save_checkpoint": false,
+    "scalar_param_mode": "metadata",
+    "seed": 1,
+    "sensor_mode": "random",
+    "strict_size": false,
     "synthetic_data": true,
     "synthetic_resolution": 32,
-    "prefer_test": false,
-    "save_checkpoint": false
-  },
-  "method": {
-    "epochs": 1,
-    "lr": 0.001,
-    "device": "cpu",
-    "max_steps": 1,
-    "steps": 1,
-    "refine_steps": 1
-  },
-  "data_spec": {
-    "pde": "poisson",
     "task": "sparse_solution",
+    "test_size": 4,
+    "test_split": "test",
+    "train_shards": 5,
+    "train_size": 8,
+    "val_size": 2
+  },
+  "backend": {
+    "backend_used": "recfno",
+    "backend_warning": "",
+    "fallback_used": false,
+    "official_backend": "recfno"
+  },
+  "config": {},
+  "data_spec": {
+    "branch_numel": 50,
+    "input_channel_names": [
+      "phi"
+    ],
+    "input_channels": 1,
+    "input_numel": 1024,
     "input_shape": [
       2,
       1,
       32,
       32
     ],
+    "metadata": {
+      "available_count": 8,
+      "canonical_layout": "NCHW",
+      "files": [],
+      "full_shape": [
+        8,
+        2,
+        32,
+        32
+      ],
+      "global_sample_ids": [
+        "synthetic:poisson:train:1011:0",
+        "synthetic:poisson:train:1011:1",
+        "synthetic:poisson:train:1011:2",
+        "synthetic:poisson:train:1011:3",
+        "synthetic:poisson:train:1011:4",
+        "synthetic:poisson:train:1011:5",
+        "synthetic:poisson:train:1011:6",
+        "synthetic:poisson:train:1011:7"
+      ],
+      "input_channel_names": [
+        "phi"
+      ],
+      "input_shape": [
+        8,
+        1,
+        32,
+        32
+      ],
+      "loaded_count": 8,
+      "mask_id": "86e7ebca042519f9",
+      "noise_level": 0.0,
+      "num_sensors": 50,
+      "pde_params": {},
+      "pde_params_available": [],
+      "scalar_param_mode": "metadata",
+      "sensor_mode": "random",
+      "source": "synthetic",
+      "split": "train",
+      "supports_trajectory": false,
+      "target_channel_names": [
+        "phi"
+      ],
+      "target_shape": [
+        8,
+        1,
+        32,
+        32
+      ],
+      "task_channel_names": [
+        "phi"
+      ],
+      "time_dependent": false
+    },
+    "pde": "poisson",
+    "target_channel_names": [
+      "phi"
+    ],
+    "target_channels": 1,
+    "target_numel": 1024,
     "target_shape": [
       2,
       1,
       32,
       32
     ],
-    "input_channels": 1,
-    "target_channels": 1,
-    "input_numel": 1024,
-    "target_numel": 1024,
-    "branch_numel": 50,
-    "metadata": {
-      "source": "synthetic",
-      "canonical_layout": "NCHW",
-      "time_dependent": false,
-      "supports_trajectory": false,
-      "sensor_mode": "random",
-      "num_sensors": 50,
-      "noise_level": 0.0,
-      "mask_id": "86e7ebca042519f9",
-      "input_shape": [
-        4,
-        1,
-        32,
-        32
-      ],
-      "target_shape": [
-        4,
-        1,
-        32,
-        32
-      ],
-      "full_shape": [
-        4,
-        2,
-        32,
-        32
-      ],
-      "task_channel_names": [
-        "phi"
-      ]
-    }
+    "task": "sparse_solution"
+  },
+  "method": {
+    "device": "cpu",
+    "epochs": 1,
+    "lr": 0.001,
+    "max_steps": 1,
+    "max_val_steps": 1,
+    "refine_steps": 1,
+    "steps": 1
   }
 }

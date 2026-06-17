@@ -1,0 +1,8 @@
+{
+  "train_loss": [
+    1.0190389156341553
+  ],
+  "val_loss": [],
+  "best_epoch": null,
+  "best_val_loss": null
+}

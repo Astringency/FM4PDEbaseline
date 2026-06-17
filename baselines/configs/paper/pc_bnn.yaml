@@ -1,0 +1,11 @@
+method:
+  official_backend: auto
+  steps: 500
+  lr: 0.001
+  hidden: 128
+  depth: 5
+  particles: 8
+  lambda_obs: 1.0
+  lambda_int: 0.01
+  lambda_bc: 0.01
+  lambda_ic: 0.01

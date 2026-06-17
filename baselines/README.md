@@ -2,6 +2,61 @@
 
 This module adds a reproducible JMLR-revision baseline layer without modifying the original FM4PDE training or sampling code. It provides shared data adapters, sensor/noise generation, metrics, logging, and method wrappers under a single command-line interface.
 
+## Reviewer-Level Experiment Protocol
+
+The baseline layer now has three intended run classes:
+
+- `smoke`: tiny deterministic synthetic data with `--dry-run`; use only for interface checks.
+- `debug`: small real-data or synthetic experiments for development; never use these numbers in paper tables.
+- `paper`: formal no-leakage experiments on independent train/val/test files. Paper mode rejects `--dry-run`, `--synthetic-data`, `--allow-synthetic-fallback`, and `--prefer-test`.
+
+The data adapter follows the current FM4PDE data layout:
+
+- Formal train splits are normally `50000 = 5 shards x 10000`, e.g. `<DATA_ROOT>/<pde>/<pde>_10000-128-128_1.*` through `_5.*`.
+- Test splits are independently generated files, usually 1000 or 10000 samples, e.g. `<pde>_test_1000-128-128.*` or `<pde>_test_10000-128-128.*`.
+- Validation uses an independent `*_val*` file when present. Otherwise it is a deterministic subset of train shards with an offset supplied by the runner; test files are never used for train or validation.
+- Future PDE HDF5 files store physical fields in `input_data` and `output_data`. Spatially constant parameters such as `alpha`, `c`, `b_x`, `b_y`, `kappa`, and `u_D` are loaded into `metadata["pde_params"]` and as top-level metadata keys for residuals.
+- `full_trajectory`, when present, is loaded into `metadata["full_trajectory"]` for diagnostics and time-dependent residual reporting.
+
+`--scalar-param-mode` controls how future PDE scalar parameters are exposed to supervised baselines:
+
+- `metadata` is the default and FM4PDE-compatible mode. Model tensors contain only physical fields, e.g. heat uses `u0 -> uT`; scalar PDE parameters remain metadata for residuals and bookkeeping.
+- `materialize` explicitly expands scalar parameters to constant spatial channels for legacy/debug comparisons, e.g. heat becomes `[u0, alpha] -> [uT, alpha]`.
+- `global` is accepted as a reserved API mode, but currently falls back to metadata with a warning; no hidden materialization occurs.
+
+Formal commands:
+
+```bash
+DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
+  bash scripts/baselines/run_paper_full_operator.sh
+
+DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
+  bash scripts/baselines/run_paper_sparse_reconstruction.sh
+
+DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
+  bash scripts/baselines/run_paper_physics_da.sh
+
+DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
+  bash scripts/baselines/run_paper_all.sh
+
+OUT=outputs/baselines/paper bash scripts/baselines/aggregate_paper_results.sh
+```
+
+Paper scripts honor `DATA_ROOT`, `OUT`, `DEVICE`, `TRAIN_SIZE`, `VAL_SIZE`, `TEST_SIZE`, `TRAIN_SHARDS`, `EPOCHS`, `BATCH_SIZE`, `SEEDS`, `SENSOR_COUNTS`, `SENSOR_MODES`, `NOISE_LEVELS`, `PDES`, `BASELINES`, and `SCALAR_PARAM_MODE`. Defaults are `TRAIN_SIZE=50000`, `TEST_SIZE=1000`, `TRAIN_SHARDS=5`, `SEEDS="1 2 3"`, `SENSOR_COUNTS="50 100 250 500 1000"`, `SENSOR_MODES="random grid fixed"`, `NOISE_LEVELS="0.0 0.01 0.05 0.10"`, and `SCALAR_PARAM_MODE=metadata`.
+
+Run outputs:
+
+- `results_raw.jsonl`: one raw row per evaluated test batch.
+- `results_summary.jsonl`: one aggregate row per run.
+- `results_summary.csv`: aggregate rows in CSV form.
+- `summary.csv`, `summary.json`, `latex_table.csv`, and optionally `latex_table.tex`: cross-run aggregation from `python -m baselines.aggregate_results`.
+
+Every run records `backend_used`, `official_backend`, `fallback_used`, and `backend_warning`. `official_backend: official` in a paper config fails if the wrapper falls back to a local compact implementation. `official_backend: auto` may fall back, but the result row records it explicitly.
+
+Time-dependent residuals record `residual_mode`. `full_trajectory` means a multi-step trajectory tensor was available to the residual. `two_level` means the diagnostic was built from input/background and final prediction only; it is a useful surrogate but not equivalent to a full time-dynamics constraint.
+
+Synthetic data is only for smoke/debug checks and must not be used for paper tables.
+
 ## Step 0 Findings
 
 Files inspected in the original FM4PDE repository:
@@ -61,10 +116,10 @@ Canonical layouts:
 | `burger` | `input` 1D plus `output` `[T,X]` | repeated `u0 -> u(t,x)` | `u(t,x) -> u0` |
 | `reaction_diffusion` | `[u,v]` trajectory | `[u_t0,v_t0] -> [u_T,v_T]` | final -> initial |
 | `shallow_water` | conservative `[h,hu,hv]` trajectory | initial -> final | final -> initial |
-| `heat` | `[u0,alpha,uT,alpha]` synthetic/future layout | `[u0,alpha] -> [uT,alpha]` | add concrete file adapter when files exist |
-| `wave` | `[u0,v0,uT,vT]` synthetic/future layout | `[u0,v0] -> [uT,vT]` | add concrete file adapter when files exist |
-| `advection_diffusion` | `[u0,b_x,b_y,kappa,uT,b_x,b_y,kappa]` synthetic/future layout | params + initial -> final + params | add concrete file adapter when files exist |
-| `steady_heat_conduction` | `[f,u_D,u,u_D]` synthetic/future layout | `[f,u_D] -> [u,u_D]` | add concrete file adapter when files exist |
+| `heat` | default `[u0,uT]`, scalar `alpha` in metadata | `u0 -> uT` | final -> initial |
+| `wave` | `[u0,v0,uT,vT]`, scalar/fixed `c` in metadata | `[u0,v0] -> [uT,vT]` | final -> initial |
+| `advection_diffusion` | default `[u0,uT]`, scalar `b_x,b_y,kappa` in metadata | `u0 -> uT` | final -> initial |
+| `steady_heat_conduction` | default `[f,u]`, scalar `u_D` in metadata | `f -> u` | `u -> f` |
 
 ## Tasks
 
@@ -169,10 +224,11 @@ conda run -n FM4PDEbaseline python -m baselines.run --baseline fno --pde darcy -
 
 Scripts:
 
-- `scripts/baselines/run_sparse_main.sh`
-- `scripts/baselines/run_full_operator.sh`
-- `scripts/baselines/run_physics_opt.sh`
-- `scripts/baselines/run_time_dependent_da.sh`
+- `scripts/baselines/run_paper_sparse_reconstruction.sh`
+- `scripts/baselines/run_paper_full_operator.sh`
+- `scripts/baselines/run_paper_physics_da.sh`
+- `scripts/baselines/run_paper_all.sh`
+- `scripts/baselines/aggregate_paper_results.sh`
 
 Environment variables can override defaults:
 

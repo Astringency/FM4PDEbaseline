@@ -1,83 +1,110 @@
 {
   "args": {
+    "allow_synthetic_fallback": false,
     "baseline": "vivid",
-    "pde": "shallow_water",
-    "task": "sparse_solution",
-    "data_root": "/home/tat512/C01Python/PDEdata",
-    "config": null,
-    "num_sensors": 50,
-    "sensor_mode": "random",
-    "noise_level": 0.0,
-    "train_size": 4,
-    "test_size": 2,
     "batch_size": 2,
-    "epochs": 1,
-    "lr": 0.001,
-    "seed": 1,
+    "config": null,
+    "data_root": "/home/tat512/C01Python/PDEdata",
     "device": "cpu",
-    "output_dir": "outputs/baselines/smoke",
     "dry_run": true,
+    "epochs": 1,
+    "experiment_mode": "smoke",
+    "lr": null,
+    "noise_level": 0.0,
+    "num_sensors": 50,
+    "output_dir": "outputs/baselines/smoke",
+    "pde": "shallow_water",
+    "prefer_test": false,
+    "save_checkpoint": false,
+    "scalar_param_mode": "metadata",
+    "seed": 1,
+    "sensor_mode": "random",
+    "strict_size": false,
     "synthetic_data": true,
     "synthetic_resolution": 32,
-    "prefer_test": false,
-    "save_checkpoint": false
-  },
-  "method": {
-    "epochs": 1,
-    "lr": 0.001,
-    "device": "cpu",
-    "max_steps": 1,
-    "steps": 1,
-    "refine_steps": 1
-  },
-  "data_spec": {
-    "pde": "shallow_water",
     "task": "sparse_solution",
+    "test_size": 4,
+    "test_split": "test",
+    "train_shards": 5,
+    "train_size": 8,
+    "val_size": 2
+  },
+  "backend": {
+    "backend_used": "local",
+    "backend_warning": "using fallback backend local",
+    "fallback_used": true,
+    "official_backend": "local"
+  },
+  "config": {},
+  "data_spec": {
+    "branch_numel": 150,
+    "input_channel_names": [
+      "hT",
+      "huT",
+      "hvT"
+    ],
+    "input_channels": 3,
+    "input_numel": 3072,
     "input_shape": [
       2,
       3,
       32,
       32
     ],
-    "target_shape": [
-      2,
-      3,
-      32,
-      32
-    ],
-    "input_channels": 3,
-    "target_channels": 3,
-    "input_numel": 3072,
-    "target_numel": 3072,
-    "branch_numel": 150,
     "metadata": {
-      "source": "synthetic",
+      "available_count": 8,
       "canonical_layout": "NCTHW",
-      "final_time": 1.0,
-      "g": 1.0,
       "domain_length": 5.0,
-      "time_dependent": true,
-      "supports_trajectory": true,
-      "sensor_mode": "random",
-      "num_sensors": 50,
-      "noise_level": 0.0,
-      "mask_id": "3d26a20ef95f09fd",
-      "input_shape": [
-        4,
-        3,
-        32,
-        32
-      ],
-      "target_shape": [
-        4,
-        3,
-        32,
-        32
-      ],
+      "files": [],
+      "final_time": 1.0,
       "full_shape": [
-        4,
+        8,
         3,
         11,
+        32,
+        32
+      ],
+      "g": 1.0,
+      "global_sample_ids": [
+        "synthetic:shallow_water:train:1011:0",
+        "synthetic:shallow_water:train:1011:1",
+        "synthetic:shallow_water:train:1011:2",
+        "synthetic:shallow_water:train:1011:3",
+        "synthetic:shallow_water:train:1011:4",
+        "synthetic:shallow_water:train:1011:5",
+        "synthetic:shallow_water:train:1011:6",
+        "synthetic:shallow_water:train:1011:7"
+      ],
+      "input_channel_names": [
+        "hT",
+        "huT",
+        "hvT"
+      ],
+      "input_shape": [
+        8,
+        3,
+        32,
+        32
+      ],
+      "loaded_count": 8,
+      "mask_id": "3d26a20ef95f09fd",
+      "noise_level": 0.0,
+      "num_sensors": 50,
+      "pde_params": {},
+      "pde_params_available": [],
+      "scalar_param_mode": "metadata",
+      "sensor_mode": "random",
+      "source": "synthetic",
+      "split": "train",
+      "supports_trajectory": true,
+      "target_channel_names": [
+        "hT",
+        "huT",
+        "hvT"
+      ],
+      "target_shape": [
+        8,
+        3,
         32,
         32
       ],
@@ -85,7 +112,32 @@
         "hT",
         "huT",
         "hvT"
-      ]
-    }
+      ],
+      "time_dependent": true
+    },
+    "pde": "shallow_water",
+    "target_channel_names": [
+      "hT",
+      "huT",
+      "hvT"
+    ],
+    "target_channels": 3,
+    "target_numel": 3072,
+    "target_shape": [
+      2,
+      3,
+      32,
+      32
+    ],
+    "task": "sparse_solution"
+  },
+  "method": {
+    "device": "cpu",
+    "epochs": 1,
+    "lr": 0.001,
+    "max_steps": 1,
+    "max_val_steps": 1,
+    "refine_steps": 1,
+    "steps": 1
   }
 }

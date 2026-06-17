@@ -122,6 +122,14 @@ def test_future_time_dependent_constant_fields_have_zero_residual_terms():
     assert ic_residual_metric(adv, "advection_diffusion", adv_meta).item() == pytest.approx(0.0)
 
 
+def test_future_scalar_param_missing_returns_nan_with_warning():
+    pred = torch.ones(1, 1, 8, 8)
+    meta = {"input_fields": pred.clone(), "task": "forward", "final_time": 1.0, "bc": "periodic"}
+    with pytest.warns(RuntimeWarning):
+        value = pde_residual_metric(pred, "heat", meta)
+    assert torch.isnan(value)
+
+
 def test_steady_heat_conduction_constant_solution_satisfies_zero_source_case():
     solution = torch.full((1, 1, 8, 8), 298.0)
     source = torch.zeros_like(solution)

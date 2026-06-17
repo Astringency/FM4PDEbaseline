@@ -27,9 +27,13 @@ def tiny_data_root(tmp_path: Path) -> Path:
     with h5py.File(d / "darcy_10000-128-128_1.mat", "w") as f:
         f["thresh_a_data"] = rng.normal(size=(s, s, n)).astype("float32")
         f["thresh_p_data"] = rng.normal(size=(s, s, n)).astype("float32")
+    with h5py.File(d / "darcy_test_1000-128-128.mat", "w") as f:
+        f["thresh_a_data"] = rng.normal(size=(s, s, n)).astype("float32")
+        f["thresh_p_data"] = rng.normal(size=(s, s, n)).astype("float32")
 
     p = mkdir("poisson")
     scipy.io.savemat(p / "poisson_10000-128-128_1.mat", {"f_data": rng.normal(size=(n, s, s)), "phi_data": rng.normal(size=(n, s, s))})
+    scipy.io.savemat(p / "poisson_test_1000-128-128.mat", {"f_data": rng.normal(size=(n, s, s)), "phi_data": rng.normal(size=(n, s, s))})
 
     h = mkdir("helmholtz")
     scipy.io.savemat(h / "helmholtz_10000-128-128_1.mat", {"f_data": rng.normal(size=(n, s, s)), "psi_data": rng.normal(size=(n, s, s))})
@@ -60,7 +64,14 @@ def tiny_data_root(tmp_path: Path) -> Path:
         f["input_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
         f["output_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
         f["alpha"] = np.full(n, 1e-3, dtype="float32")
+        f["full_trajectory"] = rng.normal(size=(n, 1, 3, s, s)).astype("float32")
         f["t"] = np.linspace(0, 1, 3).astype("float32")
+        f.attrs["T"] = 1.0
+        f.attrs["boundary_condition"] = "periodic"
+    with h5py.File(heat / "heat_test_1000-128-128.h5", "w") as f:
+        f["input_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
+        f["output_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
+        f["alpha"] = np.full(n, 2e-3, dtype="float32")
         f.attrs["T"] = 1.0
         f.attrs["boundary_condition"] = "periodic"
 

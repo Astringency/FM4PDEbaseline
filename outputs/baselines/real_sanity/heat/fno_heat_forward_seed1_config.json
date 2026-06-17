@@ -1,0 +1,179 @@
+{
+  "args": {
+    "allow_synthetic_fallback": false,
+    "baseline": "fno",
+    "batch_size": 1,
+    "config": null,
+    "data_root": "/home/tat512/C01Python/PDEdata",
+    "device": "cpu",
+    "dry_run": false,
+    "epochs": 1,
+    "experiment_mode": "debug",
+    "lr": null,
+    "noise_level": 0.0,
+    "num_sensors": 500,
+    "output_dir": "outputs/baselines/real_sanity/heat",
+    "pde": "heat",
+    "prefer_test": false,
+    "save_checkpoint": false,
+    "scalar_param_mode": "metadata",
+    "seed": 1,
+    "sensor_mode": "random",
+    "strict_size": false,
+    "synthetic_data": false,
+    "synthetic_resolution": 32,
+    "task": "forward",
+    "test_size": 2,
+    "test_split": "test",
+    "train_shards": 1,
+    "train_size": 2,
+    "val_size": 1
+  },
+  "backend": {
+    "backend_used": "recfno",
+    "backend_warning": "",
+    "fallback_used": false,
+    "official_backend": "recfno"
+  },
+  "config": {},
+  "data_spec": {
+    "branch_numel": 16384,
+    "input_channel_names": [
+      "u0"
+    ],
+    "input_channels": 1,
+    "input_numel": 16384,
+    "input_shape": [
+      1,
+      1,
+      128,
+      128
+    ],
+    "metadata": {
+      "T": 1.0,
+      "alpha_mode": "random",
+      "alpha_random": true,
+      "available_count": 2,
+      "base_seed": 0,
+      "bc": "periodic",
+      "boundary_condition": "periodic",
+      "canonical_layout": "NCHW",
+      "channel_names_input": "[\"u0\"]",
+      "channel_names_model_fixed_alpha": "[\"u0\", \"uT\"]",
+      "channel_names_model_random_alpha": "[\"u0\", \"alpha\", \"uT\", \"alpha\"]",
+      "channel_names_output": "[\"uT\"]",
+      "created_at": "2026-06-17T12:00:10.910515+00:00",
+      "dtype": "float32",
+      "equation": "u_t = alpha * Delta u on [0,1]^2",
+      "files": [
+        "/home/tat512/C01Python/PDEdata/heat/heat_10000-128-128_1.h5"
+      ],
+      "final_time": 1.0,
+      "fixed_alpha": 0.001,
+      "full_shape": [
+        2,
+        2,
+        128,
+        128
+      ],
+      "full_trajectory_shape": [
+        2,
+        1,
+        11,
+        128,
+        128
+      ],
+      "generation_git_commit": "b627697118922fe3eec10dae586de32b980f00d7",
+      "hdf5_schema": "{\"alpha\": \"[N] only when alpha_mode=random\", \"fixed_alpha\": \"root attr only when alpha_mode=fixed\", \"input_data\": \"[N,1,H,W] u0\", \"output_data\": \"[N,1,H,W] uT\"}",
+      "initial_condition_type": "periodic Gaussian random field",
+      "input_channel_names": [
+        "u0"
+      ],
+      "input_indices": [
+        0
+      ],
+      "input_shape": [
+        2,
+        1,
+        128,
+        128
+      ],
+      "loaded_count": 2,
+      "loader_materialized_schema_fixed_alpha": "[\"u0\", \"uT\"]",
+      "loader_materialized_schema_random_alpha": "[\"u0\", \"alpha\", \"uT\", \"alpha\"]",
+      "materialized_constant_fields": false,
+      "n_samples": 10000,
+      "n_time": 11,
+      "no_data_leakage_note": "Train and test samples are generated independently. Each sample uses seed=base_seed+global_sample_id, and train/test base_seed ranges do not overlap.",
+      "parameter_ranges": "{\"alpha\": {\"max\": 0.005, \"min\": 0.0005}}",
+      "pde_name": "heat",
+      "pde_params": {
+        "alpha": {
+          "tensor_shape": [
+            1
+          ]
+        }
+      },
+      "pde_params_available": [
+        "alpha"
+      ],
+      "resolution": "128x128",
+      "sample_id_end": 9999,
+      "sample_id_start": 0,
+      "save_trajectory": true,
+      "scalar_param_mode": "metadata",
+      "seed_end": 9999,
+      "seed_start": 0,
+      "shard_id": 1,
+      "split": "train",
+      "supports_trajectory": false,
+      "target_channel_names": [
+        "uT"
+      ],
+      "target_indices": [
+        1
+      ],
+      "target_shape": [
+        2,
+        1,
+        128,
+        128
+      ],
+      "task_channel_names": [
+        "uT"
+      ],
+      "time_dependent": true,
+      "time_values": [
+        0.0,
+        0.10000000149011612,
+        0.20000000298023224,
+        0.30000001192092896,
+        0.4000000059604645,
+        0.5,
+        0.6000000238418579,
+        0.699999988079071,
+        0.800000011920929,
+        0.8999999761581421,
+        1.0
+      ]
+    },
+    "pde": "heat",
+    "target_channel_names": [
+      "uT"
+    ],
+    "target_channels": 1,
+    "target_numel": 16384,
+    "target_shape": [
+      1,
+      1,
+      128,
+      128
+    ],
+    "task": "forward"
+  },
+  "method": {
+    "device": "cpu",
+    "epochs": 1,
+    "lr": 0.001
+  }
+}

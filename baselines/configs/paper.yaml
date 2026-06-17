@@ -1,0 +1,111 @@
+data_root: /home/tat512/C01Python/PDEdata
+output_dir: outputs/baselines/paper
+experiment_mode: paper
+
+pdes:
+  - darcy
+  - poisson
+  - helmholtz
+  - nsnonbounded
+  - burger
+  - reaction_diffusion
+  - shallow_water
+  - heat
+  - wave
+  - advection_diffusion
+  - steady_heat_conduction
+
+batch_size: 16
+epochs: 200
+learning_rate: 0.001
+train_size: 50000
+val_size: 1000
+test_size: 1000
+train_shards: 5
+scalar_param_mode: metadata
+seeds: [1, 2, 3]
+sensor_counts: [50, 100, 250, 500, 1000]
+sensor_modes: [random, grid, fixed]
+noise_levels: [0.0, 0.01, 0.05, 0.10]
+
+method:
+  official_backend: auto
+  width: 48
+  modes1: 16
+  modes2: 16
+  layers: 4
+  hidden: 256
+  basis: 128
+  token_dim: 128
+  num_latents: 128
+  heads: 4
+  steps: 200
+  refine_steps: 100
+  lambda_obs: 1.0
+  lambda_pde: 0.01
+  lambda_int: 0.01
+  lambda_bc: 0.01
+  lambda_ic: 0.01
+  physics_loss_mode: total
+  lambda_reg: 0.00001
+
+method_by_baseline:
+  fno:
+    width: 64
+    layers: 4
+    modes1: 20
+    modes2: 20
+  deeponet:
+    hidden: 256
+    basis: 128
+  ifno:
+    width: 64
+    layers: 4
+    cycle_weight: 0.1
+  recfno:
+    width: 64
+    embedding: mask
+  senseiver:
+    token_dim: 128
+    num_latents: 128
+    heads: 4
+  voronoicnn:
+    width: 64
+  pinn_sparse:
+    hidden: 128
+    depth: 5
+    steps: 1000
+    lr: 0.001
+    optimizer: adam
+  pc_bnn:
+    hidden: 128
+    depth: 5
+    particles: 8
+    steps: 500
+    lr: 0.001
+  pde_opt:
+    steps: 500
+    lr: 0.01
+    lambda_reg: 0.00001
+  var4d:
+    steps: 500
+    lr: 0.01
+    lambda_background: 0.1
+    lambda_obs: 1.0
+  vivid:
+    refine_steps: 300
+    lr: 0.005
+    lambda_inverse_operator: 0.25
+    lambda_background: 0.05
+
+method_by_pde:
+  heat:
+    lambda_int: 0.01
+  wave:
+    lambda_int: 0.01
+  advection_diffusion:
+    lambda_int: 0.01
+  steady_heat_conduction:
+    lambda_int: 0.01
+
+method_by_baseline_and_pde: {}

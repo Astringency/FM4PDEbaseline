@@ -193,6 +193,7 @@ def heat_residual(
         pred_min_channels=2,
         pred=pred,
         value=alpha,
+        required=True,
     )
     final_time = float(metadata.get("final_time", metadata.get("T", 1.0)))
     dt = _time_step(u.shape[2], final_time, metadata)
@@ -224,6 +225,7 @@ def wave_residual(
         pred_min_channels=3,
         pred=pred,
         value=wave_speed,
+        required=True,
     )
     final_time = float(metadata.get("final_time", metadata.get("T", 1.0)))
     dt = _time_step(q.shape[2], final_time, metadata)
@@ -253,6 +255,7 @@ def advection_diffusion_residual(u: torch.Tensor, metadata: dict | None = None, 
         pred_channel=1,
         pred_min_channels=4,
         pred=pred,
+        required=True,
     )
     by = _parameter_field(
         metadata,
@@ -266,6 +269,7 @@ def advection_diffusion_residual(u: torch.Tensor, metadata: dict | None = None, 
         pred_channel=2,
         pred_min_channels=4,
         pred=pred,
+        required=True,
     )
     kappa = _parameter_field(
         metadata,
@@ -279,6 +283,7 @@ def advection_diffusion_residual(u: torch.Tensor, metadata: dict | None = None, 
         pred_channel=3,
         pred_min_channels=4,
         pred=pred,
+        required=True,
     )
     final_time = float(metadata.get("final_time", metadata.get("T", 1.0)))
     dt = _time_step(u.shape[2], final_time, metadata)
@@ -561,6 +566,7 @@ def _steady_heat_conduction_losses(pred: torch.Tensor, metadata: dict, inverse: 
         full_channel=1 if not inverse else 3,
         pred_channel=1,
         pred=pred,
+        required=True,
     )
     residual = steady_heat_conduction_residual(source, solution, metadata)
     dx = _spatial_step(solution, metadata, boundary="mixed", default_domain=1.0)
@@ -800,12 +806,18 @@ def _parameter_field(
     pred_min_channels: int | None = None,
     pred: torch.Tensor | None = None,
     value: torch.Tensor | float | None = None,
+    required: bool = False,
 ) -> torch.Tensor:
     if value is not None:
         return _expand_parameter_field(value, ref)
     for key in keys:
         if key in metadata and metadata[key] is not None:
             return _expand_parameter_field(metadata[key], ref)
+    params = metadata.get("pde_params")
+    if isinstance(params, dict):
+        for key in keys:
+            if key in params and params[key] is not None:
+                return _expand_parameter_field(params[key], ref)
 
     if isinstance(metadata.get("full_tensor"), torch.Tensor) and full_channel is not None:
         full = metadata["full_tensor"].to(ref.device, ref.dtype)
@@ -824,6 +836,8 @@ def _parameter_field(
         if pred.ndim == 4 and pred.shape[1] >= max(pred_channel + 1, min_channels):
             return _expand_parameter_field(pred[:, pred_channel : pred_channel + 1], ref)
 
+    if required:
+        raise ValueError(f"Missing required scalar PDE parameter; expected one of {keys}")
     return torch.ones_like(ref[:, :1]) * float(default)
 
 

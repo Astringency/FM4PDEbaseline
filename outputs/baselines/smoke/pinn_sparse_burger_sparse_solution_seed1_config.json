@@ -1,62 +1,113 @@
 {
   "args": {
+    "allow_synthetic_fallback": false,
     "baseline": "pinn_sparse",
-    "pde": "burger",
-    "task": "sparse_solution",
-    "data_root": "/home/tat512/C01Python/PDEdata",
-    "config": null,
-    "num_sensors": 50,
-    "sensor_mode": "random",
-    "noise_level": 0.0,
-    "train_size": 4,
-    "test_size": 2,
     "batch_size": 2,
-    "epochs": 1,
-    "lr": 0.001,
-    "seed": 1,
+    "config": null,
+    "data_root": "/home/tat512/C01Python/PDEdata",
     "device": "cpu",
-    "output_dir": "outputs/baselines/smoke",
     "dry_run": true,
+    "epochs": 1,
+    "experiment_mode": "smoke",
+    "lr": null,
+    "noise_level": 0.0,
+    "num_sensors": 50,
+    "output_dir": "outputs/baselines/smoke",
+    "pde": "burger",
+    "prefer_test": false,
+    "save_checkpoint": false,
+    "scalar_param_mode": "metadata",
+    "seed": 1,
+    "sensor_mode": "random",
+    "strict_size": false,
     "synthetic_data": true,
     "synthetic_resolution": 32,
-    "prefer_test": false,
-    "save_checkpoint": false
-  },
-  "method": {
-    "epochs": 1,
-    "lr": 0.001,
-    "device": "cpu",
-    "max_steps": 1,
-    "steps": 1,
-    "refine_steps": 1
-  },
-  "data_spec": {
-    "pde": "burger",
     "task": "sparse_solution",
+    "test_size": 4,
+    "test_split": "test",
+    "train_shards": 5,
+    "train_size": 8,
+    "val_size": 2
+  },
+  "backend": {
+    "backend_used": "local",
+    "backend_warning": "using fallback backend local",
+    "fallback_used": true,
+    "official_backend": "local"
+  },
+  "config": {},
+  "data_spec": {
+    "branch_numel": 50,
+    "input_channel_names": [
+      "u"
+    ],
+    "input_channels": 1,
+    "input_numel": 1024,
     "input_shape": [
       2,
       1,
       32,
       32
     ],
-    "target_shape": [
-      2,
-      1,
-      32,
-      32
-    ],
-    "input_channels": 1,
-    "target_channels": 1,
-    "input_numel": 1024,
-    "target_numel": 1024,
-    "branch_numel": 50,
     "metadata": {
-      "source": "synthetic",
-      "canonical_layout": "NCTX",
+      "available_count": 8,
       "axes": [
         "time",
         "x"
       ],
+      "canonical_layout": "NCTX",
+      "files": [],
+      "final_time": 1.0,
+      "full_shape": [
+        8,
+        1,
+        32,
+        32
+      ],
+      "global_sample_ids": [
+        "synthetic:burger:train:1011:0",
+        "synthetic:burger:train:1011:1",
+        "synthetic:burger:train:1011:2",
+        "synthetic:burger:train:1011:3",
+        "synthetic:burger:train:1011:4",
+        "synthetic:burger:train:1011:5",
+        "synthetic:burger:train:1011:6",
+        "synthetic:burger:train:1011:7"
+      ],
+      "input_channel_names": [
+        "u"
+      ],
+      "input_shape": [
+        8,
+        1,
+        32,
+        32
+      ],
+      "loaded_count": 8,
+      "mask_id": "86e7ebca042519f9",
+      "noise_level": 0.0,
+      "nu": 0.01,
+      "num_sensors": 50,
+      "pde_params": {},
+      "pde_params_available": [],
+      "scalar_param_mode": "metadata",
+      "sensor_mode": "random",
+      "source": "synthetic",
+      "split": "train",
+      "supports_trajectory": true,
+      "target_channel_names": [
+        "u"
+      ],
+      "target_shape": [
+        8,
+        1,
+        32,
+        32
+      ],
+      "task_channel_names": [
+        "u"
+      ],
+      "time_dependent": true,
       "time_values": [
         0.0,
         0.03225806451612903,
@@ -90,36 +141,29 @@
         0.9354838709677419,
         0.967741935483871,
         1.0
-      ],
-      "final_time": 1.0,
-      "nu": 0.01,
-      "time_dependent": true,
-      "supports_trajectory": true,
-      "sensor_mode": "random",
-      "num_sensors": 50,
-      "noise_level": 0.0,
-      "mask_id": "86e7ebca042519f9",
-      "input_shape": [
-        4,
-        1,
-        32,
-        32
-      ],
-      "target_shape": [
-        4,
-        1,
-        32,
-        32
-      ],
-      "full_shape": [
-        4,
-        1,
-        32,
-        32
-      ],
-      "task_channel_names": [
-        "u"
       ]
-    }
+    },
+    "pde": "burger",
+    "target_channel_names": [
+      "u"
+    ],
+    "target_channels": 1,
+    "target_numel": 1024,
+    "target_shape": [
+      2,
+      1,
+      32,
+      32
+    ],
+    "task": "sparse_solution"
+  },
+  "method": {
+    "device": "cpu",
+    "epochs": 1,
+    "lr": 0.001,
+    "max_steps": 1,
+    "max_val_steps": 1,
+    "refine_steps": 1,
+    "steps": 1
   }
 }

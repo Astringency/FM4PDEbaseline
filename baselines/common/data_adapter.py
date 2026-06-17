@@ -26,7 +26,14 @@ class PDEBatch:
     obs_values: torch.Tensor | None
     obs_coords: torch.Tensor | None
     channel_names: list[str]
+    input_channel_names: list[str]
+    target_channel_names: list[str]
     metadata: dict
+    pde_params: dict[str, Any]
+    split: str
+    sample_indices: torch.Tensor | None
+    global_sample_ids: list[str]
+    file_paths: list[str]
 
 
 @dataclass
@@ -77,6 +84,48 @@ def _safe_loadmat(path: Path, keys: Iterable[str]) -> dict[str, np.ndarray]:
     return {k: raw[k] for k in keys if k in raw}
 
 
+def _validate_split(split: str) -> str:
+    split = str(split).lower()
+    if split not in {"train", "val", "test"}:
+        raise ValueError(f"split must be one of train/val/test, got {split!r}")
+    return split
+
+
+def _expand_scalar_to_field(values: torch.Tensor | np.ndarray, h: int, w: int) -> torch.Tensor:
+    tensor = torch.as_tensor(values, dtype=torch.float32).reshape(-1, 1, 1, 1)
+    return tensor.expand(tensor.shape[0], 1, h, w).clone()
+
+
+def _apply_sample_offset_tensor(x: torch.Tensor, offset: int, max_samples: int | None) -> torch.Tensor:
+    offset = max(int(offset), 0)
+    end = None if max_samples is None else offset + int(max_samples)
+    return x[offset:end]
+
+
+def _file_sample_ids(path: Path, local_start: int, count: int) -> list[str]:
+    return [f"{path.name}:{local_start + i}" for i in range(count)]
+
+
+def _finalize_loaded_raw(raw: dict[str, Any], max_samples: int | None, strict_size: bool) -> dict[str, Any]:
+    n = int(raw["full_tensor"].shape[0])
+    raw.setdefault("metadata", {})
+    raw.setdefault("pde_params", raw["metadata"].get("pde_params", {}))
+    raw.setdefault("split", raw["metadata"].get("split", ""))
+    raw.setdefault("file_paths", raw["metadata"].get("files", []))
+    raw.setdefault("sample_indices", raw["metadata"].get("sample_indices", torch.arange(n, dtype=torch.long)))
+    raw.setdefault("global_sample_ids", raw["metadata"].get("global_sample_ids", []))
+    raw["metadata"].setdefault("available_count", n)
+    raw["metadata"].setdefault("loaded_count", n)
+    raw["metadata"].setdefault("files", list(raw.get("file_paths", [])))
+    raw["metadata"].setdefault("pde_params", raw.get("pde_params", {}))
+    if max_samples is not None and n < int(max_samples):
+        message = f"Requested {max_samples} samples but only loaded {n} from split={raw.get('split', raw['metadata'].get('split', 'unknown'))}."
+        if strict_size:
+            raise ValueError(message)
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+    return raw
+
+
 class PDEDataRegistry:
     """Registry/adapter layer converting FM4PDE raw files to task batches.
 
@@ -114,22 +163,75 @@ class PDEDataRegistry:
         data_root: str | Path,
         split: str = "train",
         max_samples: int | None = None,
+        train_shards: int = 5,
+        sample_offset: int = 0,
+        val_from_train_offset: int | None = None,
         prefer_test: bool = False,
         synthetic_if_missing: bool = False,
         synthetic_resolution: int = 32,
+        synthetic_seed: int = 17,
+        scalar_param_mode: str = "metadata",
+        strict_size: bool = False,
     ) -> dict[str, Any]:
         spec = self.get(pde_name)
+        split = _validate_split(split)
         root = Path(data_root)
+        if scalar_param_mode == "global":
+            warnings.warn(
+                "--scalar-param-mode global is reserved for future global-conditioning adapters; "
+                "using metadata-only scalar parameters for this run.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            scalar_param_mode = "metadata"
         try:
-            return spec.loader(root, split=split, max_samples=max_samples, prefer_test=prefer_test)
+            return spec.loader(
+                root,
+                split=split,
+                max_samples=max_samples,
+                train_shards=train_shards,
+                sample_offset=sample_offset,
+                val_from_train_offset=val_from_train_offset,
+                prefer_test=prefer_test,
+                scalar_param_mode=scalar_param_mode,
+                strict_size=strict_size,
+            )
         except FileNotFoundError as exc:
+            if split == "val":
+                train_offset = int(val_from_train_offset or sample_offset or 0)
+                try:
+                    raw = spec.loader(
+                        root,
+                        split="train",
+                        max_samples=max_samples,
+                        train_shards=train_shards,
+                        sample_offset=train_offset,
+                        val_from_train_offset=val_from_train_offset,
+                        prefer_test=False,
+                        scalar_param_mode=scalar_param_mode,
+                        strict_size=False,
+                    )
+                    raw.setdefault("metadata", {})["split"] = "val"
+                    raw["metadata"]["split_source"] = "deterministic_train_subset"
+                    raw["metadata"]["val_from_train_offset"] = train_offset
+                    raw["split"] = "val"
+                    return _finalize_loaded_raw(raw, max_samples, strict_size=False)
+                except FileNotFoundError:
+                    pass
             if synthetic_if_missing:
                 warnings.warn(
                     f"{spec.name}: {exc}. Falling back to synthetic smoke data.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
-                return self.synthetic_raw(spec.name, max_samples or 8, synthetic_resolution)
+                return self.synthetic_raw(
+                    spec.name,
+                    max_samples or 8,
+                    synthetic_resolution,
+                    split=split,
+                    seed=synthetic_seed,
+                    scalar_param_mode=scalar_param_mode,
+                )
             raise
 
     def to_canonical(self, raw: dict[str, Any], pde_name: str) -> dict[str, Any]:
@@ -139,6 +241,13 @@ class PDEDataRegistry:
             "full_tensor": raw["full_tensor"].float(),
             "channel_names": list(raw.get("channel_names", spec.channel_names)),
             "metadata": dict(raw.get("metadata", {})),
+            "input_channel_names": list(raw.get("input_channel_names", [])),
+            "target_channel_names": list(raw.get("target_channel_names", [])),
+            "pde_params": dict(raw.get("pde_params", raw.get("metadata", {}).get("pde_params", {}))),
+            "split": str(raw.get("split", raw.get("metadata", {}).get("split", ""))),
+            "sample_indices": raw.get("sample_indices"),
+            "global_sample_ids": list(raw.get("global_sample_ids", raw.get("metadata", {}).get("global_sample_ids", []))),
+            "file_paths": list(raw.get("file_paths", raw.get("metadata", {}).get("files", []))),
         }
 
     def make_task(
@@ -161,8 +270,15 @@ class PDEDataRegistry:
         metadata = dict(canonical.get("metadata", {}))
         metadata.setdefault("time_dependent", spec.time_dependent)
         metadata.setdefault("supports_trajectory", spec.supports_trajectory)
+        metadata.setdefault("split", canonical.get("split", ""))
+        metadata.setdefault("files", list(canonical.get("file_paths", [])))
+        pde_params = dict(canonical.get("pde_params", metadata.get("pde_params", {})))
+        if pde_params:
+            metadata["pde_params"] = pde_params
+            for key, value in pde_params.items():
+                metadata.setdefault(key, value)
 
-        input_fields, target_fields, task_channel_names = self._split_task(full, spec, task, metadata)
+        input_fields, target_fields, input_names, target_names = self._split_task(full, spec, task, metadata, canonical)
         coords = make_coordinate_grid(tuple(target_fields.shape[2:]), batch_size=target_fields.shape[0])
 
         mask = obs_values = obs_coords = None
@@ -189,13 +305,18 @@ class PDEDataRegistry:
             )
             if task in {"sparse_solution", "sparse_reconstruction"}:
                 input_fields = obs["masked_grid"]
+                input_names = list(target_names)
             elif task == "sparse_inverse":
                 input_fields = obs["masked_grid"]
+                input_names = list(target_names)
 
         metadata["input_shape"] = tuple(input_fields.shape)
         metadata["target_shape"] = tuple(target_fields.shape)
         metadata["full_shape"] = tuple(full.shape)
-        metadata["task_channel_names"] = task_channel_names
+        metadata["input_channel_names"] = input_names
+        metadata["target_channel_names"] = target_names
+        metadata["task_channel_names"] = target_names
+        metadata["pde_params_available"] = sorted(pde_params)
 
         return PDEBatch(
             pde_name=spec.name,
@@ -208,7 +329,14 @@ class PDEDataRegistry:
             obs_values=obs_values,
             obs_coords=obs_coords,
             channel_names=canonical.get("channel_names", spec.channel_names),
+            input_channel_names=input_names,
+            target_channel_names=target_names,
             metadata=metadata,
+            pde_params=pde_params,
+            split=str(canonical.get("split", metadata.get("split", ""))),
+            sample_indices=canonical.get("sample_indices"),
+            global_sample_ids=list(canonical.get("global_sample_ids", [])),
+            file_paths=list(canonical.get("file_paths", metadata.get("files", []))),
         )
 
     def make_dataset(
@@ -218,6 +346,9 @@ class PDEDataRegistry:
         task: str,
         split: str = "train",
         max_samples: int | None = None,
+        train_shards: int = 5,
+        sample_offset: int = 0,
+        val_from_train_offset: int | None = None,
         num_sensors: int | None = None,
         sensor_mode: str = "random",
         noise_level: float = 0.0,
@@ -225,15 +356,24 @@ class PDEDataRegistry:
         prefer_test: bool = False,
         synthetic_if_missing: bool = False,
         synthetic_resolution: int = 32,
+        synthetic_seed: int = 17,
+        scalar_param_mode: str = "metadata",
+        strict_size: bool = False,
     ) -> "PDEBatchDataset":
         raw = self.load_raw(
             pde_name,
             data_root,
             split=split,
             max_samples=max_samples,
+            train_shards=train_shards,
+            sample_offset=sample_offset,
+            val_from_train_offset=val_from_train_offset,
             prefer_test=prefer_test,
             synthetic_if_missing=synthetic_if_missing,
             synthetic_resolution=synthetic_resolution,
+            synthetic_seed=synthetic_seed,
+            scalar_param_mode=scalar_param_mode,
+            strict_size=strict_size,
         )
         batch = self.make_task(
             self.to_canonical(raw, pde_name),
@@ -246,10 +386,21 @@ class PDEDataRegistry:
         )
         return PDEBatchDataset(batch)
 
-    def synthetic_raw(self, pde_name: str, n: int = 8, resolution: int = 32) -> dict[str, Any]:
+    def synthetic_raw(
+        self,
+        pde_name: str,
+        n: int = 8,
+        resolution: int = 32,
+        split: str = "train",
+        seed: int = 17,
+        scalar_param_mode: str = "metadata",
+    ) -> dict[str, Any]:
         pde_name = pde_name.lower()
-        gen = torch.Generator().manual_seed(17)
+        split = _validate_split(split)
+        materialize = scalar_param_mode == "materialize"
+        gen = torch.Generator().manual_seed(seed)
         h = w = resolution
+        pde_params: dict[str, torch.Tensor] = {}
         if pde_name in {"darcy", "poisson", "helmholtz"}:
             c = 2
             x = torch.randn(n, c, h, w, generator=gen)
@@ -258,10 +409,18 @@ class PDEDataRegistry:
         elif pde_name == "heat":
             u0 = torch.randn(n, 1, h, w, generator=gen)
             uT = torch.randn(n, 1, h, w, generator=gen)
-            alpha = torch.full((n, 1, h, w), 1e-3)
-            x = torch.cat([u0, alpha, uT, alpha], dim=1)
-            channels = self.get(pde_name).channel_names
-            meta = {"source": "synthetic", "canonical_layout": "NCHW", "alpha": torch.full((n,), 1e-3), "final_time": 1.0, "bc": "periodic"}
+            alpha = torch.full((n,), 1e-3)
+            pde_params = {"alpha": alpha}
+            if materialize:
+                alpha_field = _expand_scalar_to_field(alpha, h, w)
+                x = torch.cat([u0, alpha_field, uT, alpha_field.clone()], dim=1)
+                channels = ["u0", "alpha", "uT", "alpha_T"]
+                meta_indices = {"input_indices": [0, 1], "target_indices": [2, 3]}
+            else:
+                x = torch.cat([u0, uT], dim=1)
+                channels = self.get(pde_name).channel_names
+                meta_indices = {"input_indices": [0], "target_indices": [1]}
+            meta = {"source": "synthetic", "canonical_layout": "NCHW", "alpha": alpha, "final_time": 1.0, "bc": "periodic", **meta_indices}
         elif pde_name == "wave":
             u0 = torch.randn(n, 1, h, w, generator=gen)
             v0 = torch.zeros(n, 1, h, w)
@@ -269,31 +428,52 @@ class PDEDataRegistry:
             vT = torch.randn(n, 1, h, w, generator=gen)
             x = torch.cat([u0, v0, uT, vT], dim=1)
             channels = self.get(pde_name).channel_names
-            meta = {"source": "synthetic", "canonical_layout": "NCHW", "fixed_c": 1.0, "final_time": 1.0, "bc": "periodic"}
+            c_param = torch.full((n,), 1.0)
+            pde_params = {"c": c_param}
+            meta = {"source": "synthetic", "canonical_layout": "NCHW", "fixed_c": 1.0, "c": c_param, "final_time": 1.0, "bc": "periodic"}
         elif pde_name == "advection_diffusion":
             u0 = torch.randn(n, 1, h, w, generator=gen)
             uT = torch.randn(n, 1, h, w, generator=gen)
-            bx = torch.full((n, 1, h, w), 0.25)
-            by = torch.full((n, 1, h, w), -0.15)
-            kappa = torch.full((n, 1, h, w), 1e-3)
-            x = torch.cat([u0, bx, by, kappa, uT, bx, by, kappa], dim=1)
-            channels = self.get(pde_name).channel_names
+            bx = torch.full((n,), 0.25)
+            by = torch.full((n,), -0.15)
+            kappa = torch.full((n,), 1e-3)
+            pde_params = {"b_x": bx, "b_y": by, "kappa": kappa}
+            if materialize:
+                bx_f = _expand_scalar_to_field(bx, h, w)
+                by_f = _expand_scalar_to_field(by, h, w)
+                k_f = _expand_scalar_to_field(kappa, h, w)
+                x = torch.cat([u0, bx_f, by_f, k_f, uT, bx_f.clone(), by_f.clone(), k_f.clone()], dim=1)
+                channels = ["u0", "b_x", "b_y", "kappa", "uT", "b_x_T", "b_y_T", "kappa_T"]
+                meta_indices = {"input_indices": [0, 1, 2, 3], "target_indices": [4, 5, 6, 7]}
+            else:
+                x = torch.cat([u0, uT], dim=1)
+                channels = self.get(pde_name).channel_names
+                meta_indices = {"input_indices": [0], "target_indices": [1]}
             meta = {
                 "source": "synthetic",
                 "canonical_layout": "NCHW",
-                "b_x": torch.full((n,), 0.25),
-                "b_y": torch.full((n,), -0.15),
-                "kappa": torch.full((n,), 1e-3),
+                "b_x": bx,
+                "b_y": by,
+                "kappa": kappa,
                 "final_time": 1.0,
                 "bc": "periodic",
+                **meta_indices,
             }
         elif pde_name in {"steady_heat_conduction", "steady_heat"}:
             source = torch.randn(n, 1, h, w, generator=gen)
-            u_d = torch.full((n, 1, h, w), 298.0)
+            u_d = torch.full((n,), 298.0)
             solution = 298.0 + torch.randn(n, 1, h, w, generator=gen) * 0.01
-            x = torch.cat([source, u_d, solution, u_d], dim=1)
-            channels = self.get(pde_name).channel_names
-            meta = {"source": "synthetic", "canonical_layout": "NCHW", "u_D": torch.full((n,), 298.0)}
+            pde_params = {"u_D": u_d}
+            if materialize:
+                u_d_f = _expand_scalar_to_field(u_d, h, w)
+                x = torch.cat([source, u_d_f, solution, u_d_f.clone()], dim=1)
+                channels = ["f", "u_D", "u", "u_D_T"]
+                meta_indices = {"input_indices": [0, 1], "target_indices": [2, 3]}
+            else:
+                x = torch.cat([source, solution], dim=1)
+                channels = self.get(pde_name).channel_names
+                meta_indices = {"input_indices": [0], "target_indices": [1]}
+            meta = {"source": "synthetic", "canonical_layout": "NCHW", "u_D": u_d, **meta_indices}
         elif pde_name == "nsnonbounded":
             x = torch.randn(n, 1, 11, h, w, generator=gen)
             channels = ["w"]
@@ -322,12 +502,37 @@ class PDEDataRegistry:
             x = torch.randn(n, 2, h, w, generator=gen)
             channels = ["input", "target"]
             meta = {"source": "synthetic", "canonical_layout": "NCHW"}
-        return {"full_tensor": x, "channel_names": channels, "metadata": meta}
+        sample_indices = torch.arange(n, dtype=torch.long)
+        meta.update(
+            {
+                "split": split,
+                "scalar_param_mode": scalar_param_mode,
+                "pde_params": pde_params,
+                "pde_params_available": sorted(pde_params),
+                "sample_indices": sample_indices,
+                "global_sample_ids": [f"synthetic:{pde_name}:{split}:{seed}:{i}" for i in range(n)],
+            }
+        )
+        return _finalize_loaded_raw(
+            {
+                "full_tensor": x,
+                "channel_names": channels,
+                "metadata": meta,
+                "pde_params": pde_params,
+                "split": split,
+                "sample_indices": sample_indices,
+                "global_sample_ids": meta["global_sample_ids"],
+                "file_paths": [],
+            },
+            max_samples=n,
+            strict_size=True,
+        )
 
     def _split_task(
-        self, full: torch.Tensor, spec: PDESpec, task: str, metadata: dict[str, Any]
-    ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
+        self, full: torch.Tensor, spec: PDESpec, task: str, metadata: dict[str, Any], canonical: dict[str, Any] | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor, list[str], list[str]]:
         name = spec.name
+        canonical = canonical or {}
         if name == "burger":
             target = full
             initial = metadata.get("initial_1d")
@@ -337,8 +542,8 @@ class PDEDataRegistry:
                 init = initial.to(full.device, full.dtype).reshape(full.shape[0], 1, 1, full.shape[-1])
                 input_fields = init.repeat(1, 1, full.shape[-2], 1)
             if task in {"inverse", "sparse_inverse"}:
-                return target, input_fields[:, :, :1, :], ["u0"]
-            return input_fields, target, ["u"]
+                return target, input_fields[:, :, :1, :], ["u"], ["u0"]
+            return input_fields, target, ["u0"], ["u"]
 
         if full.ndim == 5:
             if name == "nsnonbounded":
@@ -356,15 +561,20 @@ class PDEDataRegistry:
                 target = full[:, :, -1]
                 target_names = [f"{c}_target" for c in spec.channel_names]
         else:
-            inp = full[:, spec.input_indices]
-            target = full[:, spec.target_indices]
-            target_names = [spec.channel_names[i] for i in spec.target_indices]
+            input_indices = list(metadata.get("input_indices", spec.input_indices))
+            target_indices = list(metadata.get("target_indices", spec.target_indices))
+            inp = full[:, input_indices]
+            target = full[:, target_indices]
+            target_names = list(canonical.get("target_channel_names") or metadata.get("target_channel_names") or [spec.channel_names[i] for i in target_indices])
 
         if task in {"inverse", "sparse_inverse"}:
-            return target, inp, [spec.channel_names[i] for i in spec.input_indices]
+            input_names = target_names
+            target_names = list(canonical.get("input_channel_names") or metadata.get("input_channel_names") or [spec.channel_names[i] for i in metadata.get("input_indices", spec.input_indices)])
+            return target, inp, input_names, target_names
         if task in {"both", "joint"}:
-            return full, full, list(spec.channel_names)
-        return inp, target, target_names
+            return full, full, list(spec.channel_names), list(spec.channel_names)
+        input_names = list(canonical.get("input_channel_names") or metadata.get("input_channel_names") or [spec.channel_names[i] for i in metadata.get("input_indices", spec.input_indices)])
+        return inp, target, input_names, target_names
 
     def _register_defaults(self) -> None:
         self.register(
@@ -425,12 +635,12 @@ class PDEDataRegistry:
         self.register(
             PDESpec(
                 "heat",
-                ["u0", "alpha", "uT", "alpha_T"],
-                [0, 1],
-                [2, 3],
+                ["u0", "uT"],
+                [0],
+                [1],
                 _load_heat,
                 time_dependent=True,
-                notes="Random/fixed-alpha HDF5 layout materialized as [u0, alpha, uT, alpha].",
+                notes="Future HDF5 layout uses physical fields [u0,uT]; alpha is metadata unless scalar_param_mode=materialize.",
             )
         )
         self.register(
@@ -447,24 +657,24 @@ class PDEDataRegistry:
         self.register(
             PDESpec(
                 "advection_diffusion",
-                ["u0", "b_x", "b_y", "kappa", "uT", "b_x_T", "b_y_T", "kappa_T"],
-                [0, 1, 2, 3],
-                [4, 5, 6, 7],
+                ["u0", "uT"],
+                [0],
+                [1],
                 _load_advection_diffusion,
                 aliases=("advdiff",),
                 time_dependent=True,
-                notes="HDF5 layout materialized as [u0, b_x, b_y, kappa, uT, b_x, b_y, kappa].",
+                notes="Future HDF5 layout uses physical fields [u0,uT]; b_x/b_y/kappa are metadata unless materialized.",
             )
         )
         self.register(
             PDESpec(
                 "steady_heat_conduction",
-                ["f", "u_D", "u", "u_D_T"],
-                [0, 1],
-                [2, 3],
+                ["f", "u"],
+                [0],
+                [1],
                 _load_steady_heat_conduction,
                 aliases=("steady_heat", "nonlinear_heat_conduction"),
-                notes="HDF5 layout materialized as [f, u_D, u, u_D].",
+                notes="Future HDF5 layout uses physical fields [f,u]; u_D is metadata unless materialized.",
             )
         )
 
@@ -482,10 +692,9 @@ class PDEBatchDataset(Dataset):
 
 def slice_pde_batch(batch: PDEBatch, index: int) -> PDEBatch:
     sl = slice(index, index + 1)
-    metadata = dict(batch.metadata)
-    for key, value in list(metadata.items()):
-        if isinstance(value, torch.Tensor) and value.shape[:1] == batch.full_tensor.shape[:1]:
-            metadata[key] = value[sl]
+    metadata = _slice_metadata(batch.metadata, sl, batch.full_tensor.shape[0])
+    pde_params = _slice_metadata(batch.pde_params, sl, batch.full_tensor.shape[0])
+    global_ids = batch.global_sample_ids[index : index + 1] if batch.global_sample_ids else []
     return PDEBatch(
         pde_name=batch.pde_name,
         task=batch.task,
@@ -497,7 +706,14 @@ def slice_pde_batch(batch: PDEBatch, index: int) -> PDEBatch:
         obs_values=batch.obs_values[sl] if batch.obs_values is not None else None,
         obs_coords=batch.obs_coords[sl] if batch.obs_coords is not None else None,
         channel_names=batch.channel_names,
+        input_channel_names=batch.input_channel_names,
+        target_channel_names=batch.target_channel_names,
         metadata=metadata,
+        pde_params=pde_params,
+        split=batch.split,
+        sample_indices=batch.sample_indices[sl] if batch.sample_indices is not None else None,
+        global_sample_ids=global_ids,
+        file_paths=batch.file_paths,
     )
 
 
@@ -511,10 +727,14 @@ def pde_collate(items: list[PDEBatch]) -> PDEBatch:
             coords = torch.cat([b.coords for b in items if b.coords is not None], dim=0)
         else:
             coords = first.coords
-    metadata = dict(first.metadata)
-    for key, value in list(metadata.items()):
-        if isinstance(value, torch.Tensor) and value.shape[:1] == first.full_tensor.shape[:1]:
-            metadata[key] = torch.cat([b.metadata[key] for b in items], dim=0)
+    metadata = _collate_metadata([b.metadata for b in items], first.full_tensor.shape[0])
+    pde_params = _collate_metadata([b.pde_params for b in items], first.full_tensor.shape[0])
+    sample_indices = None
+    if first.sample_indices is not None:
+        sample_indices = torch.cat([b.sample_indices for b in items if b.sample_indices is not None], dim=0)
+    global_ids: list[str] = []
+    for b in items:
+        global_ids.extend(b.global_sample_ids)
     return PDEBatch(
         pde_name=first.pde_name,
         task=first.task,
@@ -526,65 +746,207 @@ def pde_collate(items: list[PDEBatch]) -> PDEBatch:
         obs_values=torch.cat([b.obs_values for b in items], dim=0) if first.obs_values is not None else None,
         obs_coords=torch.cat([b.obs_coords for b in items], dim=0) if first.obs_coords is not None else None,
         channel_names=first.channel_names,
+        input_channel_names=first.input_channel_names,
+        target_channel_names=first.target_channel_names,
         metadata=metadata,
+        pde_params=pde_params,
+        split=first.split,
+        sample_indices=sample_indices,
+        global_sample_ids=global_ids,
+        file_paths=first.file_paths,
     )
 
 
+def _slice_metadata(metadata: dict[str, Any], sl: slice, batch_n: int) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if isinstance(value, torch.Tensor) and value.shape[:1] == (batch_n,):
+            out[key] = value[sl]
+        elif isinstance(value, dict):
+            out[key] = _slice_metadata(value, sl, batch_n)
+        else:
+            out[key] = value
+    return out
+
+
+def _collate_metadata(items: list[dict[str, Any]], item_n: int) -> dict[str, Any]:
+    if not items:
+        return {}
+    out = dict(items[0])
+    for key, value in list(out.items()):
+        if isinstance(value, torch.Tensor) and value.shape[:1] == (item_n,):
+            tensors = [m[key] for m in items if isinstance(m.get(key), torch.Tensor)]
+            out[key] = torch.cat(tensors, dim=0)
+        elif isinstance(value, dict):
+            out[key] = _collate_metadata([m.get(key, {}) for m in items], item_n)
+    return out
+
+
 def _candidate_files(root: Path, pde: str, split: str, patterns: list[str], aliases: tuple[str, ...] = ()) -> list[Path]:
-    dirs = [root / pde, *(root / a for a in aliases)]
+    root = Path(root).expanduser()
+    dirs = [root / pde, *(root / a for a in aliases), root]
     if split == "test":
-        dirs.insert(0, root / "test1125")
+        # Formal per-PDE test files are preferred. ``test1125`` is a legacy
+        # compatibility directory and is searched only after PDE-local paths.
+        dirs.append(root / "test1125")
     found: list[Path] = []
     for base in dirs:
         for pat in patterns:
             found.extend(sorted(base.glob(pat)))
-    return [p for p in found if p.exists()]
+    unique: list[Path] = []
+    seen = set()
+    for path in found:
+        if path.exists() and path not in seen:
+            unique.append(path)
+            seen.add(path)
+    return sorted(unique, key=_shard_sort_key)
 
 
-def _load_darcy(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
-    patterns = ["darcy_test_1000-128-128.mat", "darcy_1000-128-128_test.mat"] if split == "test" or prefer_test else ["darcy_10000-128-128_*.mat"]
-    files = _candidate_files(root, "darcy", split if not prefer_test else "test", patterns)
+def _candidate_descriptions(root: Path, pde: str, split: str, patterns: list[str], aliases: tuple[str, ...] = ()) -> list[str]:
+    dirs = [Path(root).expanduser() / pde, *(Path(root).expanduser() / a for a in aliases), Path(root).expanduser()]
+    if split == "test":
+        dirs.append(Path(root).expanduser() / "test1125")
+    return [str(base / pat) for base in dirs for pat in patterns]
+
+
+def _missing_error(root: Path, pde: str, split: str, patterns: list[str], aliases: tuple[str, ...] = ()) -> FileNotFoundError:
+    candidates = "\n  - ".join(_candidate_descriptions(root, pde, split, patterns, aliases))
+    return FileNotFoundError(f"No {split} files found for PDE '{pde}'. Candidate paths:\n  - {candidates}")
+
+
+def _shard_sort_key(path: Path) -> tuple[str, int, str]:
+    stem = path.stem
+    tail = stem.rsplit("_", 1)[-1]
+    try:
+        shard = int(tail)
+    except ValueError:
+        shard = 10**9
+    return (stem.rsplit("_", 1)[0], shard, path.name)
+
+
+def _train_limited(files: list[Path], split: str, train_shards: int | None) -> list[Path]:
+    if split == "train":
+        files = [p for p in files if "_test" not in p.name and "_val" not in p.name and "test" not in p.stem.lower() and "val" not in p.stem.lower()]
+    if split == "train" and train_shards is not None:
+        return files[: int(train_shards)]
+    return files
+
+
+def _load_darcy(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
+    if active_split == "test":
+        patterns = ["darcy_test_*-128-128.mat", "darcy_*-128-128_test.mat"]
+    elif active_split == "val":
+        patterns = ["darcy_val_*-128-128.mat", "darcy_*-128-128_val.mat"]
+    else:
+        patterns = ["darcy_10000-128-128_*.mat"]
+    files = _train_limited(_candidate_files(root, "darcy", active_split, patterns), active_split, train_shards)
     if not files:
-        raise FileNotFoundError("Darcy files not found")
+        raise _missing_error(root, "darcy", active_split, patterns)
     parts = []
     remaining = max_samples
+    offset = max(int(sample_offset), 0)
+    global_ids: list[str] = []
+    sample_indices: list[int] = []
+    loaded_start = offset
     for path in files:
         with h5py.File(path, "r") as f:
             ds = f["thresh_a_data"]
             n_total = ds.shape[-1] if len(ds.shape) >= 3 and ds.shape[0] == ds.shape[1] else ds.shape[0]
-            n = n_total if remaining is None else min(remaining, n_total)
-            a = _h5_samples(f["thresh_a_data"], n)
-            p = _h5_samples(f["thresh_p_data"], n)
+            if offset >= n_total:
+                offset -= n_total
+                continue
+            n = n_total - offset if remaining is None else min(remaining, n_total - offset)
+            a = _h5_samples(f["thresh_a_data"], offset + n)[offset:]
+            p = _h5_samples(f["thresh_p_data"], offset + n)[offset:]
         parts.append(torch.stack((_as_float_tensor(a), _as_float_tensor(p)), dim=1))
+        sample_indices.extend(range(loaded_start, loaded_start + n))
+        global_ids.extend(_file_sample_ids(path, offset, n))
+        loaded_start += n
+        offset = 0
         if remaining is not None:
             remaining -= n
             if remaining <= 0:
                 break
-    return {"full_tensor": torch.cat(parts, dim=0), "channel_names": ["a", "p"], "metadata": {"files": [str(p) for p in files], "canonical_layout": "NCHW"}}
+    if not parts:
+        raise _missing_error(root, "darcy", active_split, patterns)
+    raw = {
+        "full_tensor": torch.cat(parts, dim=0),
+        "channel_names": ["a", "p"],
+        "input_channel_names": ["a"],
+        "target_channel_names": ["p"],
+        "split": split,
+        "file_paths": [str(p) for p in files],
+        "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
+        "global_sample_ids": global_ids,
+        "metadata": {"files": [str(p) for p in files], "canonical_layout": "NCHW", "split": split},
+    }
+    return _finalize_loaded_raw(raw, max_samples, strict_size)
 
 
-def _load_poisson(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+def _load_poisson(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    active_split = "test" if prefer_test else _validate_split(split)
     return _load_static_mat(
         root,
         "poisson",
         ("f_data", "phi_data"),
-        ["poisson_test_1000-128-128.mat", "poisson_1000-128-128_test.mat"] if split == "test" or prefer_test else ["poisson_10000-128-128_*.mat"],
-        split if not prefer_test else "test",
+        _static_patterns("poisson", active_split),
+        split,
         max_samples,
         ["f", "phi"],
+        train_shards=train_shards,
+        sample_offset=sample_offset,
+        active_split=active_split,
+        strict_size=strict_size,
     )
 
 
-def _load_helmholtz(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+def _load_helmholtz(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    active_split = "test" if prefer_test else _validate_split(split)
     return _load_static_mat(
         root,
         "helmholtz",
         ("f_data", "psi_data"),
-        ["helmholtz_test_1000-128-128-k1.mat", "helmholtz_1000-128-128_test.mat"] if split == "test" or prefer_test else ["helmholtz_10000-128-128_*.mat"],
-        split if not prefer_test else "test",
+        _static_patterns("helmholtz", active_split),
+        split,
         max_samples,
         ["f", "psi"],
         metadata={"k": 1.0},
+        train_shards=train_shards,
+        sample_offset=sample_offset,
+        active_split=active_split,
+        strict_size=strict_size,
     )
 
 
@@ -597,80 +959,189 @@ def _load_static_mat(
     max_samples: int | None,
     channel_names: list[str],
     metadata: dict[str, Any] | None = None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    active_split: str | None = None,
+    strict_size: bool = False,
 ) -> dict[str, Any]:
-    files = _candidate_files(root, pde, split, patterns)
+    split = _validate_split(split)
+    active_split = active_split or split
+    files = _train_limited(_candidate_files(root, pde, active_split, patterns), active_split, train_shards)
     if not files:
-        raise FileNotFoundError(f"{pde} files not found")
+        raise _missing_error(root, pde, active_split, patterns)
     parts = []
     remaining = max_samples
+    offset = max(int(sample_offset), 0)
+    global_ids: list[str] = []
+    sample_indices: list[int] = []
+    loaded_start = offset
     for path in files:
         raw = _safe_loadmat(path, keys)
         n_total = raw[keys[0]].shape[0]
-        n = n_total if remaining is None else min(remaining, n_total)
-        x = _as_float_tensor(_take_np(raw[keys[0]], n))
-        y = _as_float_tensor(_take_np(raw[keys[1]], n))
+        if offset >= n_total:
+            offset -= n_total
+            continue
+        n = n_total - offset if remaining is None else min(remaining, n_total - offset)
+        x = _as_float_tensor(raw[keys[0]][offset : offset + n])
+        y = _as_float_tensor(raw[keys[1]][offset : offset + n])
         parts.append(torch.stack((x, y), dim=1))
+        sample_indices.extend(range(loaded_start, loaded_start + n))
+        global_ids.extend(_file_sample_ids(path, offset, n))
+        loaded_start += n
+        offset = 0
         if remaining is not None:
             remaining -= n
             if remaining <= 0:
                 break
+    if not parts:
+        raise _missing_error(root, pde, active_split, patterns)
     meta = {"files": [str(p) for p in files], "canonical_layout": "NCHW"}
     if metadata:
         meta.update(metadata)
-    return {"full_tensor": torch.cat(parts, dim=0), "channel_names": channel_names, "metadata": meta}
+    meta.update({"split": split})
+    raw = {
+        "full_tensor": torch.cat(parts, dim=0),
+        "channel_names": channel_names,
+        "input_channel_names": [channel_names[0]],
+        "target_channel_names": [channel_names[1]],
+        "metadata": meta,
+        "split": split,
+        "file_paths": [str(p) for p in files],
+        "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
+        "global_sample_ids": global_ids,
+    }
+    return _finalize_loaded_raw(raw, max_samples, strict_size)
 
 
-def _load_nsnonbounded(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
-    patterns = ["nsnonbounded_1000-128-128-10_1.mat"] if split == "test" or prefer_test else ["nsnonbounded_10000-128-128-10_*_new.mat"]
-    files = _candidate_files(root, "nsnonbounded", split if not prefer_test else "test", patterns)
+def _static_patterns(pde: str, split: str) -> list[str]:
+    if split == "test":
+        if pde == "helmholtz":
+            return ["helmholtz_test_*-128-128*.mat", "helmholtz_*-128-128_test.mat"]
+        return [f"{pde}_test_*-128-128.mat", f"{pde}_*-128-128_test.mat"]
+    if split == "val":
+        return [f"{pde}_val_*-128-128*.mat", f"{pde}_*-128-128_val.mat"]
+    return [f"{pde}_10000-128-128_*.mat"]
+
+
+def _load_nsnonbounded(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
+    if active_split == "test":
+        patterns = ["nsnonbounded_*-128-128-10_*.mat"]
+    elif active_split == "val":
+        patterns = ["nsnonbounded_val_*-128-128-10_*.mat", "nsnonbounded_*-128-128-10_val*.mat"]
+    else:
+        patterns = ["nsnonbounded_10000-128-128-10_*_new.mat"]
+    files = _train_limited(_candidate_files(root, "nsnonbounded", active_split, patterns), active_split, train_shards)
     if not files:
-        raise FileNotFoundError("nsnonbounded files not found")
+        raise _missing_error(root, "nsnonbounded", active_split, patterns)
     parts = []
     remaining = max_samples
+    offset = max(int(sample_offset), 0)
+    global_ids: list[str] = []
+    sample_indices: list[int] = []
+    loaded_start = offset
     for path in files:
         with h5py.File(path, "r") as f:
             n_total = f["w0"].shape[0]
-            n = n_total if remaining is None else min(remaining, n_total)
-            w0 = f["w0"][:n]
-            w = f["w"][:n]
+            if offset >= n_total:
+                offset -= n_total
+                continue
+            n = n_total - offset if remaining is None else min(remaining, n_total - offset)
+            w0 = f["w0"][offset : offset + n]
+            w = f["w"][offset : offset + n]
         traj = np.concatenate([w0[:, None, :, :], np.moveaxis(w, -1, 1)], axis=1)
         parts.append(_as_float_tensor(traj).unsqueeze(1))
+        sample_indices.extend(range(loaded_start, loaded_start + n))
+        global_ids.extend(_file_sample_ids(path, offset, n))
+        loaded_start += n
+        offset = 0
         if remaining is not None:
             remaining -= n
             if remaining <= 0:
                 break
-    return {
+    if not parts:
+        raise _missing_error(root, "nsnonbounded", active_split, patterns)
+    raw = {
         "full_tensor": torch.cat(parts, dim=0),
         "channel_names": ["w"],
+        "input_channel_names": ["w0"],
+        "target_channel_names": [f"w_t{i}" for i in range(1, 11)],
+        "split": split,
+        "file_paths": [str(p) for p in files],
+        "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
+        "global_sample_ids": global_ids,
         "metadata": {
             "files": [str(p) for p in files],
             "canonical_layout": "NCTHW",
             "time_values": [i / 10 for i in range(11)],
             "final_time": 1.0,
             "nu": 1e-3,
+            "split": split,
         },
     }
+    return _finalize_loaded_raw(raw, max_samples, strict_size)
 
 
-def _load_burger(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
-    patterns = ["burger_test_1000-128-128.mat"] if split == "test" or prefer_test else ["burger_10000-128-128_*.mat"]
-    files = _candidate_files(root, "burger", split if not prefer_test else "test", patterns, aliases=("burgers",))
+def _load_burger(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
+    if active_split == "test":
+        patterns = ["burger_test_*-128-128.mat", "burger_*-128-128_test.mat"]
+    elif active_split == "val":
+        patterns = ["burger_val_*-128-128.mat", "burger_*-128-128_val.mat"]
+    else:
+        patterns = ["burger_10000-128-128_*.mat"]
+    files = _train_limited(_candidate_files(root, "burger", active_split, patterns, aliases=("burgers",)), active_split, train_shards)
     if not files:
-        raise FileNotFoundError("Burgers files not found")
+        raise _missing_error(root, "burger", active_split, patterns, aliases=("burgers",))
     parts = []
     initials = []
     remaining = max_samples
+    offset = max(int(sample_offset), 0)
+    global_ids: list[str] = []
+    sample_indices: list[int] = []
+    loaded_start = offset
     for path in files:
         raw = _safe_loadmat(path, ("input", "output"))
         n_total = raw["output"].shape[0]
-        n = n_total if remaining is None else min(remaining, n_total)
-        parts.append(_as_float_tensor(raw["output"][:n]).unsqueeze(1))
+        if offset >= n_total:
+            offset -= n_total
+            continue
+        n = n_total - offset if remaining is None else min(remaining, n_total - offset)
+        parts.append(_as_float_tensor(raw["output"][offset : offset + n]).unsqueeze(1))
         if "input" in raw:
-            initials.append(_as_float_tensor(raw["input"][:n]))
+            initials.append(_as_float_tensor(raw["input"][offset : offset + n]))
+        sample_indices.extend(range(loaded_start, loaded_start + n))
+        global_ids.extend(_file_sample_ids(path, offset, n))
+        loaded_start += n
+        offset = 0
         if remaining is not None:
             remaining -= n
             if remaining <= 0:
                 break
+    if not parts:
+        raise _missing_error(root, "burger", active_split, patterns, aliases=("burgers",))
     t_steps = parts[0].shape[-2] if parts else 0
     meta = {
         "files": [str(p) for p in files],
@@ -679,38 +1150,86 @@ def _load_burger(root: Path, split: str, max_samples: int | None, prefer_test: b
         "time_values": [i / max(t_steps - 1, 1) for i in range(t_steps)],
         "final_time": 1.0,
         "nu": 0.01,
+        "split": split,
     }
     if initials:
         meta["initial_1d"] = torch.cat(initials, dim=0)
-    return {"full_tensor": torch.cat(parts, dim=0), "channel_names": ["u"], "metadata": meta}
+    raw = {
+        "full_tensor": torch.cat(parts, dim=0),
+        "channel_names": ["u"],
+        "input_channel_names": ["u0"],
+        "target_channel_names": ["u"],
+        "metadata": meta,
+        "split": split,
+        "file_paths": [str(p) for p in files],
+        "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
+        "global_sample_ids": global_ids,
+    }
+    return _finalize_loaded_raw(raw, max_samples, strict_size)
 
 
-def _load_reaction_diffusion(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
-    patterns = ["reaction_diffusion_test_1000-128-128-10.h5"] if split == "test" or prefer_test else ["reaction_diffusion-128-128-*_*.h5", "2D_diff-react_NA_NA.h5"]
-    files = _candidate_files(root, "reaction_diffusion", split if not prefer_test else "test", patterns)
+def _load_reaction_diffusion(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
+    if active_split == "test":
+        patterns = ["reaction_diffusion_test_*-128-128-*.h5"]
+    elif active_split == "val":
+        patterns = ["reaction_diffusion_val_*-128-128-*.h5", "reaction_diffusion-128-128-*_val*.h5"]
+    else:
+        patterns = ["reaction_diffusion-128-128-*_*.h5", "2D_diff-react_NA_NA.h5"]
+    files = _train_limited(_candidate_files(root, "reaction_diffusion", active_split, patterns), active_split, train_shards)
     if not files:
-        raise FileNotFoundError("reaction_diffusion files not found")
+        raise _missing_error(root, "reaction_diffusion", active_split, patterns)
     parts = []
     remaining = max_samples
+    skip = max(int(sample_offset), 0)
+    sample_indices: list[int] = []
+    global_ids: list[str] = []
+    seen = 0
     for path in files:
         with h5py.File(path, "r") as f:
             keys = list(f.keys())
             for key in keys:
+                if skip > 0:
+                    skip -= 1
+                    seen += 1
+                    continue
                 data = np.asarray(f[key]["data"][:])
                 # raw [T,H,W,2] -> canonical [2,T,H,W]
                 parts.append(_as_float_tensor(np.moveaxis(data, -1, 0)))
+                sample_indices.append(seen)
+                global_ids.append(f"{path.name}:{key}")
+                seen += 1
                 if remaining is not None:
                     remaining -= 1
                     if remaining <= 0:
                         break
         if remaining is not None and remaining <= 0:
             break
+    if not parts:
+        raise _missing_error(root, "reaction_diffusion", active_split, patterns)
     full = torch.stack(parts, dim=0)
     input_idx = 50 if full.shape[2] > 50 else 0
-    is_test = split == "test" or prefer_test
-    return {
+    is_test = active_split == "test"
+    raw = {
         "full_tensor": full,
         "channel_names": ["u", "v"],
+        "input_channel_names": ["u0", "v0"],
+        "target_channel_names": ["uT", "vT"],
+        "split": split,
+        "file_paths": [str(p) for p in files],
+        "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
+        "global_sample_ids": global_ids,
         "metadata": {
             "files": [str(p) for p in files],
             "canonical_layout": "NCTHW",
@@ -719,21 +1238,48 @@ def _load_reaction_diffusion(root: Path, split: str, max_samples: int | None, pr
             "D_u": 2e-3 if is_test else 1e-3,
             "D_v": 4e-3 if is_test else 5e-3,
             "k": 3e-3 if is_test else 5e-3,
+            "split": split,
         },
     }
+    return _finalize_loaded_raw(raw, max_samples, strict_size)
 
 
-def _load_shallow_water(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
-    patterns = ["swe_test_1000-128-128-10.h5"] if split == "test" or prefer_test else ["2d_swe_128_128_10_*.h5"]
-    files = _candidate_files(root, "shallow_water", split if not prefer_test else "test", patterns)
+def _load_shallow_water(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
+    if active_split == "test":
+        patterns = ["swe_test_*-128-128-*.h5", "2d_swe_test*.h5"]
+    elif active_split == "val":
+        patterns = ["swe_val_*-128-128-*.h5", "2d_swe_val*.h5"]
+    else:
+        patterns = ["2d_swe_128_128_10_*.h5"]
+    files = _train_limited(_candidate_files(root, "shallow_water", active_split, patterns), active_split, train_shards)
     if not files:
-        raise FileNotFoundError("shallow_water files not found")
+        raise _missing_error(root, "shallow_water", active_split, patterns)
     parts = []
     remaining = max_samples
+    skip = max(int(sample_offset), 0)
+    sample_indices: list[int] = []
+    global_ids: list[str] = []
+    seen = 0
     for path in files:
         with h5py.File(path, "r") as f:
             keys = list(f.keys())
             for key in keys:
+                if skip > 0:
+                    skip -= 1
+                    seen += 1
+                    continue
                 group = f[key]["data"]
                 channels = []
                 for field in ("h", "hu", "hv"):
@@ -742,89 +1288,182 @@ def _load_shallow_water(root: Path, split: str, max_samples: int | None, prefer_
                         arr = arr[..., 0]
                     channels.append(arr)
                 parts.append(_as_float_tensor(np.stack(channels, axis=0)))
+                sample_indices.append(seen)
+                global_ids.append(f"{path.name}:{key}")
+                seen += 1
                 if remaining is not None:
                     remaining -= 1
                     if remaining <= 0:
                         break
         if remaining is not None and remaining <= 0:
             break
-    return {
+    if not parts:
+        raise _missing_error(root, "shallow_water", active_split, patterns)
+    raw = {
         "full_tensor": torch.stack(parts, dim=0),
         "channel_names": ["h", "hu", "hv"],
+        "input_channel_names": ["h0", "hu0", "hv0"],
+        "target_channel_names": ["hT", "huT", "hvT"],
+        "split": split,
+        "file_paths": [str(p) for p in files],
+        "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
+        "global_sample_ids": global_ids,
         "metadata": {
             "files": [str(p) for p in files],
             "canonical_layout": "NCTHW",
             "final_time": 1.0,
             "g": 1.0,
             "domain_length": 5.0,
+            "split": split,
         },
     }
+    return _finalize_loaded_raw(raw, max_samples, strict_size)
 
 
-def _load_heat(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+def _load_heat(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
     files = _candidate_files(
         root,
         "heat",
-        split if not prefer_test else "test",
-        ["heat_test*.h5"] if split == "test" or prefer_test else ["heat_10000-128-128_*.h5", "heat_*.h5"],
+        active_split,
+        _future_patterns("heat", active_split),
     )
+    files = _train_limited(files, active_split, train_shards)
     if not files:
-        raise FileNotFoundError("heat files not found")
-    return _load_future_field_h5(files, max_samples, "heat")
+        raise _missing_error(root, "heat", active_split, _future_patterns("heat", active_split))
+    return _load_future_field_h5(files, max_samples, "heat", split, scalar_param_mode, sample_offset, strict_size)
 
 
-def _load_wave(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+def _load_wave(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
     files = _candidate_files(
         root,
         "wave",
-        split if not prefer_test else "test",
-        ["wave_test*.h5"] if split == "test" or prefer_test else ["wave_10000-128-128_*.h5", "wave_*.h5"],
+        active_split,
+        _future_patterns("wave", active_split),
     )
+    files = _train_limited(files, active_split, train_shards)
     if not files:
-        raise FileNotFoundError("wave files not found")
-    return _load_future_field_h5(files, max_samples, "wave")
+        raise _missing_error(root, "wave", active_split, _future_patterns("wave", active_split))
+    return _load_future_field_h5(files, max_samples, "wave", split, scalar_param_mode, sample_offset, strict_size)
 
 
-def _load_advection_diffusion(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
+def _load_advection_diffusion(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
     files = _candidate_files(
         root,
         "advection_diffusion",
-        split if not prefer_test else "test",
-        ["advection_diffusion_test*.h5"] if split == "test" or prefer_test else ["advection_diffusion_10000-128-128_*.h5", "advection_diffusion_*.h5"],
+        active_split,
+        _future_patterns("advection_diffusion", active_split),
     )
+    files = _train_limited(files, active_split, train_shards)
     if not files:
-        raise FileNotFoundError("advection_diffusion files not found")
-    return _load_future_field_h5(files, max_samples, "advection_diffusion")
+        raise _missing_error(root, "advection_diffusion", active_split, _future_patterns("advection_diffusion", active_split))
+    return _load_future_field_h5(files, max_samples, "advection_diffusion", split, scalar_param_mode, sample_offset, strict_size)
 
 
-def _load_steady_heat_conduction(root: Path, split: str, max_samples: int | None, prefer_test: bool = False) -> dict[str, Any]:
-    train_patterns = ["steady_heat_conduction_10000-128-128_*.h5", "steady_heat_conduction_*.h5"]
+def _load_steady_heat_conduction(
+    root: Path,
+    split: str,
+    max_samples: int | None,
+    train_shards: int = 5,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+) -> dict[str, Any]:
+    split = _validate_split(split)
+    active_split = "test" if prefer_test else split
+    patterns = _future_patterns("steady_heat_conduction", active_split)
     files = _candidate_files(
         root,
         "steady_heat_conduction",
-        split if not prefer_test else "test",
-        ["steady_heat_conduction_test*.h5"] if split == "test" or prefer_test else train_patterns,
+        active_split,
+        patterns,
     )
-    if not files and (split == "test" or prefer_test):
-        files = _candidate_files(root, "steady_heat_conduction", "train", train_patterns)
+    files = _train_limited(files, active_split, train_shards)
     if not files:
-        raise FileNotFoundError("steady_heat_conduction files not found")
-    return _load_future_field_h5(files, max_samples, "steady_heat_conduction")
+        raise _missing_error(root, "steady_heat_conduction", active_split, patterns)
+    return _load_future_field_h5(files, max_samples, "steady_heat_conduction", split, scalar_param_mode, sample_offset, strict_size)
 
 
-def _load_future_field_h5(files: list[Path], max_samples: int | None, pde: str) -> dict[str, Any]:
+def _future_patterns(pde: str, split: str) -> list[str]:
+    if split == "test":
+        return [f"{pde}_test*.h5"]
+    if split == "val":
+        return [f"{pde}_val*.h5"]
+    return [f"{pde}_10000-128-128_*.h5", f"{pde}_*.h5"]
+
+
+def _load_future_field_h5(
+    files: list[Path],
+    max_samples: int | None,
+    pde: str,
+    split: str,
+    scalar_param_mode: str,
+    sample_offset: int = 0,
+    strict_size: bool = False,
+) -> dict[str, Any]:
     parts: list[torch.Tensor] = []
     scalar_meta: dict[str, list[torch.Tensor]] = {}
-    meta: dict[str, Any] = {"files": [str(p) for p in files], "canonical_layout": "NCHW"}
+    full_traj_parts: list[torch.Tensor] = []
+    meta: dict[str, Any] = {"files": [str(p) for p in files], "canonical_layout": "NCHW", "split": split, "scalar_param_mode": scalar_param_mode}
     remaining = max_samples
+    skip = max(int(sample_offset), 0)
     channel_names: list[str]
+    input_names: list[str]
+    target_names: list[str]
+    sample_indices: list[int] = []
+    global_ids: list[str] = []
+    seen = 0
     for path in files:
         try:
             with h5py.File(path, "r") as f:
+                if "input_data" not in f or "output_data" not in f:
+                    raise KeyError(f"{path} must contain input_data and output_data")
                 n_total = int(f["input_data"].shape[0])
-                n = n_total if remaining is None else min(remaining, n_total)
-                inp = _as_float_tensor(f["input_data"][:n])
-                out = _as_float_tensor(f["output_data"][:n])
+                if skip >= n_total:
+                    skip -= n_total
+                    seen += n_total
+                    continue
+                local_start = skip
+                n = n_total - local_start if remaining is None else min(remaining, n_total - local_start)
+                inp = _as_float_tensor(f["input_data"][local_start : local_start + n])
+                out = _as_float_tensor(f["output_data"][local_start : local_start + n])
                 attrs = _h5_attrs_to_python(f)
                 for key, value in attrs.items():
                     meta.setdefault(key, value)
@@ -834,36 +1473,85 @@ def _load_future_field_h5(files: list[Path], max_samples: int | None, pde: str) 
                     meta.setdefault("final_time", float(attrs["T"]))
                 if "boundary_condition" in attrs:
                     meta.setdefault("bc", str(attrs["boundary_condition"]))
+                if "full_trajectory" in f:
+                    full_traj_parts.append(_as_float_tensor(f["full_trajectory"][local_start : local_start + n]))
 
                 if pde == "heat":
-                    alpha = _scalar_or_attr_field(f, "alpha", "fixed_alpha", n, inp.shape[-2:], default=1e-3)
-                    parts.append(torch.cat([inp[:, :1], alpha, out[:, :1], alpha.clone()], dim=1))
-                    _append_scalar_meta(scalar_meta, "alpha", alpha)
-                    channel_names = ["u0", "alpha", "uT", "alpha_T"]
+                    alpha = _scalar_or_attr(f, "alpha", "fixed_alpha", n, local_start, required=False)
+                    if alpha is not None:
+                        scalar_meta.setdefault("alpha", []).append(alpha)
+                    if scalar_param_mode == "materialize":
+                        alpha_field = _expand_scalar_to_field(alpha if alpha is not None else torch.full((n,), float("nan")), inp.shape[-2], inp.shape[-1])
+                        parts.append(torch.cat([inp[:, :1], alpha_field, out[:, :1], alpha_field.clone()], dim=1))
+                        channel_names = ["u0", "alpha", "uT", "alpha_T"]
+                        input_names, target_names = ["u0", "alpha"], ["uT", "alpha_T"]
+                        meta.update({"input_indices": [0, 1], "target_indices": [2, 3]})
+                    else:
+                        parts.append(torch.cat([inp[:, :1], out[:, :1]], dim=1))
+                        channel_names = ["u0", "uT"]
+                        input_names, target_names = ["u0"], ["uT"]
+                        meta.update({"input_indices": [0], "target_indices": [1]})
                 elif pde == "wave":
-                    parts.append(torch.cat([inp[:, :2], out[:, :2]], dim=1))
-                    if "c" in f:
-                        c = _as_float_tensor(f["c"][:n])
+                    c = _scalar_or_attr(f, "c", "fixed_c", n, local_start, required=False)
+                    if c is not None:
                         scalar_meta.setdefault("c", []).append(c)
+                        meta.setdefault("fixed_c", float(c[0]) if torch.allclose(c, c[:1].expand_as(c)) else None)
                     elif "fixed_c" in attrs:
                         meta.setdefault("fixed_c", float(attrs["fixed_c"]))
-                    channel_names = ["u0", "v0", "uT", "vT"]
+                    if scalar_param_mode == "materialize" and c is not None:
+                        c_field = _expand_scalar_to_field(c, inp.shape[-2], inp.shape[-1])
+                        parts.append(torch.cat([inp[:, :2], c_field, out[:, :2], c_field.clone()], dim=1))
+                        channel_names = ["u0", "v0", "c", "uT", "vT", "c_T"]
+                        input_names, target_names = ["u0", "v0", "c"], ["uT", "vT", "c_T"]
+                        meta.update({"input_indices": [0, 1, 2], "target_indices": [3, 4, 5]})
+                    else:
+                        parts.append(torch.cat([inp[:, :2], out[:, :2]], dim=1))
+                        channel_names = ["u0", "v0", "uT", "vT"]
+                        input_names, target_names = ["u0", "v0"], ["uT", "vT"]
+                        meta.update({"input_indices": [0, 1], "target_indices": [2, 3]})
                 elif pde == "advection_diffusion":
-                    bx = _scalar_or_attr_field(f, "b_x", "b_x", n, inp.shape[-2:], default=0.0)
-                    by = _scalar_or_attr_field(f, "b_y", "b_y", n, inp.shape[-2:], default=0.0)
-                    kappa = _scalar_or_attr_field(f, "kappa", "kappa", n, inp.shape[-2:], default=1e-3)
-                    parts.append(torch.cat([inp[:, :1], bx, by, kappa, out[:, :1], bx.clone(), by.clone(), kappa.clone()], dim=1))
-                    _append_scalar_meta(scalar_meta, "b_x", bx)
-                    _append_scalar_meta(scalar_meta, "b_y", by)
-                    _append_scalar_meta(scalar_meta, "kappa", kappa)
-                    channel_names = ["u0", "b_x", "b_y", "kappa", "uT", "b_x_T", "b_y_T", "kappa_T"]
+                    bx = _scalar_or_attr(f, "b_x", "b_x", n, local_start, required=True)
+                    by = _scalar_or_attr(f, "b_y", "b_y", n, local_start, required=True)
+                    kappa = _scalar_or_attr(f, "kappa", "kappa", n, local_start, required=True)
+                    scalar_meta.setdefault("b_x", []).append(bx)
+                    scalar_meta.setdefault("b_y", []).append(by)
+                    scalar_meta.setdefault("kappa", []).append(kappa)
+                    if scalar_param_mode == "materialize":
+                        bx_f = _expand_scalar_to_field(bx, inp.shape[-2], inp.shape[-1])
+                        by_f = _expand_scalar_to_field(by, inp.shape[-2], inp.shape[-1])
+                        k_f = _expand_scalar_to_field(kappa, inp.shape[-2], inp.shape[-1])
+                        parts.append(torch.cat([inp[:, :1], bx_f, by_f, k_f, out[:, :1], bx_f.clone(), by_f.clone(), k_f.clone()], dim=1))
+                        channel_names = ["u0", "b_x", "b_y", "kappa", "uT", "b_x_T", "b_y_T", "kappa_T"]
+                        input_names, target_names = ["u0", "b_x", "b_y", "kappa"], ["uT", "b_x_T", "b_y_T", "kappa_T"]
+                        meta.update({"input_indices": [0, 1, 2, 3], "target_indices": [4, 5, 6, 7]})
+                    else:
+                        parts.append(torch.cat([inp[:, :1], out[:, :1]], dim=1))
+                        channel_names = ["u0", "uT"]
+                        input_names, target_names = ["u0"], ["uT"]
+                        meta.update({"input_indices": [0], "target_indices": [1]})
                 elif pde == "steady_heat_conduction":
-                    u_d = _scalar_or_attr_field(f, "u_D", "u_D", n, inp.shape[-2:], default=298.0)
-                    parts.append(torch.cat([inp[:, :1], u_d, out[:, :1], u_d.clone()], dim=1))
-                    _append_scalar_meta(scalar_meta, "u_D", u_d)
-                    channel_names = ["f", "u_D", "u", "u_D_T"]
+                    u_d = _scalar_or_attr(f, "u_D", "u_D", n, local_start, required=True)
+                    scalar_meta.setdefault("u_D", []).append(u_d)
+                    for extra_key in ("picard_iters", "converged", "residual_norm", "n_sources", "source_x", "source_y", "source_amp", "source_sigma"):
+                        extra = _scalar_or_attr(f, extra_key, extra_key, n, local_start, required=False)
+                        if extra is not None:
+                            scalar_meta.setdefault(extra_key, []).append(extra)
+                    if scalar_param_mode == "materialize":
+                        u_d_f = _expand_scalar_to_field(u_d, inp.shape[-2], inp.shape[-1])
+                        parts.append(torch.cat([inp[:, :1], u_d_f, out[:, :1], u_d_f.clone()], dim=1))
+                        channel_names = ["f", "u_D", "u", "u_D_T"]
+                        input_names, target_names = ["f", "u_D"], ["u", "u_D_T"]
+                        meta.update({"input_indices": [0, 1], "target_indices": [2, 3]})
+                    else:
+                        parts.append(torch.cat([inp[:, :1], out[:, :1]], dim=1))
+                        channel_names = ["f", "u"]
+                        input_names, target_names = ["f"], ["u"]
+                        meta.update({"input_indices": [0], "target_indices": [1]})
                 else:
                     raise ValueError(f"Unsupported future PDE '{pde}'")
+                sample_indices.extend(range(seen + local_start, seen + local_start + n))
+                global_ids.extend(_file_sample_ids(path, local_start, n))
+                skip = 0
         except OSError as exc:
             raise OSError(f"Could not read {pde} HDF5 file {path}: {exc}") from exc
 
@@ -871,10 +1559,33 @@ def _load_future_field_h5(files: list[Path], max_samples: int | None, pde: str) 
             remaining -= n
             if remaining <= 0:
                 break
+        seen += n_total
 
+    if not parts:
+        raise FileNotFoundError(f"No samples loaded for PDE '{pde}' from files: {[str(p) for p in files]}")
+    pde_params: dict[str, torch.Tensor] = {}
     for key, values in scalar_meta.items():
         meta[key] = torch.cat(values, dim=0)
-    return {"full_tensor": torch.cat(parts, dim=0), "channel_names": channel_names, "metadata": meta}
+        pde_params[key] = meta[key]
+    meta["pde_params"] = pde_params
+    meta["pde_params_available"] = sorted(pde_params)
+    if full_traj_parts:
+        full_traj = torch.cat(full_traj_parts, dim=0)
+        meta["full_trajectory"] = full_traj
+        meta["full_trajectory_shape"] = tuple(full_traj.shape)
+    raw = {
+        "full_tensor": torch.cat(parts, dim=0),
+        "channel_names": channel_names,
+        "input_channel_names": input_names,
+        "target_channel_names": target_names,
+        "metadata": meta,
+        "pde_params": pde_params,
+        "split": split,
+        "file_paths": [str(p) for p in files],
+        "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
+        "global_sample_ids": global_ids,
+    }
+    return _finalize_loaded_raw(raw, max_samples, strict_size)
 
 
 def _scalar_or_attr_field(
@@ -892,6 +1603,26 @@ def _scalar_or_attr_field(
     else:
         scalar = torch.full((n,), float(default), dtype=torch.float32)
     return scalar.reshape(n, 1, 1, 1).expand(n, 1, spatial_shape[0], spatial_shape[1]).clone()
+
+
+def _scalar_or_attr(
+    f: h5py.File,
+    dataset_key: str,
+    attr_key: str,
+    n: int,
+    local_start: int,
+    required: bool,
+) -> torch.Tensor | None:
+    if dataset_key in f:
+        dataset = f[dataset_key]
+        if dataset.shape == ():
+            return torch.full((n,), float(dataset[()]), dtype=torch.float32)
+        return _as_float_tensor(dataset[local_start : local_start + n]).reshape(n)
+    if attr_key in f.attrs:
+        return torch.full((n,), float(f.attrs[attr_key]), dtype=torch.float32)
+    if required:
+        raise KeyError(f"Missing required scalar dataset or attr {dataset_key!r}/{attr_key!r} in {f.filename}")
+    return None
 
 
 def _append_scalar_meta(target: dict[str, list[torch.Tensor]], key: str, field: torch.Tensor) -> None:
@@ -926,3 +1657,36 @@ def _missing_future_loader(name: str) -> Callable[..., dict[str, Any]]:
 
 def build_default_registry() -> PDEDataRegistry:
     return PDEDataRegistry()
+
+
+def load_raw_split(
+    pde: str,
+    data_root: str | Path,
+    split: str,
+    max_samples: int | None = None,
+    train_shards: int = 5,
+    prefer_test: bool = False,
+    scalar_param_mode: str = "metadata",
+    strict_size: bool = False,
+    sample_offset: int = 0,
+    val_from_train_offset: int | None = None,
+) -> dict[str, Any]:
+    """Load one no-leakage split using the canonical baseline adapter.
+
+    ``split`` is restricted to ``train``, ``val``, or ``test``. Validation
+    falls back to a deterministic train subset when no independent val file is
+    present; test files are never used for train or validation.
+    """
+
+    return build_default_registry().load_raw(
+        pde,
+        data_root,
+        split=split,
+        max_samples=max_samples,
+        train_shards=train_shards,
+        sample_offset=sample_offset,
+        val_from_train_offset=val_from_train_offset,
+        prefer_test=prefer_test and split == "test",
+        scalar_param_mode=scalar_param_mode,
+        strict_size=strict_size,
+    )
