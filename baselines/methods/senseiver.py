@@ -26,6 +26,7 @@ class SenseiverBaseline(BaselineModel):
         self.official_encoder = None
         self.official_decoder = None
         backend = str(self.config.get("official_backend", "auto")).lower()
+        fallback_reason = ""
         if backend in {"auto", "senseiver", "official"}:
             try:
                 encoder_cls, decoder_cls = get_senseiver_classes()
@@ -49,12 +50,12 @@ class SenseiverBaseline(BaselineModel):
                     num_cross_attention_heads=heads,
                     dropout=float(self.config.get("dropout", 0.0)),
                 )
-                self.official_backend = "senseiver"
+                self.set_backend("senseiver", "senseiver", fallback_used=False)
                 return self
             except OfficialImportError as exc:
-                if backend == "senseiver":
+                fallback_reason = f"senseiver unavailable: {exc}"
+                if backend in {"senseiver", "official"}:
                     warnings.warn(f"Senseiver official modules unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
-                self.official_backend = "local"
         self.sensor_proj = MLP(coord_dim + self.out_channels, token_dim, hidden=token_dim, depth=2)
         self.query_proj = MLP(coord_dim, token_dim, hidden=token_dim, depth=2)
         self.latents = nn.Parameter(torch.randn(num_latents, token_dim) * 0.02)
@@ -62,6 +63,13 @@ class SenseiverBaseline(BaselineModel):
         self.self_attn = nn.MultiheadAttention(token_dim, heads, batch_first=True)
         self.dec_attn = nn.MultiheadAttention(token_dim, heads, batch_first=True)
         self.out = nn.Sequential(nn.LayerNorm(token_dim), nn.Linear(token_dim, self.out_channels))
+        requested_local = backend in {"local", "none"}
+        self.set_backend(
+            "local",
+            "local" if requested_local else ("official" if backend == "official" else backend),
+            fallback_used=not requested_local,
+            warning=fallback_reason,
+        )
         return self
 
     def fit(self, train_loader, val_loader=None):

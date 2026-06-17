@@ -55,6 +55,7 @@ class IFNOBaseline(BaselineModel):
         # Sparse inverse fallback uses a small FNO because sparse observations
         # are not exactly invertible in the iFNO sense.
         self.sparse_inverse = FNO2dNet(self.target_channels, self.input_channels, width=width, modes1=modes1, modes2=modes2)
+        self.set_backend("local", "local", fallback_used=False)
         return self
 
     def fit(self, train_loader, val_loader=None):

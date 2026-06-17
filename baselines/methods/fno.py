@@ -20,6 +20,7 @@ class FNOBaseline(BaselineModel):
         layers = int(self.config.get("layers", 4))
         modes1, modes2 = _clamped_modes(self.config, data_spec)
         backend = str(self.config.get("official_backend", "auto")).lower()
+        fallback_reasons: list[str] = []
 
         if backend in {"auto", "neuraloperator", "official"}:
             try:
@@ -32,10 +33,11 @@ class FNOBaseline(BaselineModel):
                     n_layers=layers,
                     positional_embedding="grid",
                 )
-                self.official_backend = "neuraloperator"
+                self.set_backend("neuraloperator", "neuraloperator", fallback_used=False)
                 return self
             except OfficialImportError as exc:
-                if backend == "neuraloperator":
+                fallback_reasons.append(f"neuraloperator unavailable: {exc}")
+                if backend in {"neuraloperator", "official"}:
                     warnings.warn(f"neuraloperator FNO unavailable, using fallback: {exc}", RuntimeWarning, stacklevel=2)
 
         if backend in {"auto", "recfno", "official"}:
@@ -47,10 +49,11 @@ class FNOBaseline(BaselineModel):
                     modes1=modes1,
                     modes2=modes2,
                 )
-                self.official_backend = "recfno"
+                self.set_backend("recfno", "recfno", fallback_used=False)
                 return self
             except OfficialImportError as exc:
-                if backend == "recfno":
+                fallback_reasons.append(f"recfno unavailable: {exc}")
+                if backend in {"recfno", "official"}:
                     warnings.warn(f"RecFNO official FNO unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
 
         self.net = FNO2dNet(
@@ -61,7 +64,14 @@ class FNOBaseline(BaselineModel):
             modes2=modes2,
             layers=layers,
         )
-        self.official_backend = "local"
+        requested_local = backend in {"local", "none"}
+        warning = "; ".join(fallback_reasons)
+        self.set_backend(
+            "local",
+            "local" if requested_local else ("official" if backend == "official" else backend),
+            fallback_used=not requested_local,
+            warning=warning,
+        )
         return self
 
     def fit(self, train_loader, val_loader=None):

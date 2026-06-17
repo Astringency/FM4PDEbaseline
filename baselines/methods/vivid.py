@@ -22,20 +22,28 @@ class VIVIDBaseline(BaselineModel):
         super().build(config, data_spec)
         self.inverse_operator = VoronoiCNNBaseline().build(config.get("inverse_operator", config), data_spec)
         self.optimized_numel = _optimized_state_numel(data_spec)
+        self.inverse_operator_trained = False
+        self.set_backend("local", "local", fallback_used=False)
         return self
 
     def parameter_count(self) -> int:
         return int(self.optimized_numel + self.inverse_operator.parameter_count())
 
     def fit(self, train_loader, val_loader=None):
-        return self.inverse_operator.fit(train_loader, val_loader)
+        if bool(self.config.get("train_inverse_operator", False)):
+            self.inverse_operator_trained = True
+            return self.inverse_operator.fit(train_loader, val_loader)
+        return {"status": "per_instance_vivid_no_amortized_inverse_fit"}
 
     def predict(self, batch: PDEBatch):
         start = time.perf_counter()
         if not batch.metadata.get("supports_trajectory", False):
             warnings.warn("VIVID requested without full trajectory; using full-space state reconstruction variant.", RuntimeWarning, stacklevel=2)
         with torch.no_grad():
-            learned_state = self.inverse_operator.predict(batch)
+            if self.inverse_operator_trained:
+                learned_state = self.inverse_operator.predict(batch)
+            else:
+                learned_state = batch.metadata.get("voronoi_grid", batch.input_fields).detach()
         state0, output_view, background, dyn_meta = _initial_trajectory(batch)
         # Inject the learned inverse-operator estimate as the terminal state.
         if state0.ndim == 5:

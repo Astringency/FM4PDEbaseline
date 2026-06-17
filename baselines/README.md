@@ -17,6 +17,7 @@ The data adapter follows the current FM4PDE data layout:
 - Validation uses an independent `*_val*` file when present. Otherwise it is a deterministic subset of train shards with an offset supplied by the runner; test files are never used for train or validation.
 - Future PDE HDF5 files store physical fields in `input_data` and `output_data`. Spatially constant parameters such as `alpha`, `c`, `b_x`, `b_y`, `kappa`, and `u_D` are loaded into `metadata["pde_params"]` and as top-level metadata keys for residuals.
 - `full_trajectory`, when present, is loaded into `metadata["full_trajectory"]` for diagnostics and time-dependent residual reporting.
+- `nsnonbounded` test files must use an explicit test name such as `nsnonbounded_test_1000-128-128-10.mat`, `nsnonbounded_1000-128-128-10*.mat`, or `nsnonbounded_10000-128-128-10_test*.mat`. Train shards such as `nsnonbounded_10000-128-128-10_1_new.mat` are filtered out for `split=test`.
 
 `--scalar-param-mode` controls how future PDE scalar parameters are exposed to supervised baselines:
 
@@ -42,7 +43,9 @@ DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
 OUT=outputs/baselines/paper bash scripts/baselines/aggregate_paper_results.sh
 ```
 
-Paper scripts honor `DATA_ROOT`, `OUT`, `DEVICE`, `TRAIN_SIZE`, `VAL_SIZE`, `TEST_SIZE`, `TRAIN_SHARDS`, `EPOCHS`, `BATCH_SIZE`, `SEEDS`, `SENSOR_COUNTS`, `SENSOR_MODES`, `NOISE_LEVELS`, `PDES`, `BASELINES`, and `SCALAR_PARAM_MODE`. Defaults are `TRAIN_SIZE=50000`, `TEST_SIZE=1000`, `TRAIN_SHARDS=5`, `SEEDS="1 2 3"`, `SENSOR_COUNTS="50 100 250 500 1000"`, `SENSOR_MODES="random grid fixed"`, `NOISE_LEVELS="0.0 0.01 0.05 0.10"`, and `SCALAR_PARAM_MODE=metadata`.
+Paper scripts honor `DATA_ROOT`, `OUT`, `DEVICE`, `TRAIN_SIZE`, `VAL_SIZE`, `TEST_SIZE`, `TRAIN_SHARDS`, `EPOCHS`, `BATCH_SIZE`, `SEEDS`, `SENSOR_COUNTS`, `SENSOR_MODES`, `NOISE_LEVELS`, `PDES`, `BASELINES`, and `SCALAR_PARAM_MODE`. Defaults are `TRAIN_SIZE=50000`, `VAL_SIZE=0`, `TEST_SIZE=1000`, `TRAIN_SHARDS=5`, `SEEDS="1 2 3"`, `SENSOR_COUNTS="50 100 250 500 1000"`, `SENSOR_MODES="random grid fixed"`, `NOISE_LEVELS="0.0 0.01 0.05 0.10"`, and `SCALAR_PARAM_MODE=metadata`.
+
+If validation is needed, prefer an independent `*_val*` file. Without an independent val file, setting `VAL_SIZE>0` reserves the tail of the requested train subset: `effective_train_size = TRAIN_SIZE - VAL_SIZE` and `val_from_train_offset = effective_train_size`. Runs record `train_requested_size`, `effective_train_size`, `val_size`, and `val_split_source` so no train/val/test split source is implicit.
 
 Run outputs:
 
@@ -56,6 +59,17 @@ Every run records `backend_used`, `official_backend`, `fallback_used`, and `back
 Time-dependent residuals record `residual_mode`. `full_trajectory` means a multi-step trajectory tensor was available to the residual. `two_level` means the diagnostic was built from input/background and final prediction only; it is a useful surrogate but not equivalent to a full time-dynamics constraint.
 
 Synthetic data is only for smoke/debug checks and must not be used for paper tables.
+
+## Known Fixed Reviewer-Level Issues
+
+- Full test evaluation is the default; results are not first-batch-only. Raw rows are one per test batch and summaries aggregate the whole test split.
+- Train, validation, and test are split with no test fallback for training or validation. Validation defaults to off (`VAL_SIZE=0`) for formal paper scripts unless explicitly requested.
+- Future PDE scalar parameters stay in metadata by default; no hidden `[N,1,H,W]` materialization occurs unless `--scalar-param-mode materialize` is set.
+- Per-instance baselines (`pinn_sparse`, `pc_bnn`, `pde_opt`, `var4d`, `vivid`) load only a tiny train spec dataset, not the full 50000-sample train set. Runs record `train_size_loaded_for_fit` and `train_size_loaded_for_spec`.
+- Sparse tasks preserve `metadata["original_input_fields"]` and `metadata["background_fields"]` before replacing model input with masked observations. Time-dependent residuals use the true initial/background state, not the sparse masked grid.
+- Paper/default physics metrics are per-sample: raw rows include `obs_mse_values`, `pde_residual_values`, `bc_residual_values`, `ic_residual_values`, and `physics_loss_values`. `--physics-metric-mode per_batch` is available for faster debug runs and is marked as `metric_granularity=per_batch`.
+- `residual_mode_counts` distinguishes `full_trajectory`, `two_level`, `error`, and `not_implemented`. Ground-truth `metadata["full_trajectory"]` is never substituted for a prediction when computing prediction residuals.
+- Cross-run aggregation prefers `results_raw.jsonl`. Summary-only aggregation uses pooled `n/mean/std` statistics when available and marks downgraded run-level aggregation with `aggregation_mode` and `aggregation_warning`.
 
 ## Step 0 Findings
 
@@ -145,7 +159,7 @@ All sparse tasks use `baselines/common/sensors.py` to create reusable masks, obs
 | PC-BNN | `baselines/methods/pc_bnn.py` | per-instance sparse observations | implemented SVGD particle PC-BNN |
 | PDE-Opt | `baselines/methods/pde_opt.py` | per-instance grid optimization | implemented PDE-constrained optimization |
 | 4D-Var | `baselines/methods/var4d.py` | per-instance assimilation | implemented full-space weak 4D-Var |
-| VIVID | `baselines/methods/vivid.py` | Voronoi inverse operator + variational refinement | implemented full-space VIVID |
+| VIVID | `baselines/methods/vivid.py` | Voronoi/background initialization + variational refinement | implemented per-instance full-space VIVID |
 
 Detailed paper/code sources are in `baselines/BASELINE_SOURCES.md`.
 
@@ -156,7 +170,7 @@ Official implementation reuse:
 - `voronoicnn` uses the vendored RecFNO `UNet` on normal image resolutions; tiny smoke-test grids use the local compact CNN because the official UNet downsamples too deeply for 8x8 inputs.
 - `deeponet` and `pinn_sparse` prefer DeepXDE PyTorch `DeepONetCartesianProd`/`FNN` when DeepXDE optional dependencies are installed. In the default lightweight test environment, they fall back to the local API-compatible networks.
 - `senseiver` and `pc_bnn` prefer their vendored official modules when their optional dependencies and problem-specific channel assumptions are satisfied. Otherwise they keep the local generic Perceiver/SVGD adapters.
-- `ifno`, `pde_opt`, `var4d`, and `vivid` remain API-compatible adaptations because the vendored official scripts are tied to command-line globals, fixed datasets, or external checkpoint/data layouts rather than importable model components.
+- `ifno`, `pde_opt`, `var4d`, and `vivid` remain API-compatible adaptations because the vendored official scripts are tied to command-line globals, fixed datasets, or external checkpoint/data layouts rather than importable model components. VIVID defaults to per-instance refinement from Voronoi/background initialization; set `train_inverse_operator: true` only when intentionally training its inverse operator on a small or formal train loader.
 
 ## Physics Loss Status
 
@@ -235,11 +249,20 @@ Environment variables can override defaults:
 ```bash
 DATA_ROOT=/home/tat512/C01Python/PDEdata TRAIN_SIZE=1024 BATCH_SIZE=8 EPOCHS=5 \
 conda run -n FM4PDEbaseline bash scripts/baselines/run_sparse_main.sh
+
+For a conservative formal plan before launching the full grid:
+
+```bash
+DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
+  bash scripts/baselines/run_paper_plan_lightweight.sh
+```
+
+Paper matrix scripts accept `PDES`, `BASELINES`, `SENSOR_COUNTS`, `SENSOR_MODES`, and `NOISE_LEVELS` overrides. Unsupported baseline/PDE combinations are skipped and recorded in `skipped_combinations.jsonl`.
 ```
 
 Results are written to JSONL and CSV with fields:
 
-`pde`, `task`, `baseline`, `seed`, `train_size`, `num_sensors`, `sensor_mode`, `noise_level`, `relative_l2_input_or_coeff`, `relative_l2_solution`, `obs_mse`, `pde_residual`, `bc_residual`, `ic_residual`, `physics_loss`, `residual_mode`, `train_time`, `inference_time`, `inference_optimization_time`, `num_params`, `config_path`, `checkpoint_path`, `commit_hash`, `mask_id`.
+`pde`, `task`, `baseline`, `seed`, `train_size`, `train_requested_size`, `effective_train_size`, `train_size_loaded_for_fit`, `train_size_loaded_for_spec`, `val_split_source`, `num_sensors`, `sensor_mode`, `noise_level`, `relative_l2_input_or_coeff`, `relative_l2_solution`, `obs_mse`, `pde_residual`, `bc_residual`, `ic_residual`, `physics_loss`, `metric_granularity`, `residual_mode`, `residual_mode_counts`, `train_time`, `inference_time`, `inference_optimization_time`, `num_params`, `config_path`, `checkpoint_path`, `commit_hash`, `mask_id`.
 
 ## Adding New PDE Adapters
 

@@ -3,6 +3,28 @@
 Date: 2026-06-17
 Environment: `conda run -n FM4PDEbaseline`
 
+## 2026-06-18 Targeted Fix Verification
+
+Current shell environment: `/opt/miniconda3/bin/python` 3.13.5. This environment does not have `torch` or `pytest` installed, and `/opt/miniconda3/envs/research/bin/python` also lacks `torch`, `pytest`, `yaml`, `h5py`, and `scipy`. Runner and pytest execution are therefore blocked in this shell until the intended `FM4PDEbaseline` environment is activated or installed.
+
+Commands that completed in the current shell:
+
+```bash
+python -m py_compile baselines/run.py baselines/common/data_adapter.py baselines/common/physics.py baselines/aggregate_results.py baselines/experiment_matrix.py baselines/methods/*.py tests/test_*.py
+bash -n scripts/baselines/run_paper_full_operator.sh scripts/baselines/run_paper_sparse_reconstruction.sh scripts/baselines/run_paper_physics_da.sh scripts/baselines/run_paper_plan_lightweight.sh scripts/baselines/run_paper_all.sh scripts/baselines/smoke_all.sh
+python -m baselines.aggregate_results outputs/baselines --output-dir outputs/baselines/aggregate_test
+```
+
+Commands blocked by missing dependencies in the current shell:
+
+```bash
+python -m baselines.run --baseline fno --pde darcy --task forward --dry-run --synthetic-data --experiment-mode debug --test-size 4 --train-size 8 --val-size 0 --batch-size 2
+python -m pytest
+bash scripts/baselines/smoke_all.sh
+```
+
+Targeted fixes added after the original report: paper `VAL_SIZE=0`, strict `nsnonbounded` test-file filtering, per-instance spec-only train loading, sparse-task background preservation for residuals, per-sample physics metric values, pooled summary-only aggregation, explicit backend/fallback flags, and paper matrix compatibility skipping.
+
 ## Commands Run
 
 ```bash

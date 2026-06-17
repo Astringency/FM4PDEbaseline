@@ -26,16 +26,26 @@ class PCBNNBaseline(BaselineModel):
         self.hidden = int(self.config.get("hidden", 64))
         self.depth = int(self.config.get("depth", 4))
         self.official_net_cls = None
-        self.official_backend = "local"
         backend = str(self.config.get("official_backend", "auto")).lower()
+        fallback_reason = ""
         if self.coord_dim == 2 and self.target_channels == 3 and backend in {"auto", "pc_bnn", "official"}:
             try:
                 self.official_net_cls = get_pc_bnn_net_class()
-                self.official_backend = "pc_bnn"
+                self.set_backend("pc_bnn", "pc_bnn", fallback_used=False)
             except OfficialImportError as exc:
-                if backend == "pc_bnn":
+                fallback_reason = f"pc_bnn unavailable: {exc}"
+                if backend in {"pc_bnn", "official"}:
                     warnings.warn(f"PC-BNN official Net unavailable, using local particle fallback: {exc}", RuntimeWarning, stacklevel=2)
-                self.official_backend = "local"
+        elif backend in {"auto", "pc_bnn", "official"}:
+            fallback_reason = "official PC-BNN adapter only supports 2D three-channel targets"
+        if self.official_net_cls is None:
+            requested_local = backend in {"local", "none"}
+            self.set_backend(
+                "local",
+                "local" if requested_local else ("official" if backend == "official" else backend),
+                fallback_used=not requested_local,
+                warning=fallback_reason,
+            )
         return self
 
     def parameter_count(self) -> int:

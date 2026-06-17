@@ -29,6 +29,7 @@ class DeepONetBaseline(BaselineModel):
         self.branch_in = branch_in
         self.official_net = None
         backend = str(self.config.get("official_backend", "auto")).lower()
+        fallback_reason = ""
         if backend in {"auto", "deepxde", "official"}:
             try:
                 deeponet = get_deepxde_deeponet_class()
@@ -40,11 +41,19 @@ class DeepONetBaseline(BaselineModel):
                     num_outputs=out_channels,
                     multi_output_strategy="independent" if out_channels > 1 else None,
                 )
-                self.official_backend = "deepxde"
+                self.set_backend("deepxde", "deepxde", fallback_used=False)
             except OfficialImportError as exc:
-                if backend == "deepxde":
+                fallback_reason = f"deepxde unavailable: {exc}"
+                if backend in {"deepxde", "official"}:
                     warnings.warn(f"DeepXDE DeepONet unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
-                self.official_backend = "local"
+        if self.official_net is None:
+            requested_local = backend in {"local", "none"}
+            self.set_backend(
+                "local",
+                "local" if requested_local else ("official" if backend == "official" else backend),
+                fallback_used=not requested_local,
+                warning=fallback_reason,
+            )
         return self
 
     def fit(self, train_loader, val_loader=None):

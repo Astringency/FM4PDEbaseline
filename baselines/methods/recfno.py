@@ -5,7 +5,8 @@ import torch
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .shared import OfficialRecFNOVoronoiFNO2dNet, grid_channels
+from .official import OfficialImportError
+from .shared import FNO2dNet, OfficialRecFNOVoronoiFNO2dNet, grid_channels
 
 
 class RecFNOBaseline(BaselineModel):
@@ -19,15 +20,37 @@ class RecFNOBaseline(BaselineModel):
         in_channels = target_channels + target_channels + 2
         self.embedding = str(self.config.get("embedding", "mask"))
         modes1, modes2 = _clamped_modes(self.config, data_spec)
-        self.net = OfficialRecFNOVoronoiFNO2dNet(
+        backend = str(self.config.get("official_backend", "auto")).lower()
+        width = int(self.config.get("width", 24))
+        if backend not in {"local", "none"}:
+            try:
+                self.net = OfficialRecFNOVoronoiFNO2dNet(
+                    in_channels=in_channels,
+                    out_channels=target_channels,
+                    width=width,
+                    modes1=modes1,
+                    modes2=modes2,
+                    add_coords=False,
+                )
+                self.set_backend("recfno", "recfno", fallback_used=False)
+                return self
+            except OfficialImportError as exc:
+                self.backend_warning = f"recfno unavailable: {exc}"
+        self.net = FNO2dNet(
             in_channels=in_channels,
             out_channels=target_channels,
-            width=int(self.config.get("width", 24)),
+            width=width,
             modes1=modes1,
             modes2=modes2,
             add_coords=False,
         )
-        self.official_backend = "recfno"
+        requested_local = backend in {"local", "none"}
+        self.set_backend(
+            "local",
+            "local" if requested_local else ("official" if backend == "official" else backend),
+            fallback_used=not requested_local,
+            warning="" if requested_local else self.backend_warning,
+        )
         return self
 
     def fit(self, train_loader, val_loader=None):

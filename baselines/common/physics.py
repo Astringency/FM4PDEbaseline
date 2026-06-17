@@ -628,17 +628,9 @@ def _as_ns_trajectory(pred: torch.Tensor, metadata: dict) -> tuple[torch.Tensor,
         return pred[:, :1], "full_trajectory" if pred.shape[2] > 2 else "two_level"
     if pred.ndim != 4:
         raise ValueError(f"NS residual expects [B,T,H,W], [B,1,H,W], or [B,1,T,H,W], got {tuple(pred.shape)}")
-    full = metadata.get("full_tensor")
-    input_fields = metadata.get("input_fields")
     if pred.shape[1] > 1:
         traj = pred.unsqueeze(1)
-        if isinstance(full, torch.Tensor) and full.ndim == 5:
-            initial = full[:, :, :1].to(pred.device, pred.dtype)
-        elif isinstance(input_fields, torch.Tensor) and input_fields.shape[1] == 1:
-            initial = input_fields[:, :, None].to(pred.device, pred.dtype)
-        else:
-            warnings.warn("Missing NS initial state metadata; using first predicted frame as initial state.", RuntimeWarning, stacklevel=2)
-            initial = traj[:, :, :1]
+        initial = _initial_from_metadata(metadata, pred, channels=1)[:, :1, None]
         return torch.cat([initial, traj], dim=2), "full_trajectory"
     initial = _initial_from_metadata(metadata, pred, channels=1)[:, :1]
     return torch.stack([initial, pred[:, :1]], dim=2), "two_level"
@@ -700,6 +692,10 @@ def _initial_channels_from_metadata(
 ) -> torch.Tensor:
     if isinstance(metadata.get("background_fields"), torch.Tensor):
         return metadata["background_fields"].to(pred.device, pred.dtype)[:, :channels]
+    if isinstance(metadata.get("original_input_fields"), torch.Tensor):
+        original = metadata["original_input_fields"].to(pred.device, pred.dtype)
+        if original.ndim == 4 and original.shape[1] >= input_channel + channels:
+            return original[:, input_channel : input_channel + channels]
     if isinstance(metadata.get("full_tensor"), torch.Tensor):
         full = metadata["full_tensor"].to(pred.device, pred.dtype)
         if full.ndim == 5:
@@ -763,14 +759,18 @@ def _solution_channels_from_metadata(
 def _initial_from_metadata(metadata: dict, pred: torch.Tensor, channels: int) -> torch.Tensor:
     if isinstance(metadata.get("background_fields"), torch.Tensor):
         return metadata["background_fields"].to(pred.device, pred.dtype)
-    if isinstance(metadata.get("input_fields"), torch.Tensor) and metadata["input_fields"].shape[1] == channels:
-        input_fields = metadata["input_fields"].to(pred.device, pred.dtype)
-        return input_fields[:, :channels]
+    if isinstance(metadata.get("original_input_fields"), torch.Tensor):
+        original = metadata["original_input_fields"].to(pred.device, pred.dtype)
+        if original.ndim >= 4 and original.shape[1] >= channels:
+            return original[:, :channels]
     if isinstance(metadata.get("full_tensor"), torch.Tensor):
         full = metadata["full_tensor"].to(pred.device, pred.dtype)
         if full.ndim == 5:
             idx = int(metadata.get("input_time_index", 0))
             return full[:, :channels, idx]
+    if isinstance(metadata.get("input_fields"), torch.Tensor) and metadata["input_fields"].shape[1] >= channels:
+        input_fields = metadata["input_fields"].to(pred.device, pred.dtype)
+        return input_fields[:, :channels]
     warnings.warn("Missing initial/background state for time-dependent residual; using predicted first frame.", RuntimeWarning, stacklevel=2)
     if pred.ndim == 5:
         return pred[:, :channels, 0]

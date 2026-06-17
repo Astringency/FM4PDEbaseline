@@ -16,7 +16,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from baselines.common.data_adapter import PDEBatch, PDEBatchDataset, build_default_registry, pde_collate
+from baselines.common.data_adapter import PDEBatch, PDEBatchDataset, build_default_registry, pde_collate, slice_pde_batch
 from baselines.common.metrics import (
     append_result_csv,
     append_result_jsonl,
@@ -53,7 +53,7 @@ BASELINES = {
     "vivid": VIVIDBaseline,
 }
 
-PER_INSTANCE_BASELINES = {"pinn_sparse", "pc_bnn", "pde_opt", "var4d"}
+PER_INSTANCE_BASELINES = {"pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -84,6 +84,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--synthetic-resolution", type=int, default=32)
     parser.add_argument("--prefer-test", action="store_true", help="Compatibility/debug option. Never use for paper training.")
     parser.add_argument("--scalar-param-mode", choices=["metadata", "materialize", "global"], default="metadata")
+    parser.add_argument("--physics-metric-mode", choices=["per_sample", "per_batch"], default=None)
     parser.add_argument("--strict-size", action="store_true", help="Fail if requested split size exceeds available samples.")
     parser.add_argument("--save-checkpoint", action="store_true")
     return parser.parse_args(argv)
@@ -144,32 +145,44 @@ def main(argv: list[str] | None = None) -> None:
     _validate_mode(args)
     torch.manual_seed(args.seed)
     cfg = load_yaml(args.config)
+    args.physics_metric_mode = _resolve_physics_metric_mode(args, cfg)
     method_cfg = build_method_config(cfg, args)
 
     train_size, val_size, test_size = _effective_sizes(args)
     registry = build_default_registry()
     use_sensors = args.task.startswith("sparse")
 
-    train_dataset = _make_split_dataset(
-        registry,
-        args,
-        "train",
-        train_size,
-        use_sensors,
-        synthetic_seed=args.seed * 1000 + 11,
-    )
-    val_dataset = None
-    if val_size > 0:
-        val_dataset = _make_split_dataset(
+    val_dataset, split_info = _make_val_dataset_if_requested(registry, args, val_size, train_size, use_sensors)
+    effective_train_size = int(split_info["effective_train_size"])
+    is_per_instance = args.baseline in PER_INSTANCE_BASELINES
+    if args.baseline == "vivid" and bool(method_cfg.get("train_inverse_operator", False)):
+        is_per_instance = False
+    spec_size = max(1, min(int(args.batch_size), 4, max(effective_train_size, 1)))
+    if is_per_instance:
+        spec_dataset = _make_split_dataset(
             registry,
             args,
-            "val",
-            val_size,
+            "train",
+            spec_size,
             use_sensors,
-            synthetic_seed=args.seed * 1000 + 17,
-            sample_offset=train_size,
-            val_from_train_offset=train_size,
+            synthetic_seed=args.seed * 1000 + 11,
         )
+        train_dataset_for_fit = spec_dataset
+    else:
+        train_dataset_for_fit = _make_split_dataset(
+            registry,
+            args,
+            "train",
+            effective_train_size,
+            use_sensors,
+            synthetic_seed=args.seed * 1000 + 11,
+        )
+        spec_dataset = train_dataset_for_fit
+        if split_info["val_split_source"] == "deterministic_train_subset" and len(train_dataset_for_fit) < effective_train_size:
+            raise ValueError(
+                f"Cannot reserve validation tail: requested effective train size {effective_train_size}, "
+                f"but only loaded {len(train_dataset_for_fit)} training samples."
+            )
     test_dataset = _make_split_dataset(
         registry,
         args,
@@ -179,15 +192,22 @@ def main(argv: list[str] | None = None) -> None:
         synthetic_seed=args.seed * 1000 + 23,
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=args.baseline not in PER_INSTANCE_BASELINES, collate_fn=pde_collate)
+    train_loader = DataLoader(train_dataset_for_fit, batch_size=args.batch_size, shuffle=not is_per_instance, collate_fn=pde_collate)
     val_loader = (
         DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=pde_collate)
         if val_dataset is not None
         else None
     )
+    spec_loader = DataLoader(spec_dataset, batch_size=min(args.batch_size, len(spec_dataset)), shuffle=False, collate_fn=pde_collate)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=pde_collate)
-    first_train_batch = next(iter(train_loader))
-    data_spec = build_data_spec(first_train_batch)
+    data_spec = build_data_spec(next(iter(spec_loader)))
+    split_info.update(
+        {
+            "train_size_loaded_for_fit": 0 if is_per_instance else len(train_dataset_for_fit),
+            "train_size_loaded_for_spec": len(spec_dataset),
+            "per_instance_baseline": bool(is_per_instance),
+        }
+    )
 
     model = BASELINES[args.baseline]().build(method_cfg, data_spec).to(args.device)
     backend_info = _backend_info(model, method_cfg)
@@ -199,7 +219,7 @@ def main(argv: list[str] | None = None) -> None:
 
     train_start = time.perf_counter()
     train_history: dict[str, Any] = {}
-    if args.baseline not in PER_INSTANCE_BASELINES:
+    if not is_per_instance:
         train_history = model.fit(train_loader, val_loader)
     else:
         train_history = model.fit(train_loader, val_loader)
@@ -226,11 +246,13 @@ def main(argv: list[str] | None = None) -> None:
         train_time=train_time,
         train_history=train_history,
         backend_info=backend_info,
-        train_dataset=train_dataset,
+        train_dataset=train_dataset_for_fit,
+        spec_dataset=spec_dataset,
         val_dataset=val_dataset,
         test_dataset=test_dataset,
+        split_info=split_info,
     )
-    summary = _summarize_run(raw_rows, eval_totals, args, train_dataset, val_dataset, test_dataset, backend_info)
+    summary = _summarize_run(raw_rows, eval_totals, args, train_dataset_for_fit, spec_dataset, val_dataset, test_dataset, backend_info, split_info)
     summary.update(
         {
             "train_time": train_time,
@@ -261,6 +283,18 @@ def _validate_mode(args: argparse.Namespace) -> None:
         raise ValueError("--synthetic-data is restricted to smoke/debug modes")
 
 
+def _resolve_physics_metric_mode(args: argparse.Namespace, cfg: dict[str, Any]) -> str:
+    if args.physics_metric_mode:
+        return str(args.physics_metric_mode)
+    configured = cfg.get("physics_metric_mode")
+    if configured:
+        mode = str(configured)
+        if mode not in {"per_sample", "per_batch"}:
+            raise ValueError(f"physics_metric_mode must be per_sample or per_batch, got {mode!r}")
+        return mode
+    return "per_sample"
+
+
 def _effective_sizes(args: argparse.Namespace) -> tuple[int, int, int]:
     train_size = int(args.train_size)
     val_size = int(args.val_size)
@@ -272,6 +306,65 @@ def _effective_sizes(args: argparse.Namespace) -> tuple[int, int, int]:
     return train_size, val_size, test_size
 
 
+def _make_val_dataset_if_requested(
+    registry,
+    args: argparse.Namespace,
+    val_size: int,
+    train_size: int,
+    use_sensors: bool,
+) -> tuple[PDEBatchDataset | None, dict[str, Any]]:
+    split_info: dict[str, Any] = {
+        "train_requested_size": int(train_size),
+        "effective_train_size": int(train_size),
+        "val_requested_size": int(val_size),
+        "val_split_source": "none",
+        "val_from_train_offset": None,
+    }
+    if val_size <= 0:
+        return None, split_info
+    if args.synthetic_data:
+        val_dataset = _make_split_dataset(
+            registry,
+            args,
+            "val",
+            val_size,
+            use_sensors,
+            synthetic_seed=args.seed * 1000 + 17,
+        )
+        split_info["val_split_source"] = "synthetic_independent_val"
+        return val_dataset, split_info
+
+    try:
+        val_dataset = _make_split_dataset(
+            registry,
+            args,
+            "val",
+            val_size,
+            use_sensors,
+            synthetic_seed=args.seed * 1000 + 17,
+        )
+        split_info["val_split_source"] = str(val_dataset.batch.metadata.get("split_source", "independent_val"))
+        return val_dataset, split_info
+    except FileNotFoundError:
+        if train_size <= val_size:
+            raise ValueError(f"Cannot reserve val_size={val_size} from train_size={train_size}; reduce VAL_SIZE or provide an independent val file.")
+        effective_train_size = int(train_size - val_size)
+        split_info["effective_train_size"] = effective_train_size
+        split_info["val_split_source"] = "deterministic_train_subset"
+        split_info["val_from_train_offset"] = effective_train_size
+        val_dataset = _make_split_dataset(
+            registry,
+            args,
+            "val",
+            val_size,
+            use_sensors,
+            synthetic_seed=args.seed * 1000 + 17,
+            val_from_train_offset=effective_train_size,
+            strict_size_override=True,
+        )
+        return val_dataset, split_info
+
+
 def _make_split_dataset(
     registry,
     args: argparse.Namespace,
@@ -281,6 +374,7 @@ def _make_split_dataset(
     synthetic_seed: int,
     sample_offset: int = 0,
     val_from_train_offset: int | None = None,
+    strict_size_override: bool | None = None,
 ) -> PDEBatchDataset:
     if args.synthetic_data:
         raw = registry.synthetic_raw(
@@ -319,7 +413,7 @@ def _make_split_dataset(
         synthetic_resolution=args.synthetic_resolution,
         synthetic_seed=synthetic_seed,
         scalar_param_mode=args.scalar_param_mode,
-        strict_size=args.strict_size,
+        strict_size=args.strict_size if strict_size_override is None else bool(strict_size_override),
     )
 
 
@@ -334,8 +428,10 @@ def _evaluate_full_test_loader(
     train_history: dict[str, Any],
     backend_info: dict[str, Any],
     train_dataset: PDEBatchDataset,
+    spec_dataset: PDEBatchDataset,
     val_dataset: PDEBatchDataset | None,
     test_dataset: PDEBatchDataset,
+    split_info: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     model.eval()
     rows: list[dict[str, Any]] = []
@@ -350,18 +446,12 @@ def _evaluate_full_test_loader(
         elapsed = time.perf_counter() - start
         pred_cpu = pred.detach().cpu()
         target = batch.target_fields.detach().cpu()
-        metric_meta = {
-            "input_fields": batch.input_fields,
-            "full_tensor": batch.full_tensor,
-            "task": batch.task,
-            **batch.metadata,
-        }
-        physics_metrics = physics_loss_metric(pred_cpu, args.pde, dict(metric_meta))
         inf_opt = float(batch.metadata.get("inference_optimization_time", 0.0) or 0.0)
         batch_n = int(target.shape[0])
         rel_values = _relative_l2_values(pred_cpu, target)
         mse_values = _mse_values(pred_cpu, target)
         mae_values = _mae_values(pred_cpu, target)
+        metric_payload = _batch_metric_payload(pred_cpu, target, batch, args)
         row = {
             "pde": args.pde,
             "task": args.task,
@@ -370,8 +460,15 @@ def _evaluate_full_test_loader(
             "batch_index": batch_index,
             "sample_count": batch_n,
             "split": "test",
-            "train_size": len(train_dataset),
+            "train_size": int(split_info["effective_train_size"]),
+            "train_requested_size": int(split_info["train_requested_size"]),
+            "effective_train_size": int(split_info["effective_train_size"]),
+            "train_size_loaded_for_fit": int(split_info["train_size_loaded_for_fit"]),
+            "train_size_loaded_for_spec": int(split_info["train_size_loaded_for_spec"]),
             "val_size": len(val_dataset) if val_dataset is not None else 0,
+            "val_requested_size": int(split_info["val_requested_size"]),
+            "val_split_source": split_info["val_split_source"],
+            "val_from_train_offset": split_info["val_from_train_offset"],
             "test_size": len(test_dataset),
             "train_shards": args.train_shards,
             "data_root": args.data_root,
@@ -388,6 +485,7 @@ def _evaluate_full_test_loader(
             "official_backend": backend_info["official_backend"],
             "fallback_used": backend_info["fallback_used"],
             "backend_warning": backend_info["backend_warning"],
+            "metric_granularity": args.physics_metric_mode,
             "relative_l2_solution": _mean_list(rel_values),
             "relative_l2_solution_values": json.dumps(rel_values),
             "relative_l2_input_or_coeff": float("nan"),
@@ -395,12 +493,13 @@ def _evaluate_full_test_loader(
             "mse_values": json.dumps(mse_values),
             "mae": _mean_list(mae_values),
             "mae_values": json.dumps(mae_values),
-            "obs_mse": float(obs_mse(pred_cpu, target, batch.mask).detach().cpu()),
-            "pde_residual": _tensor_float(physics_metrics["interior"]),
-            "bc_residual": _tensor_float(physics_metrics["bc"]),
-            "ic_residual": _tensor_float(physics_metrics["ic"]),
-            "physics_loss": _tensor_float(physics_metrics["total"]),
-            "residual_mode": str(physics_metrics["mode"]),
+            "obs_mse": metric_payload["obs_mse"],
+            "pde_residual": metric_payload["pde_residual"],
+            "bc_residual": metric_payload["bc_residual"],
+            "ic_residual": metric_payload["ic_residual"],
+            "physics_loss": metric_payload["physics_loss"],
+            "residual_mode": metric_payload["residual_mode"],
+            "residual_mode_counts": json.dumps(metric_payload["residual_mode_counts"], sort_keys=True),
             "train_time": train_time,
             "inference_time": elapsed,
             "inference_optimization_time": inf_opt,
@@ -417,6 +516,10 @@ def _evaluate_full_test_loader(
             "pred_shape": json.dumps(list(pred_cpu.shape)),
             "train_history": json.dumps(_json_safe(train_history)),
         }
+        for key in ("obs_mse", "pde_residual", "bc_residual", "ic_residual", "physics_loss"):
+            values_key = f"{key}_values"
+            if values_key in metric_payload:
+                row[values_key] = json.dumps(metric_payload[values_key])
         if tuple(pred_cpu.shape) != tuple(target.shape):
             raise RuntimeError(f"Prediction shape {tuple(pred_cpu.shape)} != target shape {tuple(target.shape)}")
         rows.append(row)
@@ -429,14 +532,79 @@ def _evaluate_full_test_loader(
     }
 
 
+def _batch_metric_payload(pred: torch.Tensor, target: torch.Tensor, batch: PDEBatch, args: argparse.Namespace) -> dict[str, Any]:
+    if args.physics_metric_mode == "per_batch":
+        metric_meta = {
+            "input_fields": batch.input_fields,
+            "full_tensor": batch.full_tensor,
+            "task": batch.task,
+            **batch.metadata,
+        }
+        physics_metrics = physics_loss_metric(pred, args.pde, dict(metric_meta))
+        mode = str(physics_metrics["mode"])
+        return {
+            "obs_mse": float(obs_mse(pred, target, batch.mask).detach().cpu()),
+            "pde_residual": _tensor_float(physics_metrics["interior"]),
+            "bc_residual": _tensor_float(physics_metrics["bc"]),
+            "ic_residual": _tensor_float(physics_metrics["ic"]),
+            "physics_loss": _tensor_float(physics_metrics["total"]),
+            "residual_mode": mode,
+            "residual_mode_counts": {mode: int(target.shape[0])},
+        }
+
+    values: dict[str, list[float]] = {
+        "obs_mse": [],
+        "pde_residual": [],
+        "bc_residual": [],
+        "ic_residual": [],
+        "physics_loss": [],
+    }
+    residual_counts: Counter[str] = Counter()
+    for item in range(int(target.shape[0])):
+        item_batch = slice_pde_batch(batch, item)
+        pred_i = pred[item : item + 1]
+        target_i = target[item : item + 1]
+        meta_i = {
+            "input_fields": item_batch.input_fields,
+            "full_tensor": item_batch.full_tensor,
+            "task": item_batch.task,
+            **item_batch.metadata,
+        }
+        physics_metrics = physics_loss_metric(pred_i, args.pde, dict(meta_i))
+        values["obs_mse"].append(float(obs_mse(pred_i, target_i, item_batch.mask).detach().cpu()))
+        values["pde_residual"].append(_tensor_float(physics_metrics["interior"]))
+        values["bc_residual"].append(_tensor_float(physics_metrics["bc"]))
+        values["ic_residual"].append(_tensor_float(physics_metrics["ic"]))
+        values["physics_loss"].append(_tensor_float(physics_metrics["total"]))
+        residual_counts[str(physics_metrics["mode"])] += 1
+    payload: dict[str, Any] = {
+        "residual_mode": _mode_label(residual_counts),
+        "residual_mode_counts": dict(residual_counts),
+    }
+    for key, metric_values in values.items():
+        payload[key] = _mean_list(metric_values)
+        payload[f"{key}_values"] = metric_values
+    return payload
+
+
+def _mode_label(counts: Counter[str]) -> str:
+    if not counts:
+        return ""
+    if len(counts) == 1:
+        return next(iter(counts))
+    return "mixed"
+
+
 def _summarize_run(
     rows: list[dict[str, Any]],
     eval_totals: dict[str, float],
     args: argparse.Namespace,
     train_dataset: PDEBatchDataset,
+    spec_dataset: PDEBatchDataset,
     val_dataset: PDEBatchDataset | None,
     test_dataset: PDEBatchDataset,
     backend_info: dict[str, Any],
+    split_info: dict[str, Any],
 ) -> dict[str, Any]:
     metric_keys = [
         "relative_l2_solution",
@@ -455,8 +623,15 @@ def _summarize_run(
         "baseline": args.baseline,
         "seed": args.seed,
         "split": "test",
-        "train_size": len(train_dataset),
+        "train_size": int(split_info["effective_train_size"]),
+        "train_requested_size": int(split_info["train_requested_size"]),
+        "effective_train_size": int(split_info["effective_train_size"]),
+        "train_size_loaded_for_fit": int(split_info["train_size_loaded_for_fit"]),
+        "train_size_loaded_for_spec": int(split_info["train_size_loaded_for_spec"]),
         "val_size": len(val_dataset) if val_dataset is not None else 0,
+        "val_requested_size": int(split_info["val_requested_size"]),
+        "val_split_source": split_info["val_split_source"],
+        "val_from_train_offset": split_info["val_from_train_offset"],
         "test_size": len(test_dataset),
         "train_shards": args.train_shards,
         "data_root": args.data_root,
@@ -473,6 +648,8 @@ def _summarize_run(
         "official_backend": backend_info["official_backend"],
         "fallback_used": backend_info["fallback_used"],
         "backend_warning": backend_info["backend_warning"],
+        "metric_granularity": args.physics_metric_mode,
+        "batch_count": len(rows),
         "residual_mode_counts": json.dumps(dict(_residual_mode_counter(rows)), sort_keys=True),
         "inference_time_total": eval_totals["inference_time_total"],
         "inference_time_per_sample": eval_totals["inference_time_total"] / max(len(test_dataset), 1),
@@ -482,9 +659,12 @@ def _summarize_run(
     for key in metric_keys:
         values = []
         for row in rows:
-            if key in {"relative_l2_solution", "mse", "mae"}:
-                raw_values = json.loads(row[f"{key}_values"])
+            values_key = f"{key}_values"
+            if values_key in row:
+                raw_values = json.loads(row[values_key])
                 values.extend(raw_values)
+            elif row.get("metric_granularity") == "per_batch":
+                values.append(row[key])
             else:
                 values.extend([row[key]] * int(row.get("sample_count", 1) or 1))
         stats = _metric_stats(values)
@@ -496,6 +676,13 @@ def _summarize_run(
 def _residual_mode_counter(rows: list[dict[str, Any]]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for row in rows:
+        if "residual_mode_counts" in row:
+            try:
+                parsed = json.loads(row["residual_mode_counts"]) if isinstance(row["residual_mode_counts"], str) else row["residual_mode_counts"]
+                counts.update({str(k): int(v) for k, v in parsed.items()})
+                continue
+            except Exception:
+                pass
         counts[str(row.get("residual_mode", ""))] += int(row.get("sample_count", 1) or 1)
     return counts
 
@@ -571,10 +758,8 @@ def _tensor_float(value: Any) -> float:
 def _backend_info(model, method_cfg: dict[str, Any]) -> dict[str, Any]:
     official_backend = str(getattr(model, "official_backend", "local"))
     backend_used = str(getattr(model, "backend_used", "") or official_backend or "local")
-    if backend_used == "local" and official_backend != "local":
-        backend_used = official_backend
     requested = str(method_cfg.get("official_backend", "auto")).lower()
-    fallback_used = bool(getattr(model, "fallback_used", False) or backend_used == "local" or official_backend == "local")
+    fallback_used = bool(getattr(model, "fallback_used", False))
     if requested in {"local", "none"}:
         fallback_used = False
     warning = str(getattr(model, "backend_warning", "") or "")

@@ -19,6 +19,7 @@ class Var4DBaseline(BaselineModel):
     def build(self, config, data_spec):
         super().build(config, data_spec)
         self.optimized_numel = _optimized_state_numel(data_spec)
+        self.set_backend("local", "local", fallback_used=False)
         return self
 
     def parameter_count(self) -> int:

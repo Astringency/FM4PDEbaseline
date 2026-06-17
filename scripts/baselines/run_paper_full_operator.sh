@@ -8,7 +8,7 @@ DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
 OUT="${OUT:-outputs/baselines/paper/full_operator}"
 DEVICE="${DEVICE:-cpu}"
 TRAIN_SIZE="${TRAIN_SIZE:-50000}"
-VAL_SIZE="${VAL_SIZE:-1000}"
+VAL_SIZE="${VAL_SIZE:-0}"
 TEST_SIZE="${TEST_SIZE:-1000}"
 TRAIN_SHARDS="${TRAIN_SHARDS:-5}"
 EPOCHS="${EPOCHS:-200}"
@@ -18,10 +18,15 @@ PDES="${PDES:-darcy poisson helmholtz nsnonbounded burger reaction_diffusion sha
 BASELINES="${BASELINES:-fno deeponet ifno}"
 SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
+SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
+mkdir -p "$OUT"
 
 for seed in $SEEDS; do
   for pde in $PDES; do
     for baseline in $BASELINES; do
+      if ! python -m baselines.experiment_matrix --baseline "$baseline" --pde "$pde" --task forward --skipped-path "$SKIPPED"; then
+        continue
+      fi
       python -m baselines.run \
         --experiment-mode paper \
         --baseline "$baseline" --pde "$pde" --task forward \

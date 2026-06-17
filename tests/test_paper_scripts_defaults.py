@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def test_paper_scripts_defaults_are_formal_and_val_zero():
+    root = Path(__file__).resolve().parents[1]
+    scripts = [
+        root / "scripts/baselines/run_paper_full_operator.sh",
+        root / "scripts/baselines/run_paper_sparse_reconstruction.sh",
+        root / "scripts/baselines/run_paper_physics_da.sh",
+        root / "scripts/baselines/run_paper_plan_lightweight.sh",
+    ]
+    forbidden = ["--dry-run", "--synthetic-data", "--allow-synthetic-fallback", "--prefer-test"]
+    for script in scripts:
+        text = script.read_text(encoding="utf-8")
+        assert 'VAL_SIZE="${VAL_SIZE:-0}"' in text
+        for token in forbidden:
+            assert token not in text
+
+
+def test_paper_config_defaults_val_zero():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "baselines/configs/paper.yaml").read_text(encoding="utf-8")
+    assert "val_size: 0" in text
+    assert "val_size: 1000" not in text

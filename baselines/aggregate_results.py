@@ -73,17 +73,27 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             residual_counts.update(_parse_residual_counts(item))
         result["residual_mode_counts"] = json.dumps(dict(residual_counts), sort_keys=True)
         result["run_count"] = len(items)
+        metric_modes: list[str] = []
         for metric in METRICS:
-            values = _metric_values(items, metric)
-            stats = _stats(values)
+            stats, mode = _metric_stats_from_items(items, metric)
+            metric_modes.append(mode)
             for suffix, value in stats.items():
                 result[f"{metric}_{suffix}"] = value
+        result["aggregation_mode"] = _aggregation_mode(metric_modes)
+        result["aggregation_warning"] = (
+            "summary rows missing metric std/n; aggregated unweighted run-level means"
+            if result["aggregation_mode"] == "run_level_summary_only_unweighted"
+            else ""
+        )
         out.append(result)
     return out
 
 
-def _metric_values(items: list[dict[str, Any]], metric: str) -> list[float]:
+def _metric_stats_from_items(items: list[dict[str, Any]], metric: str) -> tuple[dict[str, float | int], str]:
     values: list[float] = []
+    summaries: list[tuple[int, float, float]] = []
+    summary_nan_count = 0
+    degraded_means: list[float] = []
     summary_mean = f"{metric}_mean"
     raw_values = f"{metric}_values"
     for item in items:
@@ -93,12 +103,37 @@ def _metric_values(items: list[dict[str, Any]], metric: str) -> list[float]:
                 continue
             except Exception:
                 pass
-        if summary_mean in item:
-            n = int(float(item.get(f"{metric}_n", 1) or 1))
-            values.extend([float(item[summary_mean])] * max(n, 1))
-        elif metric in item:
+        if metric in item:
             values.append(float(item[metric]))
-    return values
+            continue
+        if summary_mean in item:
+            try:
+                mean = float(item[summary_mean])
+                n_raw = item.get(f"{metric}_n")
+                std_raw = item.get(f"{metric}_std")
+                summary_nan_count += int(float(item.get(f"{metric}_nan_count", 0) or 0))
+                if n_raw is None or std_raw is None:
+                    degraded_means.append(mean)
+                    continue
+                n = int(float(n_raw))
+                std = float(std_raw)
+                if n <= 0 or math.isnan(mean) or math.isnan(std):
+                    degraded_means.append(mean)
+                    continue
+                summaries.append((n, mean, std))
+            except Exception:
+                continue
+    if values:
+        return _stats(values), "raw"
+    if summaries and not degraded_means:
+        return _pooled_summary_stats(summaries, summary_nan_count), "pooled_summary"
+    if summaries:
+        degraded_means.extend(mean for _n, mean, _std in summaries)
+    if degraded_means:
+        stats = _stats(degraded_means)
+        stats["nan_count"] = int(stats["nan_count"]) + summary_nan_count
+        return stats, "run_level_summary_only_unweighted"
+    return _stats([]), "no_data"
 
 
 def _stats(values: list[float]) -> dict[str, float | int]:
@@ -111,6 +146,33 @@ def _stats(values: list[float]) -> dict[str, float | int]:
     std = math.sqrt(sum((v - mean) ** 2 for v in finite) / (n - 1)) if n > 1 else 0.0
     sem = std / math.sqrt(n) if n else float("nan")
     return {"mean": mean, "std": std, "sem": sem, "ci95": 1.96 * sem, "n": n, "nan_count": nan_count}
+
+
+def _pooled_summary_stats(summaries: list[tuple[int, float, float]], nan_count: int) -> dict[str, float | int]:
+    total_n = sum(n for n, _mean, _std in summaries)
+    if total_n <= 0:
+        return {"mean": float("nan"), "std": float("nan"), "sem": float("nan"), "ci95": float("nan"), "n": 0, "nan_count": nan_count}
+    pooled_mean = sum(n * mean for n, mean, _std in summaries) / total_n
+    if total_n > 1:
+        ss = sum((n - 1) * (std**2) + n * ((mean - pooled_mean) ** 2) for n, mean, std in summaries)
+        pooled_std = math.sqrt(max(ss / (total_n - 1), 0.0))
+    else:
+        pooled_std = 0.0
+    sem = pooled_std / math.sqrt(total_n)
+    return {"mean": pooled_mean, "std": pooled_std, "sem": sem, "ci95": 1.96 * sem, "n": total_n, "nan_count": nan_count}
+
+
+def _aggregation_mode(modes: list[str]) -> str:
+    relevant = {m for m in modes if m != "no_data"}
+    if not relevant:
+        return "no_data"
+    if "raw" in relevant:
+        return "raw"
+    if "run_level_summary_only_unweighted" in relevant:
+        return "run_level_summary_only_unweighted"
+    if relevant == {"pooled_summary"}:
+        return "pooled_summary"
+    return "+".join(sorted(relevant))
 
 
 def _parse_residual_counts(item: dict[str, Any]) -> Counter[str]:

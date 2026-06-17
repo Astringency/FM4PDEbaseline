@@ -19,7 +19,7 @@ batch_size: 16
 epochs: 200
 learning_rate: 0.001
 train_size: 50000
-val_size: 1000
+val_size: 0
 test_size: 1000
 train_shards: 5
 scalar_param_mode: metadata

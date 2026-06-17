@@ -17,6 +17,7 @@ class PDEOptBaseline(BaselineModel):
     def build(self, config, data_spec):
         super().build(config, data_spec)
         self.optimized_numel = int(data_spec["target_numel"]) if "target_numel" in data_spec else int(data_spec["target_channels"])
+        self.set_backend("local", "local", fallback_used=False)
         return self
 
     def parameter_count(self) -> int:

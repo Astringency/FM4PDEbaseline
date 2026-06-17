@@ -27,6 +27,18 @@ class BaselineModel(nn.Module):
         self.data_spec = dict(data_spec or {})
         return self
 
+    def set_backend(
+        self,
+        backend_used: str,
+        official_backend: str | None = None,
+        fallback_used: bool = False,
+        warning: str = "",
+    ) -> None:
+        self.backend_used = str(backend_used)
+        self.official_backend = str(official_backend or backend_used)
+        self.fallback_used = bool(fallback_used)
+        self.backend_warning = str(warning or "")
+
     def fit(self, train_loader, val_loader=None):
         return {}
 

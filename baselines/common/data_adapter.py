@@ -4,6 +4,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
+import re
 
 import h5py
 import numpy as np
@@ -185,7 +186,7 @@ class PDEDataRegistry:
             )
             scalar_param_mode = "metadata"
         try:
-            return spec.loader(
+            raw = spec.loader(
                 root,
                 split=split,
                 max_samples=max_samples,
@@ -196,9 +197,12 @@ class PDEDataRegistry:
                 scalar_param_mode=scalar_param_mode,
                 strict_size=strict_size,
             )
-        except FileNotFoundError as exc:
             if split == "val":
-                train_offset = int(val_from_train_offset or sample_offset or 0)
+                raw.setdefault("metadata", {}).setdefault("split_source", "independent_val")
+            return raw
+        except FileNotFoundError as exc:
+            if split == "val" and val_from_train_offset is not None:
+                train_offset = int(val_from_train_offset)
                 try:
                     raw = spec.loader(
                         root,
@@ -209,13 +213,13 @@ class PDEDataRegistry:
                         val_from_train_offset=val_from_train_offset,
                         prefer_test=False,
                         scalar_param_mode=scalar_param_mode,
-                        strict_size=False,
+                        strict_size=strict_size,
                     )
                     raw.setdefault("metadata", {})["split"] = "val"
                     raw["metadata"]["split_source"] = "deterministic_train_subset"
                     raw["metadata"]["val_from_train_offset"] = train_offset
                     raw["split"] = "val"
-                    return _finalize_loaded_raw(raw, max_samples, strict_size=False)
+                    return _finalize_loaded_raw(raw, max_samples, strict_size=strict_size)
                 except FileNotFoundError:
                     pass
             if synthetic_if_missing:
@@ -279,6 +283,9 @@ class PDEDataRegistry:
                 metadata.setdefault(key, value)
 
         input_fields, target_fields, input_names, target_names = self._split_task(full, spec, task, metadata, canonical)
+        original_input_fields = input_fields
+        metadata["original_input_fields"] = original_input_fields
+        metadata["background_fields"] = _background_fields_for_task(full, spec, metadata, original_input_fields)
         coords = make_coordinate_grid(tuple(target_fields.shape[2:]), batch_size=target_fields.shape[0])
 
         mask = obs_values = obs_coords = None
@@ -757,6 +764,23 @@ def pde_collate(items: list[PDEBatch]) -> PDEBatch:
     )
 
 
+def _background_fields_for_task(full: torch.Tensor, spec: PDESpec, metadata: dict[str, Any], original_input: torch.Tensor) -> torch.Tensor:
+    name = spec.name
+    if full.ndim == 5:
+        if name == "nsnonbounded":
+            return full[:, :, 0]
+        idx = int(metadata.get("input_time_index", 0))
+        idx = max(0, min(idx, full.shape[2] - 1))
+        return full[:, :, idx]
+    if name == "burger":
+        initial = metadata.get("initial_1d")
+        if isinstance(initial, torch.Tensor):
+            return initial.reshape(full.shape[0], 1, 1, full.shape[-1])
+        if full.ndim == 4:
+            return full[:, :1, :1, :]
+    return original_input
+
+
 def _slice_metadata(metadata: dict[str, Any], sl: slice, batch_n: int) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in metadata.items():
@@ -830,6 +854,22 @@ def _train_limited(files: list[Path], split: str, train_shards: int | None) -> l
     if split == "train" and train_shards is not None:
         return files[: int(train_shards)]
     return files
+
+
+def _filter_nsnonbounded_test_files(files: list[Path]) -> list[Path]:
+    legal: list[Path] = []
+    train_shard = re.compile(r"^nsnonbounded_10000-128-128-10_\d+_new\.mat$")
+    for path in files:
+        name = path.name.lower()
+        if "_new" in name and "test" not in name:
+            continue
+        if train_shard.match(name):
+            continue
+        if "10000" in name and "test" not in name:
+            continue
+        if "test" in name or name.startswith("nsnonbounded_1000-128-128-10"):
+            legal.append(path)
+    return legal
 
 
 def _load_darcy(
@@ -1037,12 +1077,19 @@ def _load_nsnonbounded(
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
     if active_split == "test":
-        patterns = ["nsnonbounded_*-128-128-10_*.mat"]
+        patterns = [
+            "nsnonbounded_test_*-128-128-10*.mat",
+            "nsnonbounded_1000-128-128-10*.mat",
+            "nsnonbounded_10000-128-128-10_test*.mat",
+            "nsnonbounded_*_test*.mat",
+        ]
     elif active_split == "val":
         patterns = ["nsnonbounded_val_*-128-128-10_*.mat", "nsnonbounded_*-128-128-10_val*.mat"]
     else:
         patterns = ["nsnonbounded_10000-128-128-10_*_new.mat"]
     files = _train_limited(_candidate_files(root, "nsnonbounded", active_split, patterns), active_split, train_shards)
+    if active_split == "test":
+        files = _filter_nsnonbounded_test_files(files)
     if not files:
         raise _missing_error(root, "nsnonbounded", active_split, patterns)
     parts = []
@@ -1440,6 +1487,8 @@ def _load_future_field_h5(
 ) -> dict[str, Any]:
     parts: list[torch.Tensor] = []
     scalar_meta: dict[str, list[torch.Tensor]] = {}
+    diagnostic_scalar_meta: dict[str, list[torch.Tensor]] = {}
+    array_meta: dict[str, list[torch.Tensor]] = {}
     full_traj_parts: list[torch.Tensor] = []
     meta: dict[str, Any] = {"files": [str(p) for p in files], "canonical_layout": "NCHW", "split": split, "scalar_param_mode": scalar_param_mode}
     remaining = max_samples
@@ -1532,10 +1581,14 @@ def _load_future_field_h5(
                 elif pde == "steady_heat_conduction":
                     u_d = _scalar_or_attr(f, "u_D", "u_D", n, local_start, required=True)
                     scalar_meta.setdefault("u_D", []).append(u_d)
-                    for extra_key in ("picard_iters", "converged", "residual_norm", "n_sources", "source_x", "source_y", "source_amp", "source_sigma"):
+                    for extra_key in ("picard_iters", "converged", "residual_norm", "n_sources"):
                         extra = _scalar_or_attr(f, extra_key, extra_key, n, local_start, required=False)
                         if extra is not None:
-                            scalar_meta.setdefault(extra_key, []).append(extra)
+                            diagnostic_scalar_meta.setdefault(extra_key, []).append(extra)
+                    for array_key in ("source_x", "source_y", "source_amp", "source_sigma"):
+                        extra_array = _array_dataset_or_attr(f, array_key, n, local_start, required=False)
+                        if extra_array is not None:
+                            array_meta.setdefault(array_key, []).append(extra_array)
                     if scalar_param_mode == "materialize":
                         u_d_f = _expand_scalar_to_field(u_d, inp.shape[-2], inp.shape[-1])
                         parts.append(torch.cat([inp[:, :1], u_d_f, out[:, :1], u_d_f.clone()], dim=1))
@@ -1567,6 +1620,10 @@ def _load_future_field_h5(
     for key, values in scalar_meta.items():
         meta[key] = torch.cat(values, dim=0)
         pde_params[key] = meta[key]
+    for key, values in diagnostic_scalar_meta.items():
+        meta[key] = torch.cat(values, dim=0)
+    if array_meta:
+        meta["source_params"] = {key: torch.cat(values, dim=0) for key, values in array_meta.items()}
     meta["pde_params"] = pde_params
     meta["pde_params_available"] = sorted(pde_params)
     if full_traj_parts:
@@ -1622,6 +1679,30 @@ def _scalar_or_attr(
         return torch.full((n,), float(f.attrs[attr_key]), dtype=torch.float32)
     if required:
         raise KeyError(f"Missing required scalar dataset or attr {dataset_key!r}/{attr_key!r} in {f.filename}")
+    return None
+
+
+def _array_dataset_or_attr(
+    f: h5py.File,
+    key: str,
+    n: int,
+    local_start: int,
+    required: bool = False,
+) -> torch.Tensor | None:
+    if key in f:
+        dataset = f[key]
+        if dataset.shape == ():
+            return torch.full((n,), float(dataset[()]), dtype=torch.float32)
+        return _as_float_tensor(dataset[local_start : local_start + n])
+    if key in f.attrs:
+        value = np.asarray(f.attrs[key])
+        if value.ndim == 0:
+            return torch.full((n,), float(value), dtype=torch.float32)
+        if value.shape[0] >= local_start + n:
+            return _as_float_tensor(value[local_start : local_start + n])
+        return _as_float_tensor(np.broadcast_to(value, (n, *value.shape)).copy())
+    if required:
+        raise KeyError(f"Missing required array dataset or attr {key!r} in {f.filename}")
     return None
 
 

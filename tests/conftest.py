@@ -45,6 +45,9 @@ def tiny_data_root(tmp_path: Path) -> Path:
     with h5py.File(ns / "nsnonbounded_10000-128-128-10_1_new.mat", "w") as f:
         f["w0"] = rng.normal(size=(n, s, s)).astype("float32")
         f["w"] = rng.normal(size=(n, s, s, 10)).astype("float32")
+    with h5py.File(ns / "nsnonbounded_test_1000-128-128-10.mat", "w") as f:
+        f["w0"] = rng.normal(size=(n, s, s)).astype("float32")
+        f["w"] = rng.normal(size=(n, s, s, 10)).astype("float32")
 
     rd = mkdir("reaction_diffusion")
     with h5py.File(rd / "reaction_diffusion-128-128-10_0.h5", "w") as f:
@@ -100,5 +103,9 @@ def tiny_data_root(tmp_path: Path) -> Path:
         f["input_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
         f["output_data"] = rng.normal(size=(n, 1, s, s)).astype("float32")
         f["u_D"] = np.full(n, 298.0, dtype="float32")
+        f["source_x"] = rng.normal(size=(n, 3)).astype("float32")
+        f["source_y"] = rng.normal(size=(n, 3)).astype("float32")
+        f["source_amp"] = rng.normal(size=(n, 3)).astype("float32")
+        f["source_sigma"] = rng.random(size=(n, 3)).astype("float32")
 
     return tmp_path

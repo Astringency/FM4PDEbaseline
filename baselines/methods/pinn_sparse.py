@@ -26,14 +26,23 @@ class PINNSparseBaseline(BaselineModel):
         self.depth = int(self.config.get("depth", 4))
         self.deepxde_fnn_cls = None
         backend = str(self.config.get("official_backend", "auto")).lower()
+        fallback_reason = ""
         if backend in {"auto", "deepxde", "official"}:
             try:
                 self.deepxde_fnn_cls = get_deepxde_fnn_class()
-                self.official_backend = "deepxde"
+                self.set_backend("deepxde", "deepxde", fallback_used=False)
             except OfficialImportError as exc:
-                if backend == "deepxde":
+                fallback_reason = f"deepxde unavailable: {exc}"
+                if backend in {"deepxde", "official"}:
                     warnings.warn(f"DeepXDE FNN unavailable, using local neural field fallback: {exc}", RuntimeWarning, stacklevel=2)
-                self.official_backend = "local"
+        if self.deepxde_fnn_cls is None:
+            requested_local = backend in {"local", "none"}
+            self.set_backend(
+                "local",
+                "local" if requested_local else ("official" if backend == "official" else backend),
+                fallback_used=not requested_local,
+                warning=fallback_reason,
+            )
         return self
 
     def parameter_count(self) -> int:
