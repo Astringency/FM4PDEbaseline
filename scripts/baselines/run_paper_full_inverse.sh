@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
-OUT="${OUT:-outputs/baselines/paper/full_operator}"
+OUT="${OUT:-outputs/baselines/paper/full_inverse}"
 DEVICE="${DEVICE:-cpu}"
 TRAIN_SIZE="${TRAIN_SIZE:-50000}"
 VAL_SIZE="${VAL_SIZE:-0}"
@@ -34,7 +34,7 @@ is_future_pde() {
 for seed in $SEEDS; do
   for pde in $PDES; do
     for baseline in $BASELINES; do
-      if ! python -m baselines.experiment_matrix --baseline "$baseline" --pde "$pde" --task forward --skipped-path "$SKIPPED"; then
+      if ! python -m baselines.experiment_matrix --baseline "$baseline" --pde "$pde" --task inverse --skipped-path "$SKIPPED"; then
         continue
       fi
       scalar_mode="$SCALAR_PARAM_MODE"
@@ -43,7 +43,7 @@ for seed in $SEEDS; do
       fi
       python -m baselines.run \
         --experiment-mode paper \
-        --baseline "$baseline" --pde "$pde" --task forward \
+        --baseline "$baseline" --pde "$pde" --task inverse \
         --data-root "$DATA_ROOT" --config "$CONFIG" \
         --train-size "$TRAIN_SIZE" --val-size "$VAL_SIZE" --test-size "$TEST_SIZE" \
         --train-shards "$TRAIN_SHARDS" --batch-size "$BATCH_SIZE" \

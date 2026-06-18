@@ -16,15 +16,26 @@ TIME_DEPENDENT_PDES = {
     "advection_diffusion",
 }
 
+FULL_TRAJECTORY_SENSOR_PDES = {"nsnonbounded", "burger", "reaction_diffusion", "shallow_water"}
+PER_INSTANCE_BASELINES = {"pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"}
 
-def compatibility_reason(baseline: str, pde: str, task: str) -> str:
+
+def compatibility_reason(baseline: str, pde: str, task: str, sensor_mode: str = "") -> str:
     baseline = baseline.lower()
     pde = pde.lower()
     task = task.lower()
+    sensor_mode = sensor_mode.lower()
     if baseline in {"var4d", "vivid"} and pde not in TIME_DEPENDENT_PDES:
         return f"{baseline} is restricted to time-dependent PDEs in this matrix"
     if baseline == "ifno" and task.startswith("sparse"):
         return "iFNO is evaluated on full forward/inverse tasks, not sparse reconstruction"
+    if task == "sparse_inverse" and baseline in PER_INSTANCE_BASELINES:
+        return f"{baseline} sparse_inverse would require a PDE forward solve from predicted coefficient/initial state to sensor observations"
+    if sensor_mode == "time_varying":
+        if task not in {"sparse_solution", "sparse_reconstruction"}:
+            return "time_varying sensors are only defined for full trajectory sparse reconstruction/DA tasks"
+        if pde not in FULL_TRAJECTORY_SENSOR_PDES:
+            return f"time_varying sensors require explicit trajectory targets; {pde} uses final-state targets in this matrix"
     return ""
 
 
@@ -37,13 +48,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--pde", required=True)
     parser.add_argument("--task", required=True)
+    parser.add_argument("--sensor-mode", default="")
     parser.add_argument("--skipped-path", default="")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    reason = compatibility_reason(args.baseline, args.pde, args.task)
+    reason = compatibility_reason(args.baseline, args.pde, args.task, args.sensor_mode)
     if reason:
         row: dict[str, Any] = {"baseline": args.baseline, "pde": args.pde, "task": args.task, "reason": reason}
         if args.skipped_path:

@@ -113,6 +113,11 @@ def residual_supported(pde_name: str) -> bool:
 
 
 def observation_loss_from_batch(pred: torch.Tensor, batch: PDEBatch, item: int | None = None) -> torch.Tensor:
+    if batch.task == "sparse_inverse":
+        raise NotImplementedError(
+            "sparse_inverse observation loss requires a PDE forward map from predicted coefficient/initial state "
+            "to observed solution sensors; this per-instance baseline does not implement that solver."
+        )
     target = batch.target_fields[item : item + 1] if item is not None else batch.target_fields
     obs_values = batch.obs_values[item : item + 1] if item is not None and batch.obs_values is not None else batch.obs_values
     return _observation_loss(pred, target.to(pred.device, pred.dtype), batch.mask, obs_values)

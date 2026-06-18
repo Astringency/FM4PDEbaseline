@@ -84,6 +84,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--synthetic-resolution", type=int, default=32)
     parser.add_argument("--prefer-test", action="store_true", help="Compatibility/debug option. Never use for paper training.")
     parser.add_argument("--scalar-param-mode", choices=["metadata", "materialize", "global"], default="metadata")
+    parser.add_argument("--data-loading-mode", choices=["eager", "lazy"], default=None)
+    parser.add_argument("--load-full-trajectory", action="store_true", help="Load full time trajectories when available instead of endpoint-only task tensors.")
     parser.add_argument("--physics-metric-mode", choices=["per_sample", "per_batch"], default=None)
     parser.add_argument("--strict-size", action="store_true", help="Fail if requested split size exceeds available samples.")
     parser.add_argument("--save-checkpoint", action="store_true")
@@ -145,6 +147,7 @@ def main(argv: list[str] | None = None) -> None:
     _validate_mode(args)
     torch.manual_seed(args.seed)
     cfg = load_yaml(args.config)
+    args.data_loading_mode = _resolve_data_loading_mode(args)
     args.physics_metric_mode = _resolve_physics_metric_mode(args, cfg)
     method_cfg = build_method_config(cfg, args)
 
@@ -205,6 +208,8 @@ def main(argv: list[str] | None = None) -> None:
         {
             "train_size_loaded_for_fit": 0 if is_per_instance else len(train_dataset_for_fit),
             "train_size_loaded_for_spec": len(spec_dataset),
+            "train_size_requested": int(train_size),
+            "train_size_loaded_in_memory": int(getattr(train_dataset_for_fit, "loaded_in_memory_samples", len(train_dataset_for_fit))),
             "per_instance_baseline": bool(is_per_instance),
         }
     )
@@ -293,6 +298,20 @@ def _resolve_physics_metric_mode(args: argparse.Namespace, cfg: dict[str, Any]) 
             raise ValueError(f"physics_metric_mode must be per_sample or per_batch, got {mode!r}")
         return mode
     return "per_sample"
+
+
+def _resolve_data_loading_mode(args: argparse.Namespace) -> str:
+    if args.data_loading_mode:
+        return str(args.data_loading_mode)
+    return "lazy" if args.experiment_mode == "paper" else "eager"
+
+
+def _split_load_full_trajectory(args: argparse.Namespace, split: str) -> bool:
+    if args.load_full_trajectory:
+        return True
+    if args.baseline in {"var4d", "vivid"}:
+        return True
+    return False
 
 
 def _effective_sizes(args: argparse.Namespace) -> tuple[int, int, int]:
@@ -393,6 +412,7 @@ def _make_split_dataset(
             sensor_mode=args.sensor_mode,
             noise_level=args.noise_level,
             seed=args.seed,
+            experiment_mode=args.experiment_mode,
         )
         return PDEBatchDataset(batch)
     return registry.make_dataset(
@@ -413,6 +433,9 @@ def _make_split_dataset(
         synthetic_resolution=args.synthetic_resolution,
         synthetic_seed=synthetic_seed,
         scalar_param_mode=args.scalar_param_mode,
+        data_loading_mode=args.data_loading_mode,
+        load_full_trajectory=_split_load_full_trajectory(args, split),
+        experiment_mode=args.experiment_mode,
         strict_size=args.strict_size if strict_size_override is None else bool(strict_size_override),
     )
 
@@ -441,14 +464,17 @@ def _evaluate_full_test_loader(
     grad_enabled = args.baseline in {"pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"}
     for batch_index, batch in enumerate(loader):
         start = time.perf_counter()
+        eval_batch = _to_device_batch_for_eval(batch, args.device)
         with torch.set_grad_enabled(grad_enabled):
-            pred = model.predict(_to_device_batch_for_eval(batch, args.device))
+            pred = model.predict(eval_batch)
         elapsed = time.perf_counter() - start
+        _copy_eval_metadata(batch, eval_batch)
         pred_cpu = pred.detach().cpu()
         target = batch.target_fields.detach().cpu()
         inf_opt = float(batch.metadata.get("inference_optimization_time", 0.0) or 0.0)
         batch_n = int(target.shape[0])
         rel_values = _relative_l2_values(pred_cpu, target)
+        input_or_coeff_values = _relative_l2_input_or_coeff_values(args.task, pred_cpu, target)
         mse_values = _mse_values(pred_cpu, target)
         mae_values = _mae_values(pred_cpu, target)
         metric_payload = _batch_metric_payload(pred_cpu, target, batch, args)
@@ -471,14 +497,25 @@ def _evaluate_full_test_loader(
             "val_from_train_offset": split_info["val_from_train_offset"],
             "test_size": len(test_dataset),
             "train_shards": args.train_shards,
+            "data_loading_mode": args.data_loading_mode,
+            "load_full_trajectory": bool(args.load_full_trajectory),
+            "loaded_full_trajectory": bool(_batch_loaded_full_trajectory(batch)),
+            "train_size_requested": int(split_info["train_size_requested"]),
+            "train_size_loaded_in_memory": int(split_info["train_size_loaded_in_memory"]),
             "data_root": args.data_root,
             "file_paths_summary": json.dumps(_file_summary(train_dataset, val_dataset, test_dataset), sort_keys=True),
             "scalar_param_mode": args.scalar_param_mode,
+            "scalar_param_mode_requested": args.scalar_param_mode,
+            "scalar_param_mode_effective": args.scalar_param_mode,
+            "scalar_params_used_as_input": _scalar_params_used_as_input(batch),
             "pde_params_available": json.dumps(sorted(batch.pde_params), sort_keys=True),
             "input_channel_names": json.dumps(batch.input_channel_names),
             "target_channel_names": json.dumps(batch.target_channel_names),
             "num_sensors": args.num_sensors if args.task.startswith("sparse") else 0,
-            "sensor_mode": args.sensor_mode if args.task.startswith("sparse") else "none",
+            "requested_sensor_mode": args.sensor_mode if args.task.startswith("sparse") else "none",
+            "effective_sensor_mode": str(batch.metadata.get("effective_sensor_mode", args.sensor_mode if args.task.startswith("sparse") else "none")),
+            "sensor_mode": str(batch.metadata.get("effective_sensor_mode", args.sensor_mode if args.task.startswith("sparse") else "none")),
+            "time_varying_sensor_valid": bool(batch.metadata.get("time_varying_sensor_valid", True)),
             "noise_level": args.noise_level,
             "mask_id": batch.metadata.get("mask_id", ""),
             "backend_used": backend_info["backend_used"],
@@ -488,18 +525,23 @@ def _evaluate_full_test_loader(
             "metric_granularity": args.physics_metric_mode,
             "relative_l2_solution": _mean_list(rel_values),
             "relative_l2_solution_values": json.dumps(rel_values),
-            "relative_l2_input_or_coeff": float("nan"),
+            "relative_l2_input_or_coeff": _mean_list(input_or_coeff_values),
+            "relative_l2_input_or_coeff_values": json.dumps(input_or_coeff_values),
             "mse": _mean_list(mse_values),
             "mse_values": json.dumps(mse_values),
             "mae": _mean_list(mae_values),
             "mae_values": json.dumps(mae_values),
             "obs_mse": metric_payload["obs_mse"],
+            "obs_mse_clean": metric_payload["obs_mse_clean"],
+            "obs_mse_noisy": metric_payload["obs_mse_noisy"],
             "pde_residual": metric_payload["pde_residual"],
             "bc_residual": metric_payload["bc_residual"],
             "ic_residual": metric_payload["ic_residual"],
             "physics_loss": metric_payload["physics_loss"],
             "residual_mode": metric_payload["residual_mode"],
             "residual_mode_counts": json.dumps(metric_payload["residual_mode_counts"], sort_keys=True),
+            "assimilation_mode": str(batch.metadata.get("assimilation_mode", "")),
+            "assimilation_mode_counts": json.dumps(_assimilation_mode_counts(batch), sort_keys=True),
             "train_time": train_time,
             "inference_time": elapsed,
             "inference_optimization_time": inf_opt,
@@ -516,7 +558,7 @@ def _evaluate_full_test_loader(
             "pred_shape": json.dumps(list(pred_cpu.shape)),
             "train_history": json.dumps(_json_safe(train_history)),
         }
-        for key in ("obs_mse", "pde_residual", "bc_residual", "ic_residual", "physics_loss"):
+        for key in ("obs_mse", "obs_mse_clean", "obs_mse_noisy", "pde_residual", "bc_residual", "ic_residual", "physics_loss"):
             values_key = f"{key}_values"
             if values_key in metric_payload:
                 row[values_key] = json.dumps(metric_payload[values_key])
@@ -542,8 +584,12 @@ def _batch_metric_payload(pred: torch.Tensor, target: torch.Tensor, batch: PDEBa
         }
         physics_metrics = physics_loss_metric(pred, args.pde, dict(metric_meta))
         mode = str(physics_metrics["mode"])
+        clean = _obs_mse_clean(pred, target, batch)
+        noisy = _obs_mse_noisy(pred, batch)
         return {
-            "obs_mse": float(obs_mse(pred, target, batch.mask).detach().cpu()),
+            "obs_mse": clean,
+            "obs_mse_clean": clean,
+            "obs_mse_noisy": noisy,
             "pde_residual": _tensor_float(physics_metrics["interior"]),
             "bc_residual": _tensor_float(physics_metrics["bc"]),
             "ic_residual": _tensor_float(physics_metrics["ic"]),
@@ -554,6 +600,8 @@ def _batch_metric_payload(pred: torch.Tensor, target: torch.Tensor, batch: PDEBa
 
     values: dict[str, list[float]] = {
         "obs_mse": [],
+        "obs_mse_clean": [],
+        "obs_mse_noisy": [],
         "pde_residual": [],
         "bc_residual": [],
         "ic_residual": [],
@@ -571,7 +619,11 @@ def _batch_metric_payload(pred: torch.Tensor, target: torch.Tensor, batch: PDEBa
             **item_batch.metadata,
         }
         physics_metrics = physics_loss_metric(pred_i, args.pde, dict(meta_i))
-        values["obs_mse"].append(float(obs_mse(pred_i, target_i, item_batch.mask).detach().cpu()))
+        clean = _obs_mse_clean(pred_i, target_i, item_batch)
+        noisy = _obs_mse_noisy(pred_i, item_batch)
+        values["obs_mse"].append(clean)
+        values["obs_mse_clean"].append(clean)
+        values["obs_mse_noisy"].append(noisy)
         values["pde_residual"].append(_tensor_float(physics_metrics["interior"]))
         values["bc_residual"].append(_tensor_float(physics_metrics["bc"]))
         values["ic_residual"].append(_tensor_float(physics_metrics["ic"]))
@@ -612,6 +664,8 @@ def _summarize_run(
         "mse",
         "mae",
         "obs_mse",
+        "obs_mse_clean",
+        "obs_mse_noisy",
         "pde_residual",
         "bc_residual",
         "ic_residual",
@@ -634,14 +688,25 @@ def _summarize_run(
         "val_from_train_offset": split_info["val_from_train_offset"],
         "test_size": len(test_dataset),
         "train_shards": args.train_shards,
+        "data_loading_mode": args.data_loading_mode,
+        "load_full_trajectory": bool(args.load_full_trajectory),
+        "loaded_full_trajectory": bool(getattr(test_dataset, "loaded_full_trajectory", _batch_loaded_full_trajectory(test_dataset.batch))),
+        "train_size_requested": int(split_info["train_size_requested"]),
+        "train_size_loaded_in_memory": int(split_info["train_size_loaded_in_memory"]),
         "data_root": args.data_root,
         "file_paths_summary": json.dumps(_file_summary(train_dataset, val_dataset, test_dataset), sort_keys=True),
         "scalar_param_mode": args.scalar_param_mode,
+        "scalar_param_mode_requested": args.scalar_param_mode,
+        "scalar_param_mode_effective": args.scalar_param_mode,
+        "scalar_params_used_as_input": _scalar_params_used_as_input(test_dataset.batch),
         "pde_params_available": json.dumps(sorted(test_dataset.batch.pde_params), sort_keys=True),
         "input_channel_names": json.dumps(test_dataset.batch.input_channel_names),
         "target_channel_names": json.dumps(test_dataset.batch.target_channel_names),
         "num_sensors": args.num_sensors if args.task.startswith("sparse") else 0,
-        "sensor_mode": args.sensor_mode if args.task.startswith("sparse") else "none",
+        "requested_sensor_mode": args.sensor_mode if args.task.startswith("sparse") else "none",
+        "effective_sensor_mode": str(test_dataset.batch.metadata.get("effective_sensor_mode", args.sensor_mode if args.task.startswith("sparse") else "none")),
+        "sensor_mode": str(test_dataset.batch.metadata.get("effective_sensor_mode", args.sensor_mode if args.task.startswith("sparse") else "none")),
+        "time_varying_sensor_valid": bool(test_dataset.batch.metadata.get("time_varying_sensor_valid", True)),
         "noise_level": args.noise_level,
         "mask_id": test_dataset.batch.metadata.get("mask_id", ""),
         "backend_used": backend_info["backend_used"],
@@ -651,6 +716,7 @@ def _summarize_run(
         "metric_granularity": args.physics_metric_mode,
         "batch_count": len(rows),
         "residual_mode_counts": json.dumps(dict(_residual_mode_counter(rows)), sort_keys=True),
+        "assimilation_mode_counts": json.dumps(dict(_assimilation_mode_counter(rows)), sort_keys=True),
         "inference_time_total": eval_totals["inference_time_total"],
         "inference_time_per_sample": eval_totals["inference_time_total"] / max(len(test_dataset), 1),
         "inference_optimization_time_total": eval_totals["inference_optimization_time_total"],
@@ -687,10 +753,57 @@ def _residual_mode_counter(rows: list[dict[str, Any]]) -> Counter[str]:
     return counts
 
 
+def _assimilation_mode_counter(rows: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        value = row.get("assimilation_mode_counts")
+        if value:
+            try:
+                parsed = json.loads(value) if isinstance(value, str) else value
+                counts.update({str(k): int(v) for k, v in parsed.items()})
+                continue
+            except Exception:
+                pass
+        mode = str(row.get("assimilation_mode", ""))
+        if mode:
+            counts[mode] += int(row.get("sample_count", 1) or 1)
+    return counts
+
+
+def _assimilation_mode_counts(batch: PDEBatch) -> dict[str, int]:
+    mode = str(batch.metadata.get("assimilation_mode", ""))
+    return {mode: int(batch.target_fields.shape[0])} if mode else {}
+
+
 def _to_device_batch_for_eval(batch: PDEBatch, device: str) -> PDEBatch:
     from baselines.methods.base import _to_device_batch
 
     return _to_device_batch(batch, torch.device(device))
+
+
+def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
+    for key in ("inference_optimization_time", "assimilation_mode"):
+        if key in src.metadata:
+            dst.metadata[key] = src.metadata[key]
+
+
+def _batch_loaded_full_trajectory(batch: PDEBatch) -> bool:
+    return bool(batch.full_tensor.ndim == 5 or isinstance(batch.metadata.get("full_trajectory"), torch.Tensor))
+
+
+def _scalar_params_used_as_input(batch: PDEBatch) -> bool:
+    keys = set(batch.pde_params)
+    if not keys:
+        return False
+    input_names = set(batch.input_channel_names)
+    return any(key in input_names for key in keys)
+
+
+def _scalar_params_used_as_input_from_spec(data_spec: dict[str, Any]) -> bool:
+    metadata = data_spec.get("metadata", {}) if isinstance(data_spec, dict) else {}
+    params = metadata.get("pde_params_available", [])
+    names = data_spec.get("input_channel_names", []) if isinstance(data_spec, dict) else []
+    return bool(set(params).intersection(set(names)))
 
 
 def _relative_l2_values(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> list[float]:
@@ -698,6 +811,32 @@ def _relative_l2_values(pred: torch.Tensor, target: torch.Tensor, eps: float = 1
     diff = torch.linalg.vector_norm((pred - target).reshape(pred.shape[0], -1), dim=1)
     denom = torch.linalg.vector_norm(target.reshape(target.shape[0], -1), dim=1).clamp_min(eps)
     return [float(x) for x in (diff / denom).detach().cpu()]
+
+
+def _relative_l2_input_or_coeff_values(task: str, pred: torch.Tensor, target: torch.Tensor) -> list[float]:
+    if task in {"inverse", "sparse_inverse"}:
+        return _relative_l2_values(pred, target)
+    return [float("nan")] * int(target.shape[0])
+
+
+def _obs_mse_clean(pred: torch.Tensor, target: torch.Tensor, batch: PDEBatch) -> float:
+    if batch.task == "sparse_inverse":
+        return float("nan")
+    return float(obs_mse(pred, target, batch.mask).detach().cpu())
+
+
+def _obs_mse_noisy(pred: torch.Tensor, batch: PDEBatch) -> float:
+    if batch.task == "sparse_inverse" or batch.mask is None or batch.obs_values is None:
+        return float("nan")
+    try:
+        c = min(pred.shape[1], batch.obs_values.shape[-1])
+        spatial_mask = batch.mask[0].bool().reshape(-1).to(pred.device)
+        flat_idx = spatial_mask.nonzero(as_tuple=False).squeeze(-1)
+        pred_obs = pred.reshape(pred.shape[0], pred.shape[1], -1).permute(0, 2, 1)[:, flat_idx, :c]
+        obs = batch.obs_values.to(pred.device, pred.dtype)[..., :c]
+        return float((pred_obs - obs).pow(2).mean().detach().cpu())
+    except Exception:
+        return float("nan")
 
 
 def _mse_values(pred: torch.Tensor, target: torch.Tensor) -> list[float]:
@@ -778,10 +917,10 @@ def _requested_official(method_cfg: dict[str, Any]) -> bool:
 
 
 def _file_summary(train_dataset: PDEBatchDataset, val_dataset: PDEBatchDataset | None, test_dataset: PDEBatchDataset) -> dict[str, Any]:
-    def one(ds: PDEBatchDataset | None) -> dict[str, Any]:
+    def one(ds: Any | None) -> dict[str, Any]:
         if ds is None:
             return {"count": 0, "first": []}
-        paths = list(ds.batch.file_paths)
+        paths = list(getattr(ds, "file_paths", []) or ds.batch.file_paths)
         return {"count": len(paths), "first": paths[:3]}
 
     return {"train": one(train_dataset), "val": one(val_dataset), "test": one(test_dataset)}
@@ -795,6 +934,11 @@ def _write_config_snapshot(out_dir: Path, args: argparse.Namespace, cfg: dict[st
         "method": method_cfg,
         "data_spec": _json_safe(data_spec),
         "backend": backend_info,
+        "scalar_param_mode_requested": args.scalar_param_mode,
+        "scalar_param_mode_effective": args.scalar_param_mode,
+        "scalar_params_used_as_input": _scalar_params_used_as_input_from_spec(data_spec),
+        "data_loading_mode": args.data_loading_mode,
+        "load_full_trajectory": bool(args.load_full_trajectory),
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     if args.config:

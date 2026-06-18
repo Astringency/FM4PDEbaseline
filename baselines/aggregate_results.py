@@ -27,6 +27,8 @@ METRICS = [
     "mse",
     "mae",
     "obs_mse",
+    "obs_mse_clean",
+    "obs_mse_noisy",
     "pde_residual",
     "bc_residual",
     "ic_residual",

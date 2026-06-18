@@ -11,7 +11,7 @@ from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel
 from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, observation_loss_from_batch
-from .var4d import _background_view, _initial_trajectory, _optimized_state_numel
+from .var4d import _assimilation_mode, _background_view, _initial_trajectory, _optimized_state_numel
 from .voronoicnn import VoronoiCNNBaseline
 
 
@@ -38,13 +38,18 @@ class VIVIDBaseline(BaselineModel):
     def predict(self, batch: PDEBatch):
         start = time.perf_counter()
         if not batch.metadata.get("supports_trajectory", False):
-            warnings.warn("VIVID requested without full trajectory; using full-space state reconstruction variant.", RuntimeWarning, stacklevel=2)
+            mode = _assimilation_mode(batch)
+            if mode == "two_level_surrogate":
+                warnings.warn("VIVID requested without full trajectory; using a two-level dynamics surrogate.", RuntimeWarning, stacklevel=2)
+            else:
+                warnings.warn("VIVID requested without full trajectory; using state reconstruction variant.", RuntimeWarning, stacklevel=2)
         with torch.no_grad():
             if self.inverse_operator_trained:
                 learned_state = self.inverse_operator.predict(batch)
             else:
                 learned_state = batch.metadata.get("voronoi_grid", batch.input_fields).detach()
         state0, output_view, background, dyn_meta = _initial_trajectory(batch)
+        batch.metadata["assimilation_mode"] = str(dyn_meta.get("assimilation_mode", _assimilation_mode(batch)))
         # Inject the learned inverse-operator estimate as the terminal state.
         if state0.ndim == 5:
             state0 = state0.clone()

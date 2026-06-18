@@ -20,6 +20,7 @@ NOISE_LEVELS="${NOISE_LEVELS:-0.0 0.01 0.05 0.10}"
 PDES="${PDES:-nsnonbounded burger reaction_diffusion shallow_water heat wave advection_diffusion}"
 BASELINES="${BASELINES:-pinn_sparse pc_bnn pde_opt var4d vivid}"
 SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
+DATA_LOADING_MODE="${DATA_LOADING_MODE:-lazy}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
 SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
 mkdir -p "$OUT"
@@ -27,11 +28,11 @@ mkdir -p "$OUT"
 for seed in $SEEDS; do
   for pde in $PDES; do
     for baseline in $BASELINES; do
-      if ! python -m baselines.experiment_matrix --baseline "$baseline" --pde "$pde" --task sparse_solution --skipped-path "$SKIPPED"; then
-        continue
-      fi
       for sensors in $SENSOR_COUNTS; do
         for sensor_mode in $SENSOR_MODES; do
+          if ! python -m baselines.experiment_matrix --baseline "$baseline" --pde "$pde" --task sparse_solution --sensor-mode "$sensor_mode" --skipped-path "$SKIPPED"; then
+            continue
+          fi
           for noise in $NOISE_LEVELS; do
             python -m baselines.run \
               --experiment-mode paper \
@@ -41,6 +42,7 @@ for seed in $SEEDS; do
               --train-shards "$TRAIN_SHARDS" --batch-size "$BATCH_SIZE" \
               --epochs "$EPOCHS" --seed "$seed" --device "$DEVICE" \
               --num-sensors "$sensors" --sensor-mode "$sensor_mode" --noise-level "$noise" \
+              --data-loading-mode "$DATA_LOADING_MODE" --load-full-trajectory \
               --scalar-param-mode "$SCALAR_PARAM_MODE" --output-dir "$OUT"
           done
         done

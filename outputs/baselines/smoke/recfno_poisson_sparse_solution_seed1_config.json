@@ -4,16 +4,19 @@
     "baseline": "recfno",
     "batch_size": 2,
     "config": null,
+    "data_loading_mode": "eager",
     "data_root": "/home/tat512/C01Python/PDEdata",
     "device": "cpu",
     "dry_run": true,
     "epochs": 1,
     "experiment_mode": "smoke",
+    "load_full_trajectory": false,
     "lr": null,
     "noise_level": 0.0,
     "num_sensors": 50,
     "output_dir": "outputs/baselines/smoke",
     "pde": "poisson",
+    "physics_metric_mode": "per_sample",
     "prefer_test": false,
     "save_checkpoint": false,
     "scalar_param_mode": "metadata",
@@ -36,6 +39,7 @@
     "official_backend": "recfno"
   },
   "config": {},
+  "data_loading_mode": "eager",
   "data_spec": {
     "branch_numel": 50,
     "input_channel_names": [
@@ -52,6 +56,8 @@
     "metadata": {
       "available_count": 8,
       "canonical_layout": "NCHW",
+      "data_loading_mode": "eager",
+      "effective_sensor_mode": "random",
       "files": [],
       "full_shape": [
         8,
@@ -78,12 +84,15 @@
         32,
         32
       ],
+      "load_full_trajectory": true,
       "loaded_count": 8,
+      "loaded_full_trajectory": false,
       "mask_id": "86e7ebca042519f9",
       "noise_level": 0.0,
       "num_sensors": 50,
       "pde_params": {},
       "pde_params_available": [],
+      "requested_sensor_mode": "random",
       "scalar_param_mode": "metadata",
       "sensor_mode": "random",
       "source": "synthetic",
@@ -101,7 +110,9 @@
       "task_channel_names": [
         "phi"
       ],
-      "time_dependent": false
+      "time_dependent": false,
+      "time_varying_sensor_valid": true,
+      "train_size_loaded_in_memory": 8
     },
     "pde": "poisson",
     "target_channel_names": [
@@ -117,6 +128,7 @@
     ],
     "task": "sparse_solution"
   },
+  "load_full_trajectory": false,
   "method": {
     "device": "cpu",
     "epochs": 1,
@@ -125,5 +137,8 @@
     "max_val_steps": 1,
     "refine_steps": 1,
     "steps": 1
-  }
+  },
+  "scalar_param_mode_effective": "metadata",
+  "scalar_param_mode_requested": "metadata",
+  "scalar_params_used_as_input": false
 }

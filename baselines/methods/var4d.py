@@ -31,8 +31,13 @@ class Var4DBaseline(BaselineModel):
     def predict(self, batch: PDEBatch):
         start = time.perf_counter()
         if not batch.metadata.get("supports_trajectory", False):
-            warnings.warn("4D-Var requested for data without trajectory metadata; using state reconstruction surrogate.", RuntimeWarning, stacklevel=2)
+            mode = _assimilation_mode(batch)
+            if mode == "two_level_surrogate":
+                warnings.warn("4D-Var requested without full trajectory; using a two-level dynamics surrogate.", RuntimeWarning, stacklevel=2)
+            else:
+                warnings.warn("4D-Var requested for data without trajectory metadata; using state reconstruction surrogate.", RuntimeWarning, stacklevel=2)
         state0, output_view, background, dyn_meta = _initial_trajectory(batch)
+        batch.metadata["assimilation_mode"] = str(dyn_meta.get("assimilation_mode", _assimilation_mode(batch)))
         state = torch.nn.Parameter(state0.detach().clone())
         steps = int(self.config.get("steps", 3))
         lr = float(self.config.get("lr", 2e-2))
@@ -76,7 +81,8 @@ def _initial_trajectory(batch: PDEBatch):
     pde = batch.pde_name.lower()
     full = batch.full_tensor.detach()
     guess = batch.metadata.get("voronoi_grid", batch.input_fields).detach()
-    meta = {"full_tensor": full, "input_fields": batch.input_fields, "task": "trajectory", **batch.metadata}
+    mode = _assimilation_mode(batch)
+    meta = {"full_tensor": full, "input_fields": batch.input_fields, "task": "trajectory", **batch.metadata, "assimilation_mode": mode}
     if pde == "nsnonbounded":
         initial = full[:, :, :1]
         target_guess = guess.reshape(guess.shape[0], 1, -1, guess.shape[-2], guess.shape[-1])
@@ -114,6 +120,15 @@ def _background_view(state: torch.Tensor, batch: PDEBatch) -> torch.Tensor:
     if state.ndim == 5:
         return state[:, :, 0]
     return state[:, : batch.input_fields.shape[1]]
+
+
+def _assimilation_mode(batch: PDEBatch) -> str:
+    pde = batch.pde_name.lower()
+    if pde in {"nsnonbounded", "reaction_diffusion", "shallow_water"} and batch.full_tensor.ndim == 5:
+        return "full_trajectory"
+    if pde in {"heat", "wave", "advection_diffusion", "burger"} or bool(batch.metadata.get("time_dependent", False)):
+        return "two_level_surrogate"
+    return "state_surrogate"
 
 
 def _obs_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:

@@ -1,10 +1,3 @@
 {
-  "train_loss": [
-    1.8579732179641724
-  ],
-  "val_loss": [
-    1.4237786531448364
-  ],
-  "best_epoch": 0,
-  "best_val_loss": 1.4237786531448364
+  "status": "per_instance_vivid_no_amortized_inverse_fit"
 }

@@ -4,16 +4,19 @@
     "baseline": "pinn_sparse",
     "batch_size": 2,
     "config": null,
+    "data_loading_mode": "eager",
     "data_root": "/home/tat512/C01Python/PDEdata",
     "device": "cpu",
     "dry_run": true,
     "epochs": 1,
     "experiment_mode": "smoke",
+    "load_full_trajectory": false,
     "lr": null,
     "noise_level": 0.0,
     "num_sensors": 50,
     "output_dir": "outputs/baselines/smoke",
     "pde": "burger",
+    "physics_metric_mode": "per_sample",
     "prefer_test": false,
     "save_checkpoint": false,
     "scalar_param_mode": "metadata",
@@ -31,11 +34,12 @@
   },
   "backend": {
     "backend_used": "local",
-    "backend_warning": "using fallback backend local",
+    "backend_warning": "deepxde unavailable: No module named 'sklearn'",
     "fallback_used": true,
-    "official_backend": "local"
+    "official_backend": "auto"
   },
   "config": {},
+  "data_loading_mode": "eager",
   "data_spec": {
     "branch_numel": 50,
     "input_channel_names": [
@@ -50,46 +54,45 @@
       32
     ],
     "metadata": {
-      "available_count": 8,
+      "available_count": 2,
       "axes": [
         "time",
         "x"
       ],
       "canonical_layout": "NCTX",
+      "data_loading_mode": "eager",
+      "effective_sensor_mode": "random",
       "files": [],
       "final_time": 1.0,
       "full_shape": [
-        8,
+        2,
         1,
         32,
         32
       ],
       "global_sample_ids": [
         "synthetic:burger:train:1011:0",
-        "synthetic:burger:train:1011:1",
-        "synthetic:burger:train:1011:2",
-        "synthetic:burger:train:1011:3",
-        "synthetic:burger:train:1011:4",
-        "synthetic:burger:train:1011:5",
-        "synthetic:burger:train:1011:6",
-        "synthetic:burger:train:1011:7"
+        "synthetic:burger:train:1011:1"
       ],
       "input_channel_names": [
         "u"
       ],
       "input_shape": [
-        8,
+        2,
         1,
         32,
         32
       ],
-      "loaded_count": 8,
+      "load_full_trajectory": true,
+      "loaded_count": 2,
+      "loaded_full_trajectory": false,
       "mask_id": "86e7ebca042519f9",
       "noise_level": 0.0,
       "nu": 0.01,
       "num_sensors": 50,
       "pde_params": {},
       "pde_params_available": [],
+      "requested_sensor_mode": "random",
       "scalar_param_mode": "metadata",
       "sensor_mode": "random",
       "source": "synthetic",
@@ -99,7 +102,7 @@
         "u"
       ],
       "target_shape": [
-        8,
+        2,
         1,
         32,
         32
@@ -141,7 +144,9 @@
         0.9354838709677419,
         0.967741935483871,
         1.0
-      ]
+      ],
+      "time_varying_sensor_valid": true,
+      "train_size_loaded_in_memory": 2
     },
     "pde": "burger",
     "target_channel_names": [
@@ -157,6 +162,7 @@
     ],
     "task": "sparse_solution"
   },
+  "load_full_trajectory": false,
   "method": {
     "device": "cpu",
     "epochs": 1,
@@ -165,5 +171,8 @@
     "max_val_steps": 1,
     "refine_steps": 1,
     "steps": 1
-  }
+  },
+  "scalar_param_mode_effective": "metadata",
+  "scalar_param_mode_requested": "metadata",
+  "scalar_params_used_as_input": false
 }
