@@ -21,10 +21,19 @@ class BaselineModel(nn.Module):
         self.official_backend: str = "local"
         self.fallback_used: bool = False
         self.backend_warning: str = ""
+        self.implementation_mode_requested: str = "adapted"
+        self.implementation_mode_effective: str = "adapted"
+        self.implementation_source: str = "local"
+        self.official_repo: str = ""
+        self.official_commit_or_version: str = ""
+        self.official_import_path: str = ""
+        self.official_import_success: bool = False
+        self.adapter_status: str = "local_adapted"
 
     def build(self, config, data_spec):
         self.config = dict(config or {})
         self.data_spec = dict(data_spec or {})
+        self.implementation_mode_requested = _requested_implementation_mode(self.config)
         return self
 
     def set_backend(
@@ -33,11 +42,39 @@ class BaselineModel(nn.Module):
         official_backend: str | None = None,
         fallback_used: bool = False,
         warning: str = "",
+        implementation_mode_effective: str | None = None,
+        implementation_source: str | None = None,
+        official_repo: str = "",
+        official_commit_or_version: str = "",
+        official_import_path: str = "",
+        official_import_success: bool | None = None,
+        adapter_status: str | None = None,
     ) -> None:
         self.backend_used = str(backend_used)
         self.official_backend = str(official_backend or backend_used)
         self.fallback_used = bool(fallback_used)
         self.backend_warning = str(warning or "")
+        effective = implementation_mode_effective or _default_effective_mode(self.backend_used, self.fallback_used)
+        self.implementation_mode_effective = str(effective)
+        self.implementation_source = str(implementation_source or self.backend_used)
+        self.official_repo = str(official_repo or "")
+        self.official_commit_or_version = str(official_commit_or_version or "")
+        self.official_import_path = str(official_import_path or "")
+        if official_import_success is None:
+            official_import_success = self.implementation_mode_effective in {"official", "official_architecture"} and not self.fallback_used
+        self.official_import_success = bool(official_import_success)
+        self.adapter_status = str(adapter_status or _default_adapter_status(self.implementation_mode_effective, self.fallback_used))
+
+    def mark_canonical_math(self, source: str, adapter_status: str = "canonical_math") -> None:
+        self.set_backend(
+            source,
+            source,
+            fallback_used=False,
+            implementation_mode_effective="canonical_math",
+            implementation_source=source,
+            official_import_success=False,
+            adapter_status=adapter_status,
+        )
 
     def fit(self, train_loader, val_loader=None):
         return {}
@@ -59,6 +96,41 @@ class BaselineModel(nn.Module):
 
     def parameter_count(self) -> int:
         return int(sum(p.numel() for p in self.parameters() if p.requires_grad))
+
+
+def _requested_implementation_mode(config: dict[str, Any]) -> str:
+    if "implementation_mode" in config:
+        return str(config.get("implementation_mode") or "").lower()
+    legacy = str(config.get("official_backend", "auto")).lower()
+    if legacy in {"local", "none", "adapted"}:
+        return "adapted"
+    if legacy == "official":
+        return "official"
+    if legacy in {"neuraloperator", "deepxde", "recfno", "senseiver", "pc_bnn", "ifno"}:
+        return "official"
+    return legacy or "auto"
+
+
+def _default_effective_mode(backend_used: str, fallback_used: bool) -> str:
+    backend = str(backend_used).lower()
+    if backend in {"pde_opt", "var4d", "canonical_math"}:
+        return "canonical_math"
+    if fallback_used or backend in {"local", "none"}:
+        return "adapted"
+    return "official"
+
+
+def _default_adapter_status(effective_mode: str, fallback_used: bool) -> str:
+    if fallback_used:
+        return "fallback_adapted"
+    mode = str(effective_mode).lower()
+    if mode == "official":
+        return "official_code"
+    if mode == "official_architecture":
+        return "official_architecture_reimplementation"
+    if mode == "canonical_math":
+        return "canonical_math"
+    return "local_adapted"
 
 
 def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):

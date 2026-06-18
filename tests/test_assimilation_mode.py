@@ -25,4 +25,4 @@ def test_var4d_two_level_surrogate_on_heat_endpoint_only():
 
 
 def test_static_pde_var4d_skipped_by_matrix():
-    assert "time-dependent" in compatibility_reason("var4d", "poisson", "sparse_solution")
+    assert "time-varying" in compatibility_reason("var4d", "poisson", "sparse_solution")

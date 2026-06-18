@@ -4,12 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-bash scripts/baselines/run_paper_full_operator.sh
-if [ "${RUN_INVERSE:-1}" != "0" ]; then
-  bash scripts/baselines/run_paper_full_inverse.sh
-fi
-bash scripts/baselines/run_paper_sparse_reconstruction.sh
-if [ "${RUN_INVERSE:-1}" != "0" ]; then
-  bash scripts/baselines/run_paper_sparse_inverse.sh
-fi
-bash scripts/baselines/run_paper_physics_da.sh
+# Compatibility entry point. The reviewer-facing native matrix is delegated to
+# run_paper_all_native.sh; older per-task scripts remain available for adapted
+# supplement/debug runs.
+bash scripts/baselines/run_paper_all_native.sh

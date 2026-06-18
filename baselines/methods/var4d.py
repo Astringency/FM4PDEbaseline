@@ -19,7 +19,7 @@ class Var4DBaseline(BaselineModel):
     def build(self, config, data_spec):
         super().build(config, data_spec)
         self.optimized_numel = _optimized_state_numel(data_spec)
-        self.set_backend("local", "local", fallback_used=False)
+        self.mark_canonical_math("var4d", adapter_status="canonical_4dvar")
         return self
 
     def parameter_count(self) -> int:
@@ -90,6 +90,8 @@ def _initial_trajectory(batch: PDEBatch):
         background = initial[:, :, 0].to(guess.device, guess.dtype)
 
         def output_view(state):
+            if batch.target_fields.ndim == 5:
+                return state[:, :, 1:]
             return state[:, :, 1:].reshape(state.shape[0], -1, state.shape[-2], state.shape[-1])
 
         return state0, output_view, background, {**meta, "final_time": float(batch.metadata.get("final_time", 1.0))}
@@ -104,6 +106,8 @@ def _initial_trajectory(batch: PDEBatch):
         segment_t = total_t * (steps - 1) / max(full.shape[2] - 1, 1)
 
         def output_view(state):
+            if batch.target_fields.ndim == 5:
+                return state
             return state[:, :, -1]
 
         return state0, output_view, initial, {**meta, "final_time": segment_t, "input_time_index": 0}

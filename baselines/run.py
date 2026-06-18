@@ -16,6 +16,8 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
+from baselines.capabilities import paper_table_eligible as capability_paper_table_eligible
+from baselines.capabilities import resolve_capability
 from baselines.common.data_adapter import PDEBatch, PDEBatchDataset, build_default_registry, pde_collate, slice_pde_batch
 from baselines.common.metrics import (
     append_result_csv,
@@ -37,6 +39,7 @@ from baselines.methods.senseiver import SenseiverBaseline
 from baselines.methods.var4d import Var4DBaseline
 from baselines.methods.vivid import VIVIDBaseline
 from baselines.methods.voronoicnn import VoronoiCNNBaseline
+from baselines.experiment_matrix import capability_skip_row
 
 
 BASELINES = {
@@ -165,6 +168,36 @@ def main(argv: list[str] | None = None) -> None:
     args.data_loading_mode = _resolve_data_loading_mode(args)
     args.physics_metric_mode = _resolve_physics_metric_mode(args, cfg)
     method_cfg = build_method_config(cfg, args)
+    capability = resolve_capability(
+        args.baseline,
+        args.pde,
+        args.task,
+        args.sensor_mode if args.task.startswith("sparse") else "",
+        args.task_group,
+        load_full_trajectory=bool(args.load_full_trajectory or args.baseline in {"var4d", "vivid"}),
+        train_inverse_operator=bool(method_cfg.get("train_inverse_operator", False)),
+    )
+    capability_info = capability.to_row()
+    if args.experiment_mode == "paper" and capability.support_status == "unsupported":
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        row = capability_skip_row(capability, task_group=args.task_group)
+        append_result_jsonl(out_dir / "skipped_combinations.jsonl", _json_safe(row))
+        print(json.dumps(_json_safe({"status": "skipped", **row}), indent=2, sort_keys=True))
+        return
+    if (
+        args.experiment_mode == "paper"
+        and capability.implementation_required == "adapted_allowed"
+        and str(method_cfg.get("implementation_mode", "")).lower() in {"official", "official_or_skip"}
+    ):
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        row = capability_skip_row(capability, task_group=args.task_group)
+        row["reason"] = f"{capability.reason}; adapted-only capability skipped in official_or_skip paper mode"
+        row["unsupported_reason"] = row["reason"]
+        append_result_jsonl(out_dir / "skipped_combinations.jsonl", _json_safe(row))
+        print(json.dumps(_json_safe({"status": "skipped", **row}), indent=2, sort_keys=True))
+        return
 
     train_size, val_size, test_size = _effective_sizes(args)
     registry = build_default_registry()
@@ -231,6 +264,10 @@ def main(argv: list[str] | None = None) -> None:
 
     model = BASELINES[args.baseline]().build(method_cfg, data_spec).to(args.device)
     backend_info = _backend_info(model, method_cfg)
+    eligibility = _paper_table_eligibility(capability, backend_info)
+    capability_info["paper_table_eligible"] = eligibility
+    if capability.support_status != "unsupported":
+        capability_info["unsupported_reason"] = ""
     method_budget_fields = _method_budget_fields(method_cfg, args.baseline)
     if args.experiment_mode == "paper" and _requested_official(method_cfg) and backend_info["fallback_used"]:
         raise RuntimeError(
@@ -249,7 +286,7 @@ def main(argv: list[str] | None = None) -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_prefix = _run_file_prefix(args)
-    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields)
+    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info)
     train_history_path = out_dir / f"{run_prefix}_train_history.json"
     train_history_path.write_text(json.dumps(_json_safe(train_history), indent=2), encoding="utf-8")
     checkpoint_path = ""
@@ -268,6 +305,7 @@ def main(argv: list[str] | None = None) -> None:
         train_time=train_time,
         train_history=train_history,
         backend_info=backend_info,
+        capability_info=capability_info,
         train_dataset=train_dataset_for_fit,
         spec_dataset=spec_dataset,
         val_dataset=val_dataset,
@@ -284,6 +322,7 @@ def main(argv: list[str] | None = None) -> None:
         val_dataset,
         test_dataset,
         backend_info,
+        capability_info,
         split_info,
         method_budget_fields,
     )
@@ -516,6 +555,7 @@ def _evaluate_full_test_loader(
     train_time: float,
     train_history: dict[str, Any],
     backend_info: dict[str, Any],
+    capability_info: dict[str, Any],
     train_dataset: PDEBatchDataset,
     spec_dataset: PDEBatchDataset,
     val_dataset: PDEBatchDataset | None,
@@ -593,6 +633,9 @@ def _evaluate_full_test_loader(
             "official_backend": backend_info["official_backend"],
             "fallback_used": backend_info["fallback_used"],
             "backend_warning": backend_info["backend_warning"],
+            **_implementation_fields(backend_info),
+            **_capability_fields(capability_info),
+            **_native_data_interface_fields(batch, pred_cpu),
             "metric_granularity": args.physics_metric_mode,
             "relative_l2_solution": _mean_list(rel_values),
             "relative_l2_solution_values": json.dumps(rel_values),
@@ -727,6 +770,7 @@ def _summarize_run(
     val_dataset: PDEBatchDataset | None,
     test_dataset: PDEBatchDataset,
     backend_info: dict[str, Any],
+    capability_info: dict[str, Any],
     split_info: dict[str, Any],
     method_budget_fields: dict[str, Any],
 ) -> dict[str, Any]:
@@ -789,6 +833,9 @@ def _summarize_run(
         "official_backend": backend_info["official_backend"],
         "fallback_used": backend_info["fallback_used"],
         "backend_warning": backend_info["backend_warning"],
+        **_implementation_fields(backend_info),
+        **_capability_fields(capability_info),
+        **_native_data_interface_fields(test_dataset.batch, None),
         "metric_granularity": args.physics_metric_mode,
         "batch_count": len(rows),
         "residual_mode_counts": json.dumps(dict(_residual_mode_counter(rows)), sort_keys=True),
@@ -974,6 +1021,7 @@ def _backend_info(model, method_cfg: dict[str, Any]) -> dict[str, Any]:
     official_backend = str(getattr(model, "official_backend", "local"))
     backend_used = str(getattr(model, "backend_used", "") or official_backend or "local")
     requested = str(method_cfg.get("official_backend", "auto")).lower()
+    implementation_requested = str(getattr(model, "implementation_mode_requested", method_cfg.get("implementation_mode", requested)) or "")
     fallback_used = bool(getattr(model, "fallback_used", False))
     if requested in {"local", "none"}:
         fallback_used = False
@@ -985,11 +1033,81 @@ def _backend_info(model, method_cfg: dict[str, Any]) -> dict[str, Any]:
         "official_backend": official_backend,
         "fallback_used": fallback_used,
         "backend_warning": warning,
+        "implementation_mode_requested": implementation_requested,
+        "implementation_mode_effective": str(getattr(model, "implementation_mode_effective", "adapted")),
+        "implementation_source": str(getattr(model, "implementation_source", backend_used)),
+        "official_repo": str(getattr(model, "official_repo", "")),
+        "official_commit_or_version": str(getattr(model, "official_commit_or_version", "")),
+        "official_import_path": str(getattr(model, "official_import_path", "")),
+        "official_import_success": bool(getattr(model, "official_import_success", False)),
+        "adapter_status": str(getattr(model, "adapter_status", "")),
     }
 
 
 def _requested_official(method_cfg: dict[str, Any]) -> bool:
+    implementation_mode = str(method_cfg.get("implementation_mode", "")).lower()
+    if implementation_mode in {"official", "official_or_skip"}:
+        return True
     return str(method_cfg.get("official_backend", "auto")).lower() == "official"
+
+
+def _paper_table_eligibility(capability, backend_info: dict[str, Any]) -> bool:
+    if backend_info.get("fallback_used"):
+        return False
+    return capability_paper_table_eligible(capability, str(backend_info.get("implementation_mode_effective", "")))
+
+
+def _implementation_fields(backend_info: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "implementation_mode_requested": backend_info.get("implementation_mode_requested", ""),
+        "implementation_mode_effective": backend_info.get("implementation_mode_effective", ""),
+        "implementation_source": backend_info.get("implementation_source", ""),
+        "official_repo": backend_info.get("official_repo", ""),
+        "official_commit_or_version": backend_info.get("official_commit_or_version", ""),
+        "official_import_path": backend_info.get("official_import_path", ""),
+        "official_import_success": bool(backend_info.get("official_import_success", False)),
+        "adapter_status": backend_info.get("adapter_status", ""),
+    }
+
+
+def _capability_fields(capability_info: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "capability_status": capability_info.get("support_status", ""),
+        "support_status": capability_info.get("support_status", ""),
+        "implementation_required": capability_info.get("implementation_required", ""),
+        "task_family": capability_info.get("task_family", ""),
+        "unsupported_reason": capability_info.get("unsupported_reason", ""),
+        "capability_reason": capability_info.get("reason", ""),
+        "citation_key": capability_info.get("citation_key", ""),
+        "source_key": capability_info.get("source_key", ""),
+        "notes_for_paper": capability_info.get("notes_for_paper", ""),
+        "paper_table_eligible": bool(capability_info.get("paper_table_eligible", False)),
+    }
+
+
+def _native_data_interface_fields(batch: PDEBatch, pred: torch.Tensor | None) -> dict[str, Any]:
+    original = batch.metadata.get("original_input_fields")
+    observed_names = batch.metadata.get("observation_source_channel_names", batch.input_channel_names)
+    if isinstance(observed_names, (tuple, list)):
+        observation_field_name = ",".join(str(x) for x in observed_names)
+    else:
+        observation_field_name = str(observed_names or "")
+    predicted_field_name = ",".join(str(x) for x in batch.target_channel_names)
+    raw_shape = list(original.shape) if isinstance(original, torch.Tensor) else list(batch.input_fields.shape)
+    row = {
+        "raw_input_shape": json.dumps(raw_shape),
+        "official_input_shape": json.dumps(list(batch.input_fields.shape)),
+        "native_input_shape": json.dumps(list(batch.input_fields.shape)),
+        "target_shape_native": json.dumps(list(batch.target_fields.shape)),
+        "observation_field_name": observation_field_name,
+        "predicted_field_name": predicted_field_name,
+        "scalar_pde_params_part_of_input": _scalar_params_used_as_input(batch),
+        "full_trajectory_loaded": _batch_loaded_full_trajectory(batch),
+        "sensors_static_random_grid_time_varying": str(batch.metadata.get("effective_sensor_mode", "none")),
+    }
+    if pred is not None:
+        row["predicted_shape_native"] = json.dumps(list(pred.shape))
+    return row
 
 
 def _file_summary(train_dataset: PDEBatchDataset, val_dataset: PDEBatchDataset | None, test_dataset: PDEBatchDataset) -> dict[str, Any]:
@@ -1016,6 +1134,7 @@ def _write_config_snapshot(
     data_spec: dict[str, Any],
     backend_info: dict[str, Any],
     method_budget_fields: dict[str, Any],
+    capability_info: dict[str, Any],
 ) -> Path:
     prefix = _run_file_prefix(args)
     path = out_dir / f"{prefix}_config.json"
@@ -1025,6 +1144,7 @@ def _write_config_snapshot(
         "method": method_cfg,
         "data_spec": _json_safe(data_spec),
         "backend": backend_info,
+        "capability": capability_info,
         "scalar_param_mode_requested": args.scalar_param_mode,
         "scalar_param_mode_effective": args.scalar_param_mode,
         "scalar_params_used_as_input": _scalar_params_used_as_input_from_spec(data_spec),

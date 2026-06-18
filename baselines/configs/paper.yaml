@@ -29,6 +29,7 @@ sensor_modes: [random, grid, fixed]
 noise_levels: [0.0, 0.01, 0.05, 0.10]
 
 method:
+  implementation_mode: official_or_skip
   official_backend: auto
   width: 48
   modes1: 16
@@ -93,6 +94,7 @@ method_by_baseline:
     lambda_background: 0.1
     lambda_obs: 1.0
   vivid:
+    train_inverse_operator: true
     refine_steps: 300
     lr: 0.005
     lambda_inverse_operator: 0.25

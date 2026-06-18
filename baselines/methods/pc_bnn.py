@@ -10,7 +10,7 @@ from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel
-from .official import OfficialImportError, get_pc_bnn_net_class
+from .official import OfficialImportError, get_pc_bnn_net_class, official_source_info, requested_implementation_mode
 from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, _single_meta, observation_loss_from_batch
 from .shared import NeuralField
 
@@ -27,24 +27,38 @@ class PCBNNBaseline(BaselineModel):
         self.depth = int(self.config.get("depth", 4))
         self.official_net_cls = None
         backend = str(self.config.get("official_backend", "auto")).lower()
+        implementation_mode = requested_implementation_mode(self.config)
         fallback_reason = ""
-        if self.coord_dim == 2 and self.target_channels == 3 and backend in {"auto", "pc_bnn", "official"}:
+        if self.coord_dim == 2 and self.target_channels == 3 and implementation_mode != "adapted" and backend in {"auto", "pc_bnn", "official"}:
             try:
                 self.official_net_cls = get_pc_bnn_net_class()
-                self.set_backend("pc_bnn", "pc_bnn", fallback_used=False)
+                self.set_backend(
+                    "pc_bnn",
+                    "pc_bnn",
+                    fallback_used=False,
+                    implementation_mode_effective="official",
+                    implementation_source="pc_bnn",
+                    official_import_success=True,
+                    adapter_status="official_code_adapter",
+                    **official_source_info("pc_bnn"),
+                )
             except OfficialImportError as exc:
                 fallback_reason = f"pc_bnn unavailable: {exc}"
                 if backend in {"pc_bnn", "official"}:
                     warnings.warn(f"PC-BNN official Net unavailable, using local particle fallback: {exc}", RuntimeWarning, stacklevel=2)
-        elif backend in {"auto", "pc_bnn", "official"}:
+        elif implementation_mode != "adapted" and backend in {"auto", "pc_bnn", "official"}:
             fallback_reason = "official PC-BNN adapter only supports 2D three-channel targets"
         if self.official_net_cls is None:
-            requested_local = backend in {"local", "none"}
+            requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
             self.set_backend(
                 "local",
                 "local" if requested_local else ("official" if backend == "official" else backend),
                 fallback_used=not requested_local,
                 warning=fallback_reason,
+                implementation_mode_effective="adapted",
+                implementation_source="local_svgd_particle_field",
+                official_import_success=False,
+                adapter_status="local_adapted" if requested_local else "fallback_adapted",
             )
         return self
 

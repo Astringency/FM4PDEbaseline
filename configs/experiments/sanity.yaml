@@ -30,10 +30,10 @@ task_group_overrides:
     baselines: [recfno, senseiver]
   sparse_solution_physics:
     pdes: [poisson, shallow_water]
-    baselines: [pde_opt, var4d]
+    baselines: [pde_opt, pinn_sparse]
   sparse_inverse:
-    pdes: [darcy, heat]
-    baselines: [fno, pde_opt]
+    pdes: [darcy, poisson]
+    baselines: [pde_opt, pinn_sparse]
 resources:
   amortized_default:
     batch_size: 16

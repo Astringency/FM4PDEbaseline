@@ -8,7 +8,7 @@ import torch.nn as nn
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .official import OfficialImportError, get_senseiver_classes
+from .official import OfficialImportError, get_senseiver_classes, official_source_info, requested_implementation_mode
 from .shared import MLP
 
 
@@ -26,8 +26,9 @@ class SenseiverBaseline(BaselineModel):
         self.official_encoder = None
         self.official_decoder = None
         backend = str(self.config.get("official_backend", "auto")).lower()
+        implementation_mode = requested_implementation_mode(self.config)
         fallback_reason = ""
-        if backend in {"auto", "senseiver", "official"}:
+        if implementation_mode != "adapted" and backend in {"auto", "senseiver", "official"}:
             try:
                 encoder_cls, decoder_cls = get_senseiver_classes()
                 self.official_encoder = encoder_cls(
@@ -50,7 +51,16 @@ class SenseiverBaseline(BaselineModel):
                     num_cross_attention_heads=heads,
                     dropout=float(self.config.get("dropout", 0.0)),
                 )
-                self.set_backend("senseiver", "senseiver", fallback_used=False)
+                self.set_backend(
+                    "senseiver",
+                    "senseiver",
+                    fallback_used=False,
+                    implementation_mode_effective="official",
+                    implementation_source="senseiver",
+                    official_import_success=True,
+                    adapter_status="official_code_adapter",
+                    **official_source_info("senseiver"),
+                )
                 return self
             except OfficialImportError as exc:
                 fallback_reason = f"senseiver unavailable: {exc}"
@@ -63,12 +73,16 @@ class SenseiverBaseline(BaselineModel):
         self.self_attn = nn.MultiheadAttention(token_dim, heads, batch_first=True)
         self.dec_attn = nn.MultiheadAttention(token_dim, heads, batch_first=True)
         self.out = nn.Sequential(nn.LayerNorm(token_dim), nn.Linear(token_dim, self.out_channels))
-        requested_local = backend in {"local", "none"}
+        requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
         self.set_backend(
             "local",
             "local" if requested_local else ("official" if backend == "official" else backend),
             fallback_used=not requested_local,
             warning=fallback_reason,
+            implementation_mode_effective="adapted",
+            implementation_source="local_senseiver_style",
+            official_import_success=False,
+            adapter_status="local_adapted" if requested_local else "fallback_adapted",
         )
         return self
 

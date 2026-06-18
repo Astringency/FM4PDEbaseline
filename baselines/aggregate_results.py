@@ -8,6 +8,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from baselines.capabilities import write_capability_matrix
+
 
 BASE_GROUP_KEYS = [
     "experiment_kind",
@@ -22,6 +24,9 @@ BASE_GROUP_KEYS = [
     "sensor_mode",
     "noise_level",
     "backend_used",
+    "capability_status",
+    "implementation_mode_effective",
+    "paper_table_eligible",
 ]
 
 BUDGET_GROUP_KEYS = [
@@ -63,15 +68,39 @@ def main(argv: list[str] | None = None) -> None:
     for path in paths:
         rows.extend(_read_jsonl(path))
     summary_rows = aggregate_rows(rows)
+    main_rows = [row for row in rows if _truthy(row.get("paper_table_eligible", False))]
+    supplement_rows = [row for row in rows if not _truthy(row.get("paper_table_eligible", False))]
+    summary_main = aggregate_rows(main_rows)
+    summary_supplement = aggregate_rows(supplement_rows)
+    skipped_rows = _read_skipped_for_inputs(args.inputs)
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     _write_csv(out / "summary.csv", summary_rows)
     (out / "summary.json").write_text(json.dumps(summary_rows, indent=2, sort_keys=True), encoding="utf-8")
-    latex_rows = _latex_rows(summary_rows)
+    _write_csv(out / "summary_main.csv", summary_main)
+    (out / "summary_main.json").write_text(json.dumps(summary_main, indent=2, sort_keys=True), encoding="utf-8")
+    _write_csv(out / "summary_supplement.csv", summary_supplement)
+    (out / "summary_supplement.json").write_text(json.dumps(summary_supplement, indent=2, sort_keys=True), encoding="utf-8")
+    _write_csv(out / "skipped_combinations.csv", skipped_rows)
+    (out / "skipped_combinations.json").write_text(json.dumps(skipped_rows, indent=2, sort_keys=True), encoding="utf-8")
+    write_capability_matrix(out)
+    latex_rows = _latex_rows(summary_main)
     _write_csv(out / "latex_table.csv", latex_rows)
     if args.latex_tex:
         (out / "latex_table.tex").write_text(_latex_tex(latex_rows), encoding="utf-8")
-    print(json.dumps({"inputs": [str(p) for p in paths], "groups": len(summary_rows), "output_dir": str(out)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "inputs": [str(p) for p in paths],
+                "groups": len(summary_rows),
+                "main_groups": len(summary_main),
+                "supplement_groups": len(summary_supplement),
+                "skipped": len(skipped_rows),
+                "output_dir": str(out),
+            },
+            indent=2,
+        )
+    )
 
 
 def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -256,6 +285,29 @@ def _expand_inputs(inputs: list[str]) -> list[Path]:
     return [p for p in paths if p.exists()]
 
 
+def _read_skipped_for_inputs(inputs: list[str]) -> list[dict[str, Any]]:
+    paths: list[Path] = []
+    for item in inputs:
+        path = Path(item)
+        if path.is_dir():
+            paths.extend(sorted(path.rglob("skipped_combinations.jsonl")))
+        elif path.name == "skipped_combinations.jsonl":
+            paths.append(path)
+        else:
+            sibling = path.parent / "skipped_combinations.jsonl"
+            if sibling.exists():
+                paths.append(sibling)
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        for row in _read_jsonl(path):
+            key = json.dumps(row, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                rows.append(row)
+    return rows
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows = []
     with path.open("r", encoding="utf-8") as f:
@@ -326,6 +378,14 @@ def _norm(value: Any) -> Any:
     if isinstance(value, bool):
         return int(value)
     return value
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).lower() in {"1", "true", "yes", "y"}
 
 
 def _sort_key(key: tuple[tuple[str, Any], ...]) -> tuple[tuple[str, str], ...]:

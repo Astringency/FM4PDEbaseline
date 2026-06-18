@@ -24,7 +24,9 @@ from baselines.experiment_matrix import (
     FUTURE_PDES,
     PER_INSTANCE_BASELINES,
     TIME_VARYING_SENSOR_BASELINES,
+    capability_skip_row,
     compatibility_reason,
+    resolve_capability,
 )
 
 
@@ -52,9 +54,9 @@ GROUP_TO_TASK = {
 DEFAULT_BASELINES_BY_GROUP = {
     "full_forward_main": ["fno", "deeponet", "ifno"],
     "full_inverse_main": ["fno", "deeponet", "ifno"],
-    "sparse_solution_main_amortized": ["recfno", "senseiver", "voronoicnn", "fno", "deeponet"],
-    "sparse_solution_main_physics": ["pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"],
-    "sparse_inverse_main": ["recfno", "senseiver", "voronoicnn", "fno", "deeponet"],
+    "sparse_solution_main_amortized": ["recfno", "senseiver", "voronoicnn"],
+    "sparse_solution_main_physics": ["pinn_sparse", "pc_bnn", "pde_opt"],
+    "sparse_inverse_main": ["pinn_sparse", "pde_opt"],
     "sensor_count_ablation": ["recfno", "senseiver", "voronoicnn", "pinn_sparse", "pde_opt"],
     "noise_ablation": ["recfno", "senseiver", "voronoicnn", "pinn_sparse", "pde_opt"],
     "sensor_mode_ablation": ["recfno", "senseiver", "voronoicnn", "pde_opt"],
@@ -64,9 +66,9 @@ DEFAULT_BASELINES_BY_GROUP = {
     # Legacy aliases.
     "full_forward": ["fno", "deeponet", "ifno"],
     "full_inverse": ["fno", "deeponet", "ifno"],
-    "sparse_solution_amortized": ["recfno", "senseiver", "voronoicnn", "fno", "deeponet", "ifno"],
-    "sparse_solution_physics": ["pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"],
-    "sparse_inverse": ["recfno", "senseiver", "voronoicnn", "fno", "deeponet", "pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"],
+    "sparse_solution_amortized": ["recfno", "senseiver", "voronoicnn"],
+    "sparse_solution_physics": ["pinn_sparse", "pc_bnn", "pde_opt"],
+    "sparse_inverse": ["pinn_sparse", "pde_opt"],
     "time_varying": ["var4d", "vivid", "senseiver"],
 }
 
@@ -243,26 +245,33 @@ def build_matrix(
             for baseline in candidate_baselines:
                 budget_variants = _budget_variants(cfg, group_cfg, baseline, ablation_factor, experiment_kind)
                 for sensor_mode in expansion["sensor_modes"]:
-                    reason = compatibility_reason(baseline, pde, task, "" if sensor_mode == "none" else sensor_mode, task_group)
+                    capability = resolve_capability(
+                        baseline,
+                        pde,
+                        task,
+                        "" if sensor_mode == "none" else sensor_mode,
+                        task_group,
+                        load_full_trajectory=_matrix_load_full_trajectory(group_cfg, global_defaults, baseline),
+                        train_inverse_operator=_matrix_train_inverse_operator(cfg, group_cfg, baseline),
+                    )
+                    reason = capability.reason if capability.support_status == "unsupported" else ""
                     if reason:
-                        skipped_row = {
-                            "matrix_name": matrix_name,
-                            "experiment_kind": experiment_kind,
-                            "ablation_factor": ablation_factor,
-                            "task_group": task_group,
-                            "task": task,
-                            "pde": pde,
-                            "baseline": baseline,
-                            "sensor_mode": sensor_mode,
-                            "reason": reason,
-                            "would_have_expanded": (
-                                len(seeds)
-                                * len(expansion["sensor_counts"])
-                                * len(expansion["noise_levels"])
-                                * len(expansion["train_sizes"])
-                                * len(budget_variants)
-                            ),
-                        }
+                        skipped_row = capability_skip_row(
+                            capability,
+                            task_group=task_group,
+                            extra={
+                                "matrix_name": matrix_name,
+                                "experiment_kind": experiment_kind,
+                                "ablation_factor": ablation_factor,
+                                "would_have_expanded": (
+                                    len(seeds)
+                                    * len(expansion["sensor_counts"])
+                                    * len(expansion["noise_levels"])
+                                    * len(expansion["train_sizes"])
+                                    * len(budget_variants)
+                                ),
+                            },
+                        )
                         _merge_skip(skipped, skipped_row)
                         if include_skipped:
                             rows.append(_skipped_matrix_row(skipped_row, global_defaults, output_root))
@@ -362,6 +371,20 @@ def _global_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
         "scalar_param_mode": os.environ.get("SCALAR_PARAM_MODE", ""),
         "load_full_trajectory": bool(cfg.get("load_full_trajectory", False)),
     }
+
+
+def _matrix_load_full_trajectory(group_cfg: dict[str, Any], defaults: dict[str, Any], baseline: str) -> bool:
+    resources = group_cfg.get("resources", {}) if isinstance(group_cfg.get("resources", {}), dict) else {}
+    baseline_resources = resources.get(baseline, {}) if isinstance(resources.get(baseline, {}), dict) else {}
+    return bool(group_cfg.get("load_full_trajectory", baseline_resources.get("load_full_trajectory", defaults.get("load_full_trajectory", False))))
+
+
+def _matrix_train_inverse_operator(cfg: dict[str, Any], group_cfg: dict[str, Any], baseline: str) -> bool:
+    resources = dict(cfg.get("resources", {}) or {})
+    baseline_resources = dict(resources.get(baseline, {}) or {})
+    group_resources = dict(group_cfg.get("resources", {}) or {})
+    group_baseline_resources = dict(group_resources.get(baseline, {}) or {})
+    return bool(group_cfg.get("train_inverse_operator", group_baseline_resources.get("train_inverse_operator", baseline_resources.get("train_inverse_operator", False))))
 
 
 def _resolve_pdes(cfg: dict[str, Any], group_cfg: dict[str, Any], experiment_kind: str, ablation_factor: str) -> list[str]:

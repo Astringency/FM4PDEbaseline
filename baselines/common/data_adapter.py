@@ -345,10 +345,11 @@ class PDEDataRegistry:
                 metadata["observed_solution_fields"] = observation_source
                 metadata["observation_source_fields"] = observation_source
                 metadata["observation_source_channel_names"] = observation_names
-            time_varying_valid = not (requested_sensor_mode == "time_varying") or observation_source.ndim == 5
+            has_time_axis = observation_source.ndim == 5 or (spec.name == "burger" and observation_source.ndim == 4)
+            time_varying_valid = not (requested_sensor_mode == "time_varying") or has_time_axis
             if requested_sensor_mode == "time_varying" and not time_varying_valid:
                 message = (
-                    "sensor_mode='time_varying' requires task observation fields shaped [B,C,T,H,W]; "
+                    "sensor_mode='time_varying' requires task observation fields shaped [B,C,T,H,W] or Burgers [B,C,T,X]; "
                     f"got {tuple(observation_source.shape)} for {spec.name}/{task}."
                 )
                 if experiment_mode == "paper":

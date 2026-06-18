@@ -7,7 +7,7 @@ import torch
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .official import OfficialImportError, get_deepxde_deeponet_class
+from .official import OfficialImportError, get_deepxde_deeponet_class, official_source_info, requested_implementation_mode
 from .shared import MLP, flatten_grid
 
 
@@ -29,8 +29,9 @@ class DeepONetBaseline(BaselineModel):
         self.branch_in = branch_in
         self.official_net = None
         backend = str(self.config.get("official_backend", "auto")).lower()
+        implementation_mode = requested_implementation_mode(self.config)
         fallback_reason = ""
-        if backend in {"auto", "deepxde", "official"}:
+        if implementation_mode != "adapted" and backend in {"auto", "deepxde", "official"}:
             try:
                 deeponet = get_deepxde_deeponet_class()
                 self.official_net = deeponet(
@@ -41,18 +42,31 @@ class DeepONetBaseline(BaselineModel):
                     num_outputs=out_channels,
                     multi_output_strategy="independent" if out_channels > 1 else None,
                 )
-                self.set_backend("deepxde", "deepxde", fallback_used=False)
+                self.set_backend(
+                    "deepxde",
+                    "deepxde",
+                    fallback_used=False,
+                    implementation_mode_effective="official",
+                    implementation_source="deepxde",
+                    official_import_success=True,
+                    adapter_status="official_code_adapter",
+                    **official_source_info("deepxde"),
+                )
             except OfficialImportError as exc:
                 fallback_reason = f"deepxde unavailable: {exc}"
                 if backend in {"deepxde", "official"}:
                     warnings.warn(f"DeepXDE DeepONet unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
         if self.official_net is None:
-            requested_local = backend in {"local", "none"}
+            requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
             self.set_backend(
                 "local",
                 "local" if requested_local else ("official" if backend == "official" else backend),
                 fallback_used=not requested_local,
                 warning=fallback_reason,
+                implementation_mode_effective="adapted",
+                implementation_source="local_deeponet",
+                official_import_success=False,
+                adapter_status="local_adapted" if requested_local else "fallback_adapted",
             )
         return self
 

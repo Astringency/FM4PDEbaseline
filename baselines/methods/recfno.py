@@ -5,7 +5,7 @@ import torch
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .official import OfficialImportError
+from .official import OfficialImportError, official_source_info, requested_implementation_mode
 from .shared import FNO2dNet, OfficialRecFNOVoronoiFNO2dNet, grid_channels
 
 
@@ -21,8 +21,9 @@ class RecFNOBaseline(BaselineModel):
         self.embedding = str(self.config.get("embedding", "mask"))
         modes1, modes2 = _clamped_modes(self.config, data_spec)
         backend = str(self.config.get("official_backend", "auto")).lower()
+        implementation_mode = requested_implementation_mode(self.config)
         width = int(self.config.get("width", 24))
-        if backend not in {"local", "none"}:
+        if implementation_mode != "adapted" and backend not in {"local", "none"}:
             try:
                 self.net = OfficialRecFNOVoronoiFNO2dNet(
                     in_channels=in_channels,
@@ -32,7 +33,16 @@ class RecFNOBaseline(BaselineModel):
                     modes2=modes2,
                     add_coords=False,
                 )
-                self.set_backend("recfno", "recfno", fallback_used=False)
+                self.set_backend(
+                    "recfno",
+                    "recfno",
+                    fallback_used=False,
+                    implementation_mode_effective="official",
+                    implementation_source="recfno",
+                    official_import_success=True,
+                    adapter_status="official_code_adapter",
+                    **official_source_info("recfno"),
+                )
                 return self
             except OfficialImportError as exc:
                 self.backend_warning = f"recfno unavailable: {exc}"
@@ -44,12 +54,16 @@ class RecFNOBaseline(BaselineModel):
             modes2=modes2,
             add_coords=False,
         )
-        requested_local = backend in {"local", "none"}
+        requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
         self.set_backend(
             "local",
             "local" if requested_local else ("official" if backend == "official" else backend),
             fallback_used=not requested_local,
             warning="" if requested_local else self.backend_warning,
+            implementation_mode_effective="adapted",
+            implementation_source="local_recfno_adapter",
+            official_import_success=False,
+            adapter_status="local_adapted" if requested_local else "fallback_adapted",
         )
         return self
 

@@ -7,7 +7,8 @@ import torch.nn.functional as F
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, _to_device_batch
-from .shared import FNO2dNet, SpectralConv2d, grid_channels
+from .official import OfficialImportError, get_ifno_official_status, official_source_info, requested_implementation_mode
+from .shared import SpectralConv2d, grid_channels
 
 
 class _CouplingBlock(nn.Module):
@@ -45,6 +46,14 @@ class IFNOBaseline(BaselineModel):
         modes1 = int(self.config.get("modes1", 12))
         modes2 = int(self.config.get("modes2", 12))
         layers = int(self.config.get("layers", 3))
+        backend = str(self.config.get("official_backend", "auto")).lower()
+        implementation_mode = requested_implementation_mode(self.config)
+        fallback_warning = ""
+        if implementation_mode != "adapted" and backend in {"auto", "ifno", "official"}:
+            try:
+                get_ifno_official_status()
+            except OfficialImportError as exc:
+                fallback_warning = f"official iFNO unavailable: {exc}"
         self.input_channels = int(data_spec["input_channels"])
         self.target_channels = int(data_spec["target_channels"])
         self.lift_x = nn.Conv2d(self.input_channels + 2, width, 1)
@@ -52,10 +61,18 @@ class IFNOBaseline(BaselineModel):
         self.blocks = nn.ModuleList([_CouplingBlock(width, modes1, modes2) for _ in range(layers)])
         self.proj_y = nn.Sequential(nn.Conv2d(width, width, 1), nn.GELU(), nn.Conv2d(width, self.target_channels, 1))
         self.proj_x = nn.Sequential(nn.Conv2d(width, width, 1), nn.GELU(), nn.Conv2d(width, self.input_channels, 1))
-        # Sparse inverse fallback uses a small FNO because sparse observations
-        # are not exactly invertible in the iFNO sense.
-        self.sparse_inverse = FNO2dNet(self.target_channels, self.input_channels, width=width, modes1=modes1, modes2=modes2)
-        self.set_backend("local", "local", fallback_used=False)
+        requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
+        self.set_backend(
+            "local_ifno_simplified",
+            "local" if requested_local else "official",
+            fallback_used=not requested_local,
+            warning="" if requested_local else fallback_warning,
+            implementation_mode_effective="adapted",
+            implementation_source="local_simplified_ifno",
+            official_import_success=False,
+            adapter_status="local_adapted" if requested_local else "fallback_adapted_not_official_ifno",
+            **official_source_info("ifno"),
+        )
         return self
 
     def fit(self, train_loader, val_loader=None):
@@ -92,9 +109,9 @@ class IFNOBaseline(BaselineModel):
 
     def predict(self, batch: PDEBatch):
         if batch.task in {"inverse", "sparse_inverse"}:
-            x = batch.input_fields
             if batch.task == "sparse_inverse":
-                return self.sparse_inverse(x)
+                raise NotImplementedError("iFNO sparse_inverse is unsupported without an official posterior/sparse inference adapter")
+            x = batch.input_fields
             return self._inverse_map(x)
         x = batch.input_fields
         return self._forward_map(x)

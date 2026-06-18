@@ -23,6 +23,7 @@ def test_sparse_inverse_observes_solution_side_and_targets_coefficient():
     assert "observation_source_fields" in batch.metadata
 
 
-def test_per_instance_sparse_inverse_is_marked_unsupported():
+def test_static_per_instance_sparse_inverse_is_supported():
     reason = compatibility_reason("pde_opt", "poisson", "sparse_inverse")
-    assert "forward solve" in reason
+    assert reason == ""
+    assert "disabled" in compatibility_reason("pde_opt", "heat", "sparse_inverse")

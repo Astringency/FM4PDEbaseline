@@ -36,14 +36,13 @@ task_group_overrides:
     noise_level: 0.0
   sparse_solution_main_physics:
     pdes: [poisson, shallow_water]
-    baselines: [pde_opt, var4d]
+    baselines: [pde_opt, pinn_sparse]
     num_sensors: 50
     sensor_mode: random
     noise_level: 0.0
   sparse_inverse_main:
-    pdes: [darcy, heat]
-    baselines: [fno]
-    extra_skip_baselines: [pde_opt]
+    pdes: [darcy, poisson]
+    baselines: [pde_opt, pinn_sparse]
     num_sensors: 50
     sensor_mode: random
     noise_level: 0.0

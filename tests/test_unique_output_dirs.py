@@ -34,7 +34,7 @@ def test_different_noise_levels_have_different_output_dirs(tmp_path: Path):
         for row in _read_jsonl(out / "matrices" / "core.jsonl")
         if row["task_group"] == "sparse_solution_amortized"
         and row["pde"] == "darcy"
-        and row["baseline"] == "fno"
+        and row["baseline"] == "recfno"
         and row["seed"] == 1
         and row["num_sensors"] == 50
         and row["sensor_mode"] == "random"

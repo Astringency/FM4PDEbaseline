@@ -1,295 +1,114 @@
-# FM4PDE Baseline Framework
+# FM4PDE External Baseline Framework
 
-This module adds a reproducible JMLR-revision baseline layer without modifying the original FM4PDE training or sampling code. It provides shared data adapters, sensor/noise generation, metrics, logging, and method wrappers under a single command-line interface.
+This directory contains the reviewer-facing external baseline layer for FM4PDE. The framework is intentionally conservative: paper-mode results must use official code/components when a baseline claims official implementation status, and local compact implementations are never allowed to masquerade as native paper baselines.
 
-## Reviewer-Level Experiment Protocol
+## Capability Status
 
-The baseline layer now has three intended run classes:
+Every baseline/PDE/task/sensor-mode combination is resolved through `baselines.capabilities.resolve_capability(...)` and recorded in every result row.
 
-- `smoke`: tiny deterministic synthetic data with `--dry-run`; use only for interface checks.
-- `debug`: small real-data or synthetic experiments for development; never use these numbers in paper tables.
-- `paper`: formal no-leakage experiments on independent train/val/test files. Paper mode rejects `--dry-run`, `--synthetic-data`, `--allow-synthetic-fallback`, and `--prefer-test`.
+| Status | Meaning | Main table |
+| --- | --- | --- |
+| `native` | The task is inside the method's standard published capability. | Eligible when implementation is official/canonical as required. |
+| `official_adapter` | Official model components are used through this repository's data adapter, or canonical PINN architecture is paired with a local PDE objective. | Eligible when disclosed and not a fallback. |
+| `adapted` | Local adaptation, target change, endpoint surrogate, style reimplementation, or debug/supplement method. | Supplement only. |
+| `unsupported` | Outside the baseline's standard capability or missing required trajectory/objective. | Skipped in paper mode. |
 
-The data adapter follows the current FM4PDE data layout:
+`implementation_required` is one of:
 
-- Formal train splits are normally `50000 = 5 shards x 10000`, e.g. `<DATA_ROOT>/<pde>/<pde>_10000-128-128_1.*` through `_5.*`.
-- Test splits are independently generated files, usually 1000 or 10000 samples, e.g. `<pde>_test_1000-128-128.*` or `<pde>_test_10000-128-128.*`.
-- Validation uses an independent `*_val*` file when present. Otherwise it is a deterministic subset of train shards with an offset supplied by the runner; test files are never used for train or validation.
-- Future PDE HDF5 files store physical fields in `input_data` and `output_data`. Spatially constant parameters such as `alpha`, `c`, `b_x`, `b_y`, `kappa`, and `u_D` are loaded into `metadata["pde_params"]` and as top-level metadata keys for residuals.
-- Formal paper runs default to `--data-loading-mode lazy`. Lazy datasets index shards and local sample ids at initialization, then read one sample per `__getitem__` and collate back to `PDEBatch`. Debug/smoke defaults to eager loading.
-- Time-dependent operator training defaults to endpoint-only tensors. `full_trajectory` is loaded only for baselines or diagnostics that need it, for `--load-full-trajectory`, or for time-varying trajectory sensor experiments. Runs record `data_loading_mode`, `load_full_trajectory`, `loaded_full_trajectory`, `train_size_requested`, `train_size_loaded_in_memory`, and `train_shards`.
-- `nsnonbounded` test files must use an explicit test name such as `nsnonbounded_test_1000-128-128-10.mat`, `nsnonbounded_1000-128-128-10*.mat`, or `nsnonbounded_10000-128-128-10_test*.mat`. Train shards such as `nsnonbounded_10000-128-128-10_1_new.mat` are filtered out for `split=test`.
+- `official`: paper mode must use official code or official model components.
+- `canonical_math`: no single official repository is claimed; the method is a canonical mathematical baseline.
+- `adapted_allowed`: only smoke/debug or explicitly labeled supplement runs.
+- `unsupported`: paper mode skips the combination.
 
-`--scalar-param-mode` controls how future PDE scalar parameters are exposed to supervised baselines:
+Paper rows include:
 
-- `metadata` is the global default and FM4PDE-compatible mode. Model tensors contain only physical fields, e.g. heat uses `u0 -> uT`; scalar PDE parameters remain metadata for residuals and bookkeeping.
-- `materialize` explicitly expands scalar parameters to constant spatial channels, e.g. heat becomes `[u0, alpha] -> [uT, alpha]`.
-- `global` is accepted as a reserved API mode, but currently falls back to metadata with a warning; no hidden materialization occurs.
+`implementation_mode_requested`, `implementation_mode_effective`, `implementation_source`, `official_repo`, `official_commit_or_version`, `official_import_path`, `official_import_success`, `adapter_status`, `capability_status`, `implementation_required`, `unsupported_reason`, and `paper_table_eligible`.
 
-For supervised full-operator baselines (`fno`, `deeponet`, `ifno`) on future PDEs, the paper scripts default to `SUPERVISED_SCALAR_PARAM_MODE=materialize` unless `SCALAR_PARAM_MODE` is explicitly set. This is the supervised-operator-fair default when scalar parameters vary per sample. If scalar parameters are fixed, metadata and materialize encode the same operator up to redundant constant channels. If scalar parameters are random and kept metadata-only, the supervised model input does not contain `alpha`, `b_x`, `b_y`, `kappa`, `u_D`, etc., so the mapping is not deterministic from tensor input alone; such runs are FM4PDE-compatible but not supervised-fair. Result rows record `scalar_param_mode_requested`, `scalar_param_mode_effective`, and `scalar_params_used_as_input`.
+## Implementation Modes
 
-Formal commands:
+Paper configs default to:
+
+```yaml
+method:
+  implementation_mode: official_or_skip
+```
+
+This means an official-capability baseline must import official code/components or the run fails/skips. To run local debug implementations, use smoke/debug mode or explicitly set `implementation_mode: adapted`; those rows are marked supplement-only.
+
+Legacy `official_backend` is still accepted for compatibility, but new paper configs should use `implementation_mode`.
+
+## Formal Native Commands
 
 ```bash
 DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_full_operator.sh
+  bash scripts/baselines/run_paper_native_full_operator.sh
 
 DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_full_inverse.sh
+  bash scripts/baselines/run_paper_native_sparse_reconstruction.sh
 
 DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_sparse_reconstruction.sh
+  bash scripts/baselines/run_paper_static_sparse_inverse.sh
 
 DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_sparse_inverse.sh
+  bash scripts/baselines/run_paper_time_varying_da.sh
 
 DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_physics_da.sh
+  bash scripts/baselines/run_paper_all_native.sh
+```
 
-DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_all.sh
+`run_paper_all.sh` is retained as a compatibility entry point and delegates to `run_paper_all_native.sh`. Older per-task scripts remain available for supplement/debug runs, but adapted rows are not included in the main aggregate table.
 
+## Aggregation
+
+Use:
+
+```bash
 OUT=outputs/baselines/paper bash scripts/baselines/aggregate_paper_results.sh
 ```
 
-Paper scripts honor `DATA_ROOT`, `OUT`, `DEVICE`, `TRAIN_SIZE`, `VAL_SIZE`, `TEST_SIZE`, `TRAIN_SHARDS`, `EPOCHS`, `BATCH_SIZE`, `SEEDS`, `SENSOR_COUNTS`, `SENSOR_MODES`, `NOISE_LEVELS`, `PDES`, `BASELINES`, `SCALAR_PARAM_MODE`, `SUPERVISED_SCALAR_PARAM_MODE`, and `DATA_LOADING_MODE`. Defaults are `TRAIN_SIZE=50000`, `VAL_SIZE=0`, `TEST_SIZE=1000`, `TRAIN_SHARDS=5`, `SEEDS="1 2 3"`, `SENSOR_COUNTS="50 100 250 500 1000"`, `SENSOR_MODES="random grid fixed"`, `NOISE_LEVELS="0.0 0.01 0.05 0.10"`, `SCALAR_PARAM_MODE=metadata`, `SUPERVISED_SCALAR_PARAM_MODE=materialize`, and `DATA_LOADING_MODE=lazy`.
+The aggregator writes:
 
-If validation is needed, prefer an independent `*_val*` file. Without an independent val file, setting `VAL_SIZE>0` reserves the tail of the requested train subset: `effective_train_size = TRAIN_SIZE - VAL_SIZE` and `val_from_train_offset = effective_train_size`. Runs record `train_requested_size`, `effective_train_size`, `val_size`, and `val_split_source` so no train/val/test split source is implicit.
+- `summary_main.csv/json`: only `paper_table_eligible=true`.
+- `summary_supplement.csv/json`: adapted, surrogate, local, or fallback rows.
+- `skipped_combinations.csv/json`: skipped paper combinations.
+- `baseline_capability_matrix.csv/json`: full registry dump.
+- `latex_table.csv/tex`: generated only from the main summary.
 
-Run outputs:
-
-- `results_raw.jsonl`: one raw row per evaluated test batch.
-- `results_summary.jsonl`: one aggregate row per run.
-- `results_summary.csv`: aggregate rows in CSV form.
-- `summary.csv`, `summary.json`, `latex_table.csv`, and optionally `latex_table.tex`: cross-run aggregation from `python -m baselines.aggregate_results`.
-
-Every run records `backend_used`, `official_backend`, `fallback_used`, and `backend_warning`. `official_backend: official` in a paper config fails if the wrapper falls back to a local compact implementation. `official_backend: auto` may fall back, but the result row records it explicitly.
-
-Time-dependent residuals record `residual_mode`. `full_trajectory` means a multi-step trajectory tensor was available to the residual. `two_level` means the diagnostic was built from input/background and final prediction only; it is a useful surrogate but not equivalent to a full time-dynamics constraint.
-
-Synthetic data is only for smoke/debug checks and must not be used for paper tables.
-
-## Known Fixed Reviewer-Level Issues
-
-- Full test evaluation is the default; results are not first-batch-only. Raw rows are one per test batch and summaries aggregate the whole test split.
-- Train, validation, and test are split with no test fallback for training or validation. Validation defaults to off (`VAL_SIZE=0`) for formal paper scripts unless explicitly requested.
-- Future PDE scalar parameters stay in metadata by default; no hidden `[N,1,H,W]` materialization occurs unless `--scalar-param-mode materialize` is set.
-- Supervised full-operator paper scripts use materialized scalar parameters for future PDEs by default when `SCALAR_PARAM_MODE` is not explicitly set.
-- Per-instance baselines (`pinn_sparse`, `pc_bnn`, `pde_opt`, `var4d`, `vivid`) load only a tiny train spec dataset, not the full 50000-sample train set. Runs record `train_size_loaded_for_fit` and `train_size_loaded_for_spec`.
-- Lazy time-dependent train datasets avoid loading all RD/SWE/NS trajectories into CPU memory. Endpoint-only train batches do not contain 5D full trajectories unless explicitly requested.
-- Sparse tasks preserve `metadata["original_input_fields"]` and `metadata["background_fields"]` before replacing model input with masked observations. Time-dependent residuals use the true initial/background state, not the sparse masked grid.
-- `sparse_inverse` observes sparse solution/final-state fields and reconstructs coefficient/source/initial fields. Per-instance PINN/PDE-Opt/4D-Var/VIVID sparse inverse is skipped unless a method implements a forward PDE solve from predicted coefficient to observed solution sensors.
-- Paper/default physics metrics are per-sample: raw rows include `obs_mse_clean_values`, `obs_mse_noisy_values`, `pde_residual_values`, `bc_residual_values`, `ic_residual_values`, and `physics_loss_values`. `obs_mse` is kept as a backward-compatible alias for `obs_mse_clean`. `--physics-metric-mode per_batch` is available for faster debug runs and is marked as `metric_granularity=per_batch`.
-- `residual_mode_counts` distinguishes `full_trajectory`, `two_level`, `error`, and `not_implemented`. Ground-truth `metadata["full_trajectory"]` is never substituted for a prediction when computing prediction residuals.
-- 4D-Var/VIVID rows record `assimilation_mode_counts`. `full_trajectory` uses an optimized multi-step trajectory, `two_level_surrogate` uses an initial/final surrogate and is not full 4D-Var, and `state_surrogate` is static state reconstruction.
-- Cross-run aggregation prefers `results_raw.jsonl`. Summary-only aggregation uses pooled `n/mean/std` statistics when available and marks downgraded run-level aggregation with `aggregation_mode` and `aggregation_warning`.
-
-## Step 0 Findings
-
-Files inspected in the original FM4PDE repository:
-
-- `data/load.py`: loads each PDE and returns tensors for FM4PDE generative training.
-- `data/DataGen/`: documents and scripts for static and time-dependent data generation.
-- `train.py`, `train_arg_parser.py`, `training/train_loop.py`: FM4PDE trains a flow-matching generative model on full paired fields normalized by `data/transform.py`.
-- `sample.py`, `sampling/generate_pde.py`, `sampling/sampler.py`: sampling applies observation/PDE guidance after loading one test instance.
-- `configs/*.yaml`: sampling configs define PDE-specific data keys, pretrained model paths, observation counts, and guide weights.
-
-Important behavior:
-
-- FM4PDE training input is generally normalized to `[N,C,128,128]`, but this is not the raw data layout for all PDEs.
-- `reaction_diffusion` raw HDF5 contains trajectories; the FM4PDE loader uses one intermediate frame and the final frame.
-- `shallow_water` raw HDF5 contains time series for `h`, `hu`, `hv`; the FM4PDE loader uses first and final states.
-- `nsnonbounded` raw data stores `w0` and a 10-step vorticity trajectory; the FM4PDE loader concatenates them as channel-like snapshots.
-- `burger` stores an initial 1D field and a 2D space-time output. FM4PDE currently uses only the output as a single channel.
-- Darcy MATLAB v7.3/HDF5 files store arrays as `[H,W,N]` (`thresh_a_data`, `thresh_p_data`), matching the original FM4PDE loader's `transpose(3,0,1,2)` path. The adapter supports both `[H,W,N]` and `[N,H,W]` layouts.
-- Existing PDE guidance for Navier-Stokes in `sampling/generate_pde.py` is not a reliable vorticity transport residual. This framework does not reuse that placeholder; it defines Navier-Stokes vorticity, Reaction-Diffusion, and Shallow-Water residuals in `baselines/common/physics.py` using the equation forms and parameters from `data/DataGen/pde_data_generation_summary.md`.
-- Existing repository includes FNO reference code in PDEBench data generation, but no unified FNO/DeepONet/DiffusionPDE baseline runner.
-
-## Canonical Data Contract
-
-`baselines/common/data_adapter.py` defines:
-
-```python
-@dataclass
-class PDEBatch:
-    pde_name: str
-    task: str
-    full_tensor: torch.Tensor
-    input_fields: torch.Tensor
-    target_fields: torch.Tensor
-    coords: torch.Tensor | None
-    mask: torch.Tensor | None
-    obs_values: torch.Tensor | None
-    obs_coords: torch.Tensor | None
-    channel_names: list[str]
-    metadata: dict
-```
-
-Canonical layouts:
-
-- Static 2D PDEs: `full_tensor = [N,C,H,W]`.
-- Time-dependent 2D trajectories: `full_tensor = [N,C,T,H,W]`.
-- Endpoint-only time-dependent training batches may use `full_tensor = [N,C_endpoint,H,W]` with explicit `input_indices` and `target_indices`; this is the default memory-safe paper path for RD/SWE/NS supervised operator training.
-- Burgers: `full_tensor = [N,1,T,X]`, with initial 1D condition preserved in `metadata["initial_1d"]` when present.
-- Task tensors are channel-first 2D grids when possible. For NS forward, trajectory targets are flattened to `[N,T,H,W]` for 2D amortized baselines while full trajectory remains in `full_tensor`.
-
-## PDE Channel Mapping
-
-| PDE | Raw/canonical channels | Forward | Inverse |
-| --- | --- | --- | --- |
-| `darcy` | `[a,p]` | `a -> p` | `p -> a` |
-| `poisson` | `[f,phi]` | `f -> phi` | `phi -> f` |
-| `helmholtz` | `[f,psi]` | `f -> psi` | `psi -> f` |
-| `nsnonbounded` | `[w0,w_t1...w_t10]` as `[N,1,11,H,W]` | `w0 -> trajectory` | trajectory/final-view -> initial vorticity |
-| `burger` | `input` 1D plus `output` `[T,X]` | repeated `u0 -> u(t,x)` | `u(t,x) -> u0` |
-| `reaction_diffusion` | `[u,v]` trajectory | `[u_t0,v_t0] -> [u_T,v_T]` | final -> initial |
-| `shallow_water` | conservative `[h,hu,hv]` trajectory | initial -> final | final -> initial |
-| `heat` | default `[u0,uT]`, scalar `alpha` in metadata | `u0 -> uT` | final -> initial |
-| `wave` | `[u0,v0,uT,vT]`, scalar/fixed `c` in metadata | `[u0,v0] -> [uT,vT]` | final -> initial |
-| `advection_diffusion` | default `[u0,uT]`, scalar `b_x,b_y,kappa` in metadata | `u0 -> uT` | final -> initial |
-| `steady_heat_conduction` | default `[f,u]`, scalar `u_D` in metadata | `f -> u` | `u -> f` |
-
-## Tasks
-
-- `forward`: coefficient/source/initial state to solution/final/trajectory.
-- `inverse`: solution/final state to coefficient/source/initial state.
-- `sparse_solution`: sparse solution/final/trajectory observations to full solution/final/trajectory reconstruction.
-- `sparse_inverse`: sparse observed solution/final-state fields to coefficient/source/initial-state reconstruction. The supervised model loss is prediction versus true coefficient/source/initial target. Observation loss for per-instance optimization requires a forward PDE map and is skipped for methods that do not implement it.
-- `both`/`joint`: full pair reconstruction; primarily for compatibility.
-
-All sparse tasks use `baselines/common/sensors.py` to create reusable masks, observations, noisy observations, masked grids, and Voronoi-like grids.
-
-`sensor_mode=time_varying` is only valid when the observed target is explicitly shaped `[B,C,T,H,W]`. Paper mode raises or the experiment matrix skips final-state-only combinations; smoke/debug mode warns and falls back to random sensors. Runs record `requested_sensor_mode`, `effective_sensor_mode`, and `time_varying_sensor_valid`.
-
-## Baseline Status
-
-| Baseline | Local wrapper | Data input | Status |
-| --- | --- | --- | --- |
-| FNO | `baselines/methods/fno.py` | full or masked grid | implemented local compact FNO |
-| DeepONet | `baselines/methods/deeponet.py` | flattened field or sensor values + query coords | implemented local branch/trunk DeepONet |
-| iFNO | `baselines/methods/ifno.py` | forward/inverse grid | implemented local bidirectional iFNO core |
-| RecFNO | `baselines/methods/recfno.py` | `[masked/voronoi grid, mask, coords]` | implemented local RecFNO with mask and Voronoi embeddings |
-| Senseiver | `baselines/methods/senseiver.py` | `(obs_coords, obs_values)` + query coords | implemented local Perceiver-IO/Senseiver variant |
-| VoronoiCNN | `baselines/methods/voronoicnn.py` | `[voronoi_grid, mask, coords]` | implemented local VoronoiCNN |
-| PINN-Sparse | `baselines/methods/pinn_sparse.py` | per-instance sparse observations | implemented per-instance neural-field PINN |
-| PC-BNN | `baselines/methods/pc_bnn.py` | per-instance sparse observations | implemented SVGD particle PC-BNN |
-| PDE-Opt | `baselines/methods/pde_opt.py` | per-instance grid optimization | implemented PDE-constrained optimization |
-| 4D-Var | `baselines/methods/var4d.py` | per-instance assimilation | implemented full-space weak 4D-Var |
-| VIVID | `baselines/methods/vivid.py` | Voronoi/background initialization + variational refinement | implemented per-instance full-space VIVID |
-
-Detailed paper/code sources are in `baselines/BASELINE_SOURCES.md`.
-
-Official implementation reuse:
-
-- `fno` first tries the vendored `offical/neuraloperator` FNO. If optional dependencies such as `tensorly` are unavailable, it falls back to the vendored RecFNO `VoronoiFNO2d` adapter, and only then to the local compact FNO.
-- `recfno` uses the vendored `offical/RecFNO/model/fno.py::VoronoiFNO2d` as its network core; the local code only builds the sparse mask/Voronoi input tensor expected by the current data adapter.
-- `voronoicnn` uses the vendored RecFNO `UNet` on normal image resolutions; tiny smoke-test grids use the local compact CNN because the official UNet downsamples too deeply for 8x8 inputs.
-- `deeponet` and `pinn_sparse` prefer DeepXDE PyTorch `DeepONetCartesianProd`/`FNN` when DeepXDE optional dependencies are installed. In the default lightweight test environment, they fall back to the local API-compatible networks.
-- `senseiver` and `pc_bnn` prefer their vendored official modules when their optional dependencies and problem-specific channel assumptions are satisfied. Otherwise they keep the local generic Perceiver/SVGD adapters.
-- `ifno`, `pde_opt`, `var4d`, and `vivid` remain API-compatible adaptations because the vendored official scripts are tied to command-line globals, fixed datasets, or external checkpoint/data layouts rather than importable model components. VIVID defaults to per-instance refinement from Voronoi/background initialization; set `train_inverse_operator: true` only when intentionally training its inverse operator on a small or formal train loader.
-
-## Physics Loss Status
-
-`baselines/common/physics.py` exposes structured physics losses:
-
-```python
-physics_losses(pred, pde_name, metadata) -> {
-    "interior": tensor,
-    "bc": tensor,
-    "ic": tensor,
-    "total": tensor,
-    "residual": tensor | None,
-    "mode": str,
-}
-```
-
-`residual_loss(...)` is kept for backward compatibility and still returns the interior PDE residual loss. `physics_loss(...)` returns the weighted total. `pde_residual_metric`, `bc_residual_metric`, and `ic_residual_metric` record the three scalar terms separately.
-
-Implemented equations and condition terms:
-
-- Darcy: `-div(a grad p) - 1`, interior grid only, homogeneous Dirichlet loss on `p`, no IC term.
-- Poisson: `-Delta phi - f`, interior grid only, homogeneous Dirichlet loss on `phi`, no IC term.
-- Helmholtz: `(-Delta - k^2) psi - f`, interior grid only, homogeneous Dirichlet loss on `psi`, no IC term.
-- Burgers: `u_t + u u_x - nu u_xx`, periodic x-boundary loss, IC loss against `initial_1d` or the first stored frame.
-- Navier-Stokes nonbounded: periodic vorticity transport `omega_t + u dot grad omega - nu Delta omega - forcing`, Fourier streamfunction velocity recovery, periodic x/y boundary loss, IC loss against `omega0`.
-- Reaction-Diffusion: FitzHugh-Nagumo `[u,v]` residual on `[-1,1]^2`, homogeneous Neumann boundary loss, IC loss against the segment input state.
-- Shallow Water: conservative `[h,hu,hv]` mass and momentum residuals on `[-2.5,2.5]^2`, zero-order Neumann boundary loss, IC loss against the input state.
-- Heat: `u_t - alpha Delta u`, periodic boundary loss by default with homogeneous Neumann available through metadata `bc="neumann"`, IC loss against `u0`.
-- Wave: first-order system residual `[u_t-v, v_t-c^2 Delta u]`, periodic boundary loss by default, IC loss against `[u0,v0]`.
-- Advection-Diffusion: `u_t + b_x u_x + b_y u_y - kappa Delta u`, periodic boundary loss and IC loss against `u0`.
-- Steady Heat Conduction: nonlinear residual `-div(lambda(u) grad u)-f` with `lambda(u)=1+0.05(u-298)`, bottom Dirichlet `u_D` plus zero-Neumann top/left/right boundary loss.
-
-Time-dependent residuals use `mode="full_trajectory"` when `pred` is a trajectory tensor such as `[N,C,T,H,W]`. If a task only predicts the final state, the code builds a two-frame segment from the input/background state and the prediction and returns `mode="two_level"`. This is useful for optimization and diagnostics, but it is not equivalent to a full multi-step dynamics residual.
-
-4D-Var and VIVID separately record `assimilation_mode`: `full_trajectory` for NS/RD/SWE trajectory-state assimilation when full trajectories are loaded, `two_level_surrogate` for heat/wave/advection/Burgers endpoint-style dynamics, and `state_surrogate` for non-trajectory state reconstruction. `two_level_surrogate` must not be reported as full 4D-Var.
-
-PINN-Sparse, PC-BNN, PDE-Opt, 4D-Var, and VIVID use structured physics loss by default with `physics_loss_mode: "total"`. Supported weights are `lambda_int` or backward-compatible `lambda_pde`, plus `lambda_bc` and `lambda_ic`. If only `lambda_pde` is present, all three physics terms use that same scale.
-
-For unknown PDEs or genuinely missing source/solution metadata, residual calls return `nan` through metric wrappers with an explicit warning instead of silently computing an invalid quantity.
-
-## Running Smoke Tests
-
-Use the requested conda environment:
+## Matrix Dump
 
 ```bash
-conda run -n FM4PDEbaseline pytest
-conda run -n FM4PDEbaseline bash scripts/baselines/smoke_all.sh
+python -m baselines.experiment_matrix --dump-matrix --output outputs/baselines/capability_matrix
 ```
 
-The smoke script uses deterministic synthetic data by default so it is fast and does not load multi-GB MAT/HDF5 files.
+This is the source for appendix capability tables and skip auditing.
 
-Single command examples:
+## Native Scope Summary
+
+- FNO: native full-grid supervised forward operator learning. Supervised inverse is adapted supplement; sparse tasks are unsupported unless explicitly named as masked-FNO adaptation.
+- DeepONet: native supervised full forward operator learning. Full inverse and sensor-branch reconstruction are adapted supplement.
+- iFNO: native full forward and full inverse operator learning only. Sparse reconstruction/inverse is unsupported.
+- RecFNO: native sparse-sensor global field reconstruction with mask/Voronoi embedding. Full operators and sparse inverse are not native.
+- Senseiver: native sparse/irregular reconstruction and time-varying sensor reconstruction when trajectory observations are present. Full operators and sparse inverse are not native.
+- VoronoiCNN: native sparse reconstruction through Voronoi tessellation plus CNN/UNet. PyTorch architecture reuse is labeled `official_architecture_reimplementation`.
+- PINN-Sparse: native per-instance sparse observation fitting. Static sparse inverse is enabled for `poisson`, `helmholtz`, `darcy`, and `steady_heat_conduction` through local PDE objectives.
+- PC-BNN: official assumptions are narrow; generic SVGD particles are adapted supplement unless the target PDE/channel assumptions match.
+- PDE-Opt: canonical per-instance PDE-constrained optimization; supports sparse reconstruction and static sparse inverse.
+- 4D-Var: main-table only for time-varying DA with full trajectory or multi-time observations. Endpoint-only variants are surrogate supplement.
+- VIVID: main-table only for time-varying DA with a trained/loaded inverse observation operator and variational refinement. Voronoi initialization plus refinement without inverse-operator training is VIVID-style supplement.
+
+## Data Interface Recording
+
+Each run records raw/native input shape, target shape, observation and predicted field names, scalar PDE parameter availability, whether scalar parameters are part of the model input, whether full trajectory data is loaded, and the effective sensor mode.
+
+Supervised full-operator scripts materialize future-PDE scalar parameters by default unless `SCALAR_PARAM_MODE` is explicitly set. Per-instance physics methods may read scalar parameters from metadata and record that fact.
+
+## Smoke Tests
+
+Smoke/debug runs can use local adapted fallbacks:
 
 ```bash
-conda run -n FM4PDEbaseline python -m baselines.run --baseline fno --pde darcy --task forward --dry-run --synthetic-data
-conda run -n FM4PDEbaseline python -m baselines.run --baseline recfno --pde poisson --task sparse_solution --num-sensors 500 --dry-run --synthetic-data
-conda run -n FM4PDEbaseline python -m baselines.run --baseline senseiver --pde shallow_water --task sparse_solution --num-sensors 500 --dry-run --synthetic-data
+bash scripts/baselines/smoke_all.sh
+python -m pytest -q
 ```
 
-To dry-run against real small test files, omit `--synthetic-data` and use `--prefer-test`:
-
-```bash
-conda run -n FM4PDEbaseline python -m baselines.run --baseline fno --pde darcy --task forward --data-root /home/tat512/C01Python/PDEdata --prefer-test --dry-run
-```
-
-## Running Main Experiments
-
-Scripts:
-
-- `scripts/baselines/run_paper_sparse_reconstruction.sh`
-- `scripts/baselines/run_paper_full_operator.sh`
-- `scripts/baselines/run_paper_full_inverse.sh`
-- `scripts/baselines/run_paper_sparse_inverse.sh`
-- `scripts/baselines/run_paper_physics_da.sh`
-- `scripts/baselines/run_paper_all.sh`
-- `scripts/baselines/aggregate_paper_results.sh`
-
-Environment variables can override defaults:
-
-```bash
-DATA_ROOT=/home/tat512/C01Python/PDEdata TRAIN_SIZE=1024 BATCH_SIZE=8 EPOCHS=5 \
-conda run -n FM4PDEbaseline bash scripts/baselines/run_sparse_main.sh
-```
-
-For a conservative formal plan before launching the full grid:
-
-```bash
-DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_plan_lightweight.sh
-```
-
-Paper matrix scripts accept `PDES`, `BASELINES`, `SENSOR_COUNTS`, `SENSOR_MODES`, and `NOISE_LEVELS` overrides. `run_paper_all.sh` includes inverse scripts by default; set `RUN_INVERSE=0` to disable them. Unsupported baseline/PDE combinations are skipped and recorded in `skipped_combinations.jsonl`.
-
-Results are written to JSONL and CSV with fields:
-
-`pde`, `task`, `baseline`, `seed`, `train_size`, `train_requested_size`, `effective_train_size`, `train_size_loaded_for_fit`, `train_size_loaded_for_spec`, `train_size_loaded_in_memory`, `data_loading_mode`, `load_full_trajectory`, `loaded_full_trajectory`, `val_split_source`, `num_sensors`, `requested_sensor_mode`, `effective_sensor_mode`, `sensor_mode`, `time_varying_sensor_valid`, `noise_level`, `scalar_param_mode_requested`, `scalar_param_mode_effective`, `scalar_params_used_as_input`, `relative_l2_input_or_coeff`, `relative_l2_solution`, `obs_mse`, `obs_mse_clean`, `obs_mse_noisy`, `pde_residual`, `bc_residual`, `ic_residual`, `physics_loss`, `metric_granularity`, `residual_mode`, `residual_mode_counts`, `assimilation_mode_counts`, `train_time`, `inference_time`, `inference_optimization_time`, `num_params`, `config_path`, `checkpoint_path`, `commit_hash`, `mask_id`.
-
-## Adding New PDE Adapters
-
-1. Add a loader function in `baselines/common/data_adapter.py` returning:
-   `{"full_tensor": tensor, "channel_names": [...], "metadata": {...}}`.
-2. Register it in `_register_defaults()` with `PDESpec`.
-3. Preserve raw trajectory dimensions in `full_tensor` instead of collapsing time.
-4. Define `input_indices`, `target_indices`, and task split logic in `_split_task()` if the default is insufficient.
-5. Add a tiny native-format fixture in `tests/conftest.py`.
-6. Update this README's channel table and `BASELINE_SOURCES.md` if a method has PDE-specific limitations.
+In this environment, invoke tests with `python -m pytest` so the active conda Python is used.

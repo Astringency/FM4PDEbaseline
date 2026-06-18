@@ -14,8 +14,80 @@ ROOT = Path(__file__).resolve().parents[2]
 OFFICIAL_ROOT = ROOT / "offical"
 
 
+OFFICIAL_SOURCE_INFO: dict[str, dict[str, str]] = {
+    "neuraloperator": {
+        "official_repo": "https://github.com/neuraloperator/neuraloperator",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "neuraloperator" / "neuralop" / "models"),
+    },
+    "deepxde": {
+        "official_repo": "https://github.com/lululxvi/deepxde",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "deepxde" / "deepxde"),
+    },
+    "recfno": {
+        "official_repo": "https://github.com/zhaoxiaoyu1995/recfno",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "RecFNO" / "model"),
+    },
+    "senseiver": {
+        "official_repo": "https://github.com/OrchardLANL/Senseiver",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "Senseiver" / "model.py"),
+    },
+    "pc_bnn": {
+        "official_repo": "https://github.com/Jianxun-Wang/Physics-constrained-Bayesian-deep-learning",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "PC-BNN" / "code"),
+    },
+    "ifno": {
+        "official_repo": "https://github.com/BayesianAIGroup/iFNO",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "iFNO"),
+    },
+    "vivid": {
+        "official_repo": "https://github.com/DL-WG/VIVID",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "VIVID"),
+    },
+    "invobs": {
+        "official_repo": "https://github.com/googleinterns/invobs-data-assimilation",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "invobs-data-assimilation"),
+    },
+    "voronoi_cnn": {
+        "official_repo": "https://github.com/kfukami/Voronoi-CNN",
+        "official_commit_or_version": "vendored",
+        "official_import_path": str(OFFICIAL_ROOT / "Voronoi-CNN"),
+    },
+}
+
+
 class OfficialImportError(ImportError):
     """Raised when a vendored official implementation is unavailable."""
+
+
+def official_source_info(source: str) -> dict[str, str]:
+    return dict(OFFICIAL_SOURCE_INFO.get(str(source), {}))
+
+
+def requested_implementation_mode(config: dict[str, Any]) -> str:
+    if "implementation_mode" in config:
+        return str(config.get("implementation_mode") or "").lower()
+    backend = str(config.get("official_backend", "auto")).lower()
+    if backend in {"local", "none", "adapted"}:
+        return "adapted"
+    if backend in {"official", "neuraloperator", "deepxde", "recfno", "senseiver", "pc_bnn", "ifno"}:
+        return "official"
+    return backend or "auto"
+
+
+def allows_adapted_fallback(config: dict[str, Any]) -> bool:
+    mode = requested_implementation_mode(config)
+    if mode in {"official", "official_or_skip", "canonical_math", "official_architecture"}:
+        return False
+    backend = str(config.get("official_backend", "auto")).lower()
+    return backend not in {"official"}
 
 
 @contextmanager
@@ -112,3 +184,17 @@ def get_pc_bnn_net_class() -> type[Any]:
             return module.Net
         except Exception as exc:
             raise OfficialImportError(str(exc)) from exc
+
+
+def get_ifno_official_status() -> None:
+    """Validate whether vendored iFNO can be imported as a library component.
+
+    The current upstream snapshot is organized as executable scripts that parse
+    command-line globals at import time. The wrapper therefore refuses to claim
+    official code reuse until a stable importable module adapter is added.
+    """
+
+    path = OFFICIAL_ROOT / "iFNO"
+    if not path.exists():
+        raise OfficialImportError(f"iFNO source tree not found: {path}")
+    raise OfficialImportError("vendored iFNO scripts are not safely importable model components")

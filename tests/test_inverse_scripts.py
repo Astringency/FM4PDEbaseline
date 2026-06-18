@@ -26,7 +26,7 @@ def test_sparse_inverse_unsupported_combo_records_skip(tmp_path):
         experiment_matrix.main(
             [
                 "--baseline",
-                "pde_opt",
+                "fno",
                 "--pde",
                 "poisson",
                 "--task",
@@ -37,4 +37,5 @@ def test_sparse_inverse_unsupported_combo_records_skip(tmp_path):
         )
     row = json.loads(skipped.read_text(encoding="utf-8").strip())
     assert row["task"] == "sparse_inverse"
-    assert "forward solve" in row["reason"]
+    assert row["capability_status"] == "unsupported"
+    assert "sparse-sensor" in row["reason"]

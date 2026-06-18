@@ -36,7 +36,8 @@ def test_sanity_matrix_generation_unique_run_ids_and_skips(tmp_path: Path):
     run_ids = [row["run_id"] for row in rows]
     assert len(run_ids) == len(set(run_ids))
     skipped = _read_jsonl(out / "skipped_combinations.jsonl")
-    assert any(row["task"] == "sparse_inverse" and row["baseline"] == "pde_opt" for row in skipped)
+    assert all(not (row["task"] == "sparse_inverse" and row["baseline"] == "pde_opt") for row in skipped)
+    assert any(row["task"] == "sparse_inverse" and row["baseline"] == "pde_opt" for row in rows)
 
 
 def test_future_supervised_defaults_to_materialize(tmp_path: Path):
@@ -62,8 +63,8 @@ def test_future_supervised_defaults_to_materialize(tmp_path: Path):
 
 
 def test_sparse_inverse_per_instance_and_time_varying_unsupported_are_skipped():
-    assert "forward solve" in compatibility_reason("pde_opt", "poisson", "sparse_inverse")
-    assert "5D trajectory" in compatibility_reason(
+    assert compatibility_reason("pde_opt", "poisson", "sparse_inverse") == ""
+    assert "time-varying" in compatibility_reason(
         "fno",
         "reaction_diffusion",
         "sparse_solution",
