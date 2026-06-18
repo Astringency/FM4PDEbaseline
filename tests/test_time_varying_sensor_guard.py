@@ -21,3 +21,14 @@ def test_time_varying_sensor_full_trajectory_target_has_time_masks():
     assert batch.mask.ndim == 4
     assert batch.metadata["time_varying_sensor_valid"] is True
     assert any(not torch.equal(batch.mask[:, t], batch.mask[:, 0]) for t in range(1, batch.mask.shape[1]))
+
+
+def test_burgers_time_varying_sensor_keeps_tx_trajectory():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("burger", n=2, resolution=8)
+    batch = registry.make_task(raw, "burger", "sparse_solution", num_sensors=4, sensor_mode="time_varying", experiment_mode="paper")
+    assert batch.target_fields.ndim == 4
+    assert tuple(batch.target_fields.shape[2:]) == (8, 8)
+    assert batch.mask.ndim == 3
+    assert batch.metadata["time_varying_sensor_valid"] is True
+    assert any(not torch.equal(batch.mask[:, t], batch.mask[:, 0]) for t in range(1, batch.mask.shape[1]))

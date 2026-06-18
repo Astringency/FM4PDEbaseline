@@ -97,6 +97,8 @@ class Capability:
     citation_key: str
     source_key: str
     notes_for_paper: str
+    official_architecture_allowed: bool
+    eligible_implementation_modes: tuple[str, ...]
     paper_table_eligible: bool
 
     @property
@@ -135,6 +137,7 @@ def resolve_capability(
     *,
     load_full_trajectory: bool | None = None,
     train_inverse_operator: bool | None = None,
+    uses_official_inverse_observation_operator: bool | None = None,
 ) -> Capability:
     baseline = str(baseline).lower()
     pde = str(pde).lower()
@@ -179,6 +182,7 @@ def resolve_capability(
             family,
             load_full_trajectory=load_full_trajectory,
             train_inverse_operator=train_inverse_operator,
+            uses_official_inverse_observation_operator=uses_official_inverse_observation_operator,
         )
 
     if baseline == "fno":
@@ -379,8 +383,9 @@ def resolve_capability(
                 "official_adapter",
                 "official",
                 family,
-                "VoronoiCNN is native for sparse-sensor global field reconstruction via Voronoi tessellation and CNN/UNet",
-                "If original Keras scripts are not importable, label PyTorch architecture reuse as official_architecture_reimplementation.",
+                "VoronoiCNN is native for sparse-sensor global field reconstruction via Voronoi tessellation and the published CNN stack",
+                "If original Keras scripts are not importable, label the PyTorch Conv2D architecture reimplementation as official_architecture_reimplementation.",
+                official_architecture_allowed=True,
             )
         if family == "sparse_inverse":
             return _cap(
@@ -565,16 +570,32 @@ def resolve_capability(
     return _cap(baseline, pde, task, sensor_mode, "unsupported", "unsupported", family, "unhandled baseline/task combination")
 
 
-def paper_table_eligible(capability: Capability, implementation_mode_effective: str = "") -> bool:
-    mode = str(implementation_mode_effective or "").lower()
+def paper_table_eligible(
+    capability: Capability,
+    implementation_mode_effective: str = "",
+    backend_info: dict[str, Any] | None = None,
+) -> bool:
+    backend_info = backend_info or {}
+    mode = str(backend_info.get("implementation_mode_effective", implementation_mode_effective) or "").lower()
     if not capability.paper_table_eligible:
         return False
     if capability.support_status not in {"native", "official_adapter"}:
         return False
+    if bool(backend_info.get("fallback_used", False)):
+        return False
+    if mode not in set(capability.eligible_implementation_modes):
+        return False
+    adapter_status = str(backend_info.get("adapter_status", "") or "").lower()
+    if any(token in adapter_status for token in ("_style", "fallback", "local_adapted", "surrogate", "adapted")):
+        return False
     if capability.implementation_required == "official":
-        return mode in {"official", "official_architecture", "canonical_math"}
+        if mode == "official":
+            return bool(backend_info.get("official_import_success", False))
+        if mode == "official_architecture":
+            return bool(capability.official_architecture_allowed)
+        return False
     if capability.implementation_required == "canonical_math":
-        return mode in {"canonical_math", "official", "official_architecture"}
+        return mode == "canonical_math"
     return False
 
 
@@ -602,9 +623,10 @@ def iter_capability_matrix(
                             task,
                             "" if sensor_mode == "none" else sensor_mode,
                             "time_varying" if sensor_mode == "time_varying" else "",
-                            load_full_trajectory=load_full_trajectory,
-                            train_inverse_operator=True,
-                        )
+            load_full_trajectory=load_full_trajectory,
+            train_inverse_operator=True,
+            uses_official_inverse_observation_operator=False,
+        )
                     )
     return rows
 
@@ -618,7 +640,7 @@ def write_capability_matrix(output: str | Path, capabilities: Iterable[Capabilit
     json_path = output / "baseline_capability_matrix.json"
     if rows:
         with csv_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()), lineterminator="\n")
             writer.writeheader()
             writer.writerows(rows)
     else:
@@ -636,6 +658,7 @@ def _time_varying_capability(
     *,
     load_full_trajectory: bool | None,
     train_inverse_operator: bool | None,
+    uses_official_inverse_observation_operator: bool | None,
 ) -> Capability:
     if task not in {"sparse_solution", "sparse_reconstruction"}:
         return _cap(
@@ -710,7 +733,7 @@ def _time_varying_capability(
             "Requires observation, background, and model-dynamics residual over a loaded trajectory.",
         )
     if baseline == "vivid":
-        if train_inverse_operator is False:
+        if not bool(uses_official_inverse_observation_operator):
             return _cap(
                 baseline,
                 pde,
@@ -719,8 +742,8 @@ def _time_varying_capability(
                 "adapted",
                 "adapted_allowed",
                 family,
-                "VIVID-style refinement without a trained inverse observation operator is not native VIVID",
-                "Train or load inverse observation operator for main table; otherwise supplement only.",
+                "VIVID-style refinement without an official inverse-observation operator is not native VIVID",
+                "Only rows that actually import/use official VIVID or invobs inverse-observation components can enter the main table.",
                 eligible=False,
             )
         return _cap(
@@ -758,6 +781,8 @@ def _cap(
     notes_for_paper: str = "",
     *,
     eligible: bool | None = None,
+    official_architecture_allowed: bool = False,
+    eligible_implementation_modes: Iterable[str] | None = None,
 ) -> Capability:
     if support_status not in SUPPORT_STATUSES:
         raise ValueError(f"Invalid support_status {support_status!r}")
@@ -765,6 +790,17 @@ def _cap(
         raise ValueError(f"Invalid implementation_required {implementation_required!r}")
     if eligible is None:
         eligible = support_status in {"native", "official_adapter"} and implementation_required in {"official", "canonical_math"}
+    if eligible_implementation_modes is None:
+        if not eligible:
+            modes: tuple[str, ...] = ()
+        elif implementation_required == "official":
+            modes = ("official", "official_architecture") if official_architecture_allowed else ("official",)
+        elif implementation_required == "canonical_math":
+            modes = ("canonical_math",)
+        else:
+            modes = ()
+    else:
+        modes = tuple(str(mode).lower() for mode in eligible_implementation_modes)
     return Capability(
         baseline=baseline,
         pde=pde,
@@ -777,6 +813,8 @@ def _cap(
         citation_key=CITATION_KEYS.get(baseline, ""),
         source_key=SOURCE_KEYS.get(baseline, ""),
         notes_for_paper=notes_for_paper,
+        official_architecture_allowed=bool(official_architecture_allowed),
+        eligible_implementation_modes=modes,
         paper_table_eligible=bool(eligible),
     )
 

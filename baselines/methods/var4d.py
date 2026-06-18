@@ -95,6 +95,21 @@ def _initial_trajectory(batch: PDEBatch):
             return state[:, :, 1:].reshape(state.shape[0], -1, state.shape[-2], state.shape[-1])
 
         return state0, output_view, background, {**meta, "final_time": float(batch.metadata.get("final_time", 1.0))}
+    if pde == "burger" and full.ndim == 4:
+        initial = full[:, :, :1].to(guess.device, guess.dtype)
+        if guess.ndim == 4 and tuple(guess.shape[-2:]) == tuple(full.shape[-2:]):
+            state0 = guess[:, :1].clone()
+        else:
+            final_guess = guess[:, :1] if guess.ndim == 4 else full[:, :, -1:].to(guess.device, guess.dtype)
+            alpha = torch.linspace(0.0, 1.0, full.shape[-2], device=guess.device, dtype=guess.dtype).view(1, 1, full.shape[-2], 1)
+            state0 = initial * (1.0 - alpha) + final_guess[..., -1:, :] * alpha
+        state0[:, :, :1] = initial
+        background = state0.detach().clone()
+
+        def output_view(state):
+            return state
+
+        return state0, output_view, background, {**meta, "final_time": float(batch.metadata.get("final_time", 1.0)), "input_time_index": 0}
     if pde in {"reaction_diffusion", "shallow_water"} and full.ndim == 5:
         input_idx = int(batch.metadata.get("input_time_index", 0))
         initial = full[:, :, input_idx].to(guess.device, guess.dtype)
@@ -123,12 +138,16 @@ def _initial_trajectory(batch: PDEBatch):
 def _background_view(state: torch.Tensor, batch: PDEBatch) -> torch.Tensor:
     if state.ndim == 5:
         return state[:, :, 0]
+    if batch.pde_name.lower() == "burger" and state.ndim == 4 and batch.target_fields.ndim == 4:
+        return state
     return state[:, : batch.input_fields.shape[1]]
 
 
 def _assimilation_mode(batch: PDEBatch) -> str:
     pde = batch.pde_name.lower()
     if pde in {"nsnonbounded", "reaction_diffusion", "shallow_water"} and batch.full_tensor.ndim == 5:
+        return "full_trajectory"
+    if pde == "burger" and batch.full_tensor.ndim == 4 and batch.full_tensor.shape[-2] > 2:
         return "full_trajectory"
     if pde in {"heat", "wave", "advection_diffusion", "burger"} or bool(batch.metadata.get("time_dependent", False)):
         return "two_level_surrogate"

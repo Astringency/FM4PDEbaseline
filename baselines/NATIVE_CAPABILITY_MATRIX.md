@@ -9,12 +9,12 @@
 | iFNO | native | native | unsupported | unsupported | unsupported | official required | Vendored scripts are not safely importable yet; official paper mode skips/fails instead of using simplified local coupling. |
 | RecFNO | unsupported | unsupported | official_adapter | adapted | unsupported | official required | Native for mask/Voronoi sparse field reconstruction. |
 | Senseiver | unsupported | unsupported | official_adapter | adapted | official_adapter | official required | Time-varying DA requires trajectory observations and query coordinates. |
-| VoronoiCNN | unsupported | unsupported | official_adapter | adapted | unsupported | official architecture allowed | PyTorch architecture reuse is labeled `official_architecture_reimplementation`. |
+| VoronoiCNN | unsupported | unsupported | official_adapter | adapted | unsupported | official architecture allowed | Main path is a PyTorch reimplementation of the published Voronoi-CNN Conv2D stack; RecFNO UNet surrogate is supplement-only. |
 | PINN-Sparse | unsupported | unsupported | official_adapter | official_adapter for static PDEs | unsupported | DeepXDE architecture preferred; local PDE objective disclosed | Static sparse inverse enabled for Poisson, Helmholtz, Darcy, and steady heat conduction. |
 | PC-BNN | unsupported | unsupported | adapted by default | unsupported | unsupported | official assumptions required | Generic SVGD particles are supplement-only unless official channel/PDE assumptions match. |
 | PDE-Opt | unsupported | unsupported | native | native for static PDEs | unsupported | canonical_math | No official code claim; canonical PDE-constrained optimization. |
 | 4D-Var | unsupported | unsupported | adapted for endpoint/time-dependent surrogate | unsupported | native | canonical_math | Main only for full trajectory or multi-time observations. |
-| VIVID | unsupported | unsupported | adapted for VIVID-style surrogate | unsupported | official_adapter | official/invobs structure required | Main only with trained/loaded inverse observation operator and trajectory observations. |
+| VIVID | unsupported | unsupported | adapted for VIVID-style surrogate | unsupported | conditional official_adapter | official VIVID/invobs import required | Current vendored snapshots lack a stable importable adapter, so VIVID-style is supplement and native VIVID skips under `official_or_skip`. |
 
 Static sparse inverse PDEs: `poisson`, `helmholtz`, `darcy`, `steady_heat_conduction`.
 

@@ -198,3 +198,21 @@ def get_ifno_official_status() -> None:
     if not path.exists():
         raise OfficialImportError(f"iFNO source tree not found: {path}")
     raise OfficialImportError("vendored iFNO scripts are not safely importable model components")
+
+
+def get_vivid_official_status() -> None:
+    """Validate whether vendored VIVID/invobs can be used as official components.
+
+    The vendored VIVID snapshot is organized as executable Keras scripts and the
+    invobs repository needs a dataset-specific training/config pipeline. Until a
+    stable importable inverse-observation adapter is added, the local refinement
+    path must remain VIVID-style supplement or be skipped in paper official mode.
+    """
+
+    vivid = OFFICIAL_ROOT / "VIVID"
+    invobs = OFFICIAL_ROOT / "invobs-data-assimilation"
+    if not vivid.exists():
+        raise OfficialImportError(f"VIVID source tree not found: {vivid}")
+    if not invobs.exists():
+        raise OfficialImportError(f"invobs source tree not found: {invobs}")
+    raise OfficialImportError("vendored VIVID/invobs is not exposed as a stable importable inverse-observation adapter")

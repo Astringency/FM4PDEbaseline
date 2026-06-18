@@ -33,7 +33,11 @@ method:
   implementation_mode: official_or_skip
 ```
 
-This means an official-capability baseline must import official code/components or the run fails/skips. To run local debug implementations, use smoke/debug mode or explicitly set `implementation_mode: adapted`; those rows are marked supplement-only.
+This means an official-capability baseline must import official code/components or be skipped without stopping the full paper script. To run local debug implementations, use smoke/debug mode or explicitly set `implementation_mode: adapted`; those rows are marked supplement-only.
+
+`implementation_mode: official` is strict: if official code/components cannot be imported, the run raises and the command fails. `implementation_mode: official_or_skip` is the paper-script default: predictable official dependency/import failures are written to `skipped_combinations.jsonl` with implementation and capability metadata, and the shell script continues to later combinations. `implementation_mode: adapted` permits local implementations only for smoke/debug or supplement rows; it never sets `paper_table_eligible=true`.
+
+`implementation_mode: official_architecture` is reserved for methods whose capability explicitly permits architecture reimplementation. At present this is used for VoronoiCNN's disclosed PyTorch reimplementation of the published Keras Conv2D stack. It is not a claim of official binary/code reuse.
 
 Legacy `official_backend` is still accepted for compatibility, but new paper configs should use `implementation_mode`.
 
@@ -56,7 +60,7 @@ DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
   bash scripts/baselines/run_paper_all_native.sh
 ```
 
-`run_paper_all.sh` is retained as a compatibility entry point and delegates to `run_paper_all_native.sh`. Older per-task scripts remain available for supplement/debug runs, but adapted rows are not included in the main aggregate table.
+`run_paper_all.sh` is retained as a compatibility entry point and delegates to `run_paper_all_native.sh`. Older per-task scripts remain available for supplement/debug runs, but adapted rows are not included in the main aggregate table. VIVID-style time-varying DA is available through `run_paper_time_varying_da_supplement.sh`; it is not part of the native time-varying DA script unless a real official VIVID/invobs adapter is added.
 
 ## Aggregation
 
@@ -68,8 +72,8 @@ OUT=outputs/baselines/paper bash scripts/baselines/aggregate_paper_results.sh
 
 The aggregator writes:
 
-- `summary_main.csv/json`: only `paper_table_eligible=true`.
-- `summary_supplement.csv/json`: adapted, surrogate, local, or fallback rows.
+- `summary_main.csv/json`: rows that pass both `paper_table_eligible=true` and aggregator rechecks for allowed implementation mode, no fallback, clean adapter status, and official import success when official code is required.
+- `summary_supplement.csv/json`: adapted, surrogate, local, style, fallback, or suspicious rows. Rows that claimed main eligibility but fail the recheck are downgraded with `aggregation_warning`.
 - `skipped_combinations.csv/json`: skipped paper combinations.
 - `baseline_capability_matrix.csv/json`: full registry dump.
 - `latex_table.csv/tex`: generated only from the main summary.
@@ -89,12 +93,14 @@ This is the source for appendix capability tables and skip auditing.
 - iFNO: native full forward and full inverse operator learning only. Sparse reconstruction/inverse is unsupported.
 - RecFNO: native sparse-sensor global field reconstruction with mask/Voronoi embedding. Full operators and sparse inverse are not native.
 - Senseiver: native sparse/irregular reconstruction and time-varying sensor reconstruction when trajectory observations are present. Full operators and sparse inverse are not native.
-- VoronoiCNN: native sparse reconstruction through Voronoi tessellation plus CNN/UNet. PyTorch architecture reuse is labeled `official_architecture_reimplementation`.
+- VoronoiCNN: native sparse reconstruction through Voronoi tessellation plus CNN. PyTorch reimplementation of the published Voronoi-CNN Conv2D stack is labeled `official_architecture_reimplementation`. RecFNO UNet used as a VoronoiCNN surrogate is an adaptation and cannot enter the main table.
 - PINN-Sparse: native per-instance sparse observation fitting. Static sparse inverse is enabled for `poisson`, `helmholtz`, `darcy`, and `steady_heat_conduction` through local PDE objectives.
 - PC-BNN: official assumptions are narrow; generic SVGD particles are adapted supplement unless the target PDE/channel assumptions match.
 - PDE-Opt: canonical per-instance PDE-constrained optimization; supports sparse reconstruction and static sparse inverse.
 - 4D-Var: main-table only for time-varying DA with full trajectory or multi-time observations. Endpoint-only variants are surrogate supplement.
-- VIVID: main-table only for time-varying DA with a trained/loaded inverse observation operator and variational refinement. Voronoi initialization plus refinement without inverse-operator training is VIVID-style supplement.
+- VIVID: main-table only for time-varying DA with an actually imported/used official VIVID or invobs inverse-observation component plus variational refinement. Locally trained Voronoi initialization plus refinement is `VIVID-style` supplement, even when `train_inverse_operator=true`.
+
+Simplified iFNO coupling blocks, compact/local FNO, VIVID-style refinement, and RecFNO-UNet-as-VoronoiCNN are never main-table baselines.
 
 ## Data Interface Recording
 

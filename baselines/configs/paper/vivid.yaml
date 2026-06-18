@@ -1,5 +1,6 @@
 method:
   train_inverse_operator: true
+  uses_official_inverse_observation_operator: false
   implementation_mode: official_or_skip
   official_backend: auto
   epochs: 200

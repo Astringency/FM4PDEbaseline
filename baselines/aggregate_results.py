@@ -68,8 +68,7 @@ def main(argv: list[str] | None = None) -> None:
     for path in paths:
         rows.extend(_read_jsonl(path))
     summary_rows = aggregate_rows(rows)
-    main_rows = [row for row in rows if _truthy(row.get("paper_table_eligible", False))]
-    supplement_rows = [row for row in rows if not _truthy(row.get("paper_table_eligible", False))]
+    main_rows, supplement_rows = partition_rows_for_tables(rows)
     summary_main = aggregate_rows(main_rows)
     summary_supplement = aggregate_rows(supplement_rows)
     skipped_rows = _read_skipped_for_inputs(args.inputs)
@@ -133,13 +132,85 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for suffix, value in stats.items():
                 result[f"{metric}_{suffix}"] = value
         result["aggregation_mode"] = _aggregation_mode(metric_modes)
-        result["aggregation_warning"] = (
+        row_warnings = sorted({str(item.get("aggregation_warning", "")) for item in items if item.get("aggregation_warning")})
+        metric_warning = (
             "summary rows missing metric std/n; aggregated unweighted run-level means"
             if result["aggregation_mode"] == "run_level_summary_only_unweighted"
             else ""
         )
+        warnings = [w for w in [metric_warning, *row_warnings] if w]
+        result["aggregation_warning"] = "; ".join(warnings)
         out.append(result)
     return out
+
+
+def partition_rows_for_tables(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    main: list[dict[str, Any]] = []
+    supplement: list[dict[str, Any]] = []
+    for row in rows:
+        issue = _main_eligibility_issue(row)
+        if not issue:
+            main.append(row)
+            continue
+        downgraded = dict(row)
+        if _truthy(row.get("paper_table_eligible", False)):
+            downgraded["paper_table_eligible"] = False
+            downgraded["aggregation_warning"] = f"downgraded_to_supplement: {issue}"
+        supplement.append(downgraded)
+    return main, supplement
+
+
+def _main_eligibility_issue(row: dict[str, Any]) -> str:
+    if not _truthy(row.get("paper_table_eligible", False)):
+        return "paper_table_eligible=false"
+    if _truthy(row.get("fallback_used", False)):
+        return "fallback_used=true"
+    status = str(row.get("capability_status", row.get("support_status", ""))).lower()
+    if status not in {"native", "official_adapter"}:
+        return f"capability_status={status or 'missing'}"
+    adapter_status = str(row.get("adapter_status", "") or "").lower()
+    if any(token in adapter_status for token in ("fallback", "local", "surrogate", "style", "adapted")):
+        return f"adapter_status={adapter_status}"
+    mode = str(row.get("implementation_mode_effective", "") or "").lower()
+    allowed = _eligible_modes_from_row(row)
+    if mode not in allowed:
+        return f"implementation_mode_effective={mode or 'missing'} not in {sorted(allowed)}"
+    required = str(row.get("implementation_required", "") or "").lower()
+    if required == "official" and mode == "official" and not _truthy(row.get("official_import_success", False)):
+        return "official_import_success=false"
+    if required == "canonical_math" and mode != "canonical_math":
+        return f"canonical_math required, got {mode or 'missing'}"
+    if required == "adapted_allowed":
+        return "adapted_allowed is supplement-only"
+    return ""
+
+
+def _eligible_modes_from_row(row: dict[str, Any]) -> set[str]:
+    raw = row.get("eligible_implementation_modes", "")
+    if isinstance(raw, (list, tuple, set)):
+        modes = {str(x).lower() for x in raw}
+        if modes:
+            return modes
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                modes = {str(x).lower() for x in parsed}
+                if modes:
+                    return modes
+        except Exception:
+            modes = {part.strip().lower() for part in raw.replace(";", ",").split(",") if part.strip()}
+            if modes:
+                return modes
+    required = str(row.get("implementation_required", "") or "").lower()
+    if required == "canonical_math":
+        return {"canonical_math"}
+    if required == "official":
+        modes = {"official"}
+        if _truthy(row.get("official_architecture_allowed", False)):
+            modes.add("official_architecture")
+        return modes
+    return set()
 
 
 def _group_keys_for_item(row: dict[str, Any]) -> list[str]:

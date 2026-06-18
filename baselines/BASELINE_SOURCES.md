@@ -35,7 +35,7 @@ This file is the source-key reference used by `baselines/capabilities.py`. Do no
 - Wrapper: `baselines/methods/ifno.py`.
 - Standard capability: full forward and full inverse operator learning.
 - Enabled main tasks: `forward` and `inverse` only when a reliable official/importable iFNO adapter is available.
-- Current status: vendored scripts parse command-line globals at import time, so paper official mode fails/skips rather than using the simplified local coupling block.
+- Current status: vendored scripts parse command-line globals at import time, so `implementation_mode: official` hard-fails and `implementation_mode: official_or_skip` writes a skip row rather than using the simplified local coupling block.
 - Unsupported main tasks: sparse reconstruction and sparse inverse.
 
 ## RecFNO
@@ -69,9 +69,10 @@ This file is the source-key reference used by `baselines/capabilities.py`. Do no
 - Official code: `https://github.com/kfukami/Voronoi-CNN`.
 - Vendored path: `offical/Voronoi-CNN`.
 - Wrapper: `baselines/methods/voronoicnn.py`.
-- Standard capability: sparse sensor global field reconstruction from Voronoi-filled fields using CNN/UNet.
+- Standard capability: sparse sensor global field reconstruction from Voronoi-filled fields using the published CNN stack.
 - Enabled main tasks: sparse reconstruction.
-- Implementation note: if original Keras scripts cannot be imported directly, PyTorch architecture reuse is labeled `official_architecture_reimplementation`, not official binary/code reuse.
+- Implementation note: the original Keras/TensorFlow scripts are not imported as a library. The main-table path uses a PyTorch reimplementation of the published seven-layer Conv2D architecture and is labeled `official_architecture_reimplementation`, not official binary/code reuse.
+- Not official: using RecFNO's UNet as a VoronoiCNN surrogate is labeled `recfno_unet_as_voronoi_cnn_adaptation` and is supplement-only.
 - Supplement only: supervised sparse inverse target-change adaptation.
 - Unsupported main tasks: full forward and full inverse.
 
@@ -126,6 +127,7 @@ This file is the source-key reference used by `baselines/capabilities.py`. Do no
 - Vendored paths: `offical/VIVID`, `offical/invobs-data-assimilation`.
 - Wrapper: `baselines/methods/vivid.py`.
 - Standard capability: learned inverse-observation initialization plus variational refinement for sparse, unstructured, time-varying sensors.
-- Enabled main tasks: time-varying DA only when a trained/loaded inverse observation operator is used and full trajectory/multi-time observations are available.
-- Supplement only: Voronoi initialization plus variational refinement without inverse-operator training, labeled `VIVID-style`.
+- Enabled main tasks: time-varying DA only when an official VIVID/invobs inverse-observation component is actually imported/used and full trajectory/multi-time observations are available.
+- Current status: the vendored VIVID/invobs snapshots are not exposed through a stable importable adapter, so paper `official_or_skip` skips native VIVID by default.
+- Supplement only: locally trained Voronoi initialization plus variational refinement, labeled `VIVID-style`, including runs with `train_inverse_operator=true` but no official import.
 - Unsupported main tasks: static PDE main tables, endpoint-only main DA, and supervised full operators.

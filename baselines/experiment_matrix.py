@@ -35,6 +35,7 @@ def compatibility_reason(
     *,
     load_full_trajectory: bool | None = None,
     train_inverse_operator: bool | None = None,
+    uses_official_inverse_observation_operator: bool | None = None,
 ) -> str:
     capability = resolve_capability(
         baseline,
@@ -44,6 +45,7 @@ def compatibility_reason(
         task_group,
         load_full_trajectory=load_full_trajectory,
         train_inverse_operator=train_inverse_operator,
+        uses_official_inverse_observation_operator=uses_official_inverse_observation_operator,
     )
     if capability.support_status == "unsupported":
         return capability.reason
@@ -93,6 +95,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", default="outputs/baselines/capability_matrix")
     parser.add_argument("--load-full-trajectory", action="store_true")
     parser.add_argument("--train-inverse-operator", action="store_true")
+    parser.add_argument("--uses-official-inverse-observation-operator", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -113,6 +116,11 @@ def main(argv: list[str] | None = None) -> None:
         args.task_group,
         load_full_trajectory=bool(args.load_full_trajectory) if args.load_full_trajectory else None,
         train_inverse_operator=bool(args.train_inverse_operator) if args.train_inverse_operator else None,
+        uses_official_inverse_observation_operator=(
+            bool(args.uses_official_inverse_observation_operator)
+            if args.uses_official_inverse_observation_operator
+            else None
+        ),
     )
     if capability.support_status == "unsupported":
         row = capability_skip_row(capability, task_group=args.task_group)

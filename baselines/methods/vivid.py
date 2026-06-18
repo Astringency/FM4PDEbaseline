@@ -10,7 +10,7 @@ from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel
-from .official import official_source_info
+from .official import OfficialImportError, get_vivid_official_status, official_source_info
 from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, observation_loss_from_batch
 from .var4d import _assimilation_mode, _background_view, _initial_trajectory, _optimized_state_numel
 from .voronoicnn import VoronoiCNNBaseline
@@ -24,12 +24,37 @@ class VIVIDBaseline(BaselineModel):
         self.inverse_operator = VoronoiCNNBaseline().build(config.get("inverse_operator", config), data_spec)
         self.optimized_numel = _optimized_state_numel(data_spec)
         self.inverse_operator_trained = False
-        if bool(self.config.get("train_inverse_operator", False)):
+        if bool(self.config.get("uses_official_inverse_observation_operator", False)):
+            try:
+                get_vivid_official_status()
+                self.set_backend(
+                    "vivid_official",
+                    "vivid",
+                    fallback_used=False,
+                    implementation_mode_effective="official",
+                    implementation_source="vivid_invobs_official",
+                    official_import_success=True,
+                    adapter_status="official_code_adapter",
+                    **official_source_info("vivid"),
+                )
+            except OfficialImportError as exc:
+                self.set_backend(
+                    "vivid_style",
+                    "vivid",
+                    fallback_used=True,
+                    warning=f"official VIVID/invobs unavailable: {exc}",
+                    implementation_mode_effective="adapted",
+                    implementation_source="vivid_style_official_import_failed",
+                    official_import_success=False,
+                    adapter_status="fallback_vivid_style",
+                    **official_source_info("vivid"),
+                )
+        elif bool(self.config.get("train_inverse_operator", False)):
             self.set_backend(
                 "vivid_style",
                 "vivid_style",
                 fallback_used=False,
-                implementation_mode_effective="official_architecture",
+                implementation_mode_effective="adapted",
                 implementation_source="vivid_invobs_structure",
                 official_import_success=False,
                 adapter_status="vivid_style_trained_inverse_operator",

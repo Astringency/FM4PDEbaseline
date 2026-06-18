@@ -37,10 +37,10 @@ class PINNSparseBaseline(BaselineModel):
                     "deepxde",
                     "deepxde",
                     fallback_used=False,
-                    implementation_mode_effective="official",
-                    implementation_source="deepxde",
+                    implementation_mode_effective="canonical_math",
+                    implementation_source="pinn_style_deepxde_fnn_local_pde_objective",
                     official_import_success=True,
-                    adapter_status="pinn_architecture_local_objective",
+                    adapter_status="canonical_math",
                     **official_source_info("deepxde"),
                 )
             except OfficialImportError as exc:
@@ -52,12 +52,12 @@ class PINNSparseBaseline(BaselineModel):
             self.set_backend(
                 "local",
                 "local" if requested_local else ("official" if backend == "official" else backend),
-                fallback_used=not requested_local,
+                fallback_used=False,
                 warning=fallback_reason,
-                implementation_mode_effective="adapted",
-                implementation_source="local_pinn_neural_field",
+                implementation_mode_effective="canonical_math",
+                implementation_source="pinn_style_local_neural_field_local_pde_objective",
                 official_import_success=False,
-                adapter_status="local_adapted" if requested_local else "fallback_adapted",
+                adapter_status="canonical_math",
             )
         return self
 

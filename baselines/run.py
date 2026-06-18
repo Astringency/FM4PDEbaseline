@@ -31,6 +31,7 @@ from baselines.common.metrics import (
 from baselines.methods.deeponet import DeepONetBaseline
 from baselines.methods.fno import FNOBaseline
 from baselines.methods.ifno import IFNOBaseline
+from baselines.methods.official import OfficialImportError
 from baselines.methods.pc_bnn import PCBNNBaseline
 from baselines.methods.pde_opt import PDEOptBaseline
 from baselines.methods.pinn_sparse import PINNSparseBaseline
@@ -176,27 +177,24 @@ def main(argv: list[str] | None = None) -> None:
         args.task_group,
         load_full_trajectory=bool(args.load_full_trajectory or args.baseline in {"var4d", "vivid"}),
         train_inverse_operator=bool(method_cfg.get("train_inverse_operator", False)),
+        uses_official_inverse_observation_operator=bool(method_cfg.get("uses_official_inverse_observation_operator", False)),
     )
     capability_info = capability.to_row()
     if args.experiment_mode == "paper" and capability.support_status == "unsupported":
-        out_dir = Path(args.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        row = capability_skip_row(capability, task_group=args.task_group)
-        append_result_jsonl(out_dir / "skipped_combinations.jsonl", _json_safe(row))
-        print(json.dumps(_json_safe({"status": "skipped", **row}), indent=2, sort_keys=True))
+        _skip_paper_run(args, capability, method_cfg, capability.reason, adapter_status="capability_unsupported")
         return
     if (
         args.experiment_mode == "paper"
         and capability.implementation_required == "adapted_allowed"
-        and str(method_cfg.get("implementation_mode", "")).lower() in {"official", "official_or_skip"}
+        and _official_request_mode(method_cfg) in {"official", "official_or_skip"}
     ):
-        out_dir = Path(args.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        row = capability_skip_row(capability, task_group=args.task_group)
-        row["reason"] = f"{capability.reason}; adapted-only capability skipped in official_or_skip paper mode"
-        row["unsupported_reason"] = row["reason"]
-        append_result_jsonl(out_dir / "skipped_combinations.jsonl", _json_safe(row))
-        print(json.dumps(_json_safe({"status": "skipped", **row}), indent=2, sort_keys=True))
+        _skip_paper_run(
+            args,
+            capability,
+            method_cfg,
+            f"{capability.reason}; adapted-only capability skipped in official/official_or_skip paper mode",
+            adapter_status="adapted_only_skipped",
+        )
         return
 
     train_size, val_size, test_size = _effective_sizes(args)
@@ -262,17 +260,37 @@ def main(argv: list[str] | None = None) -> None:
         }
     )
 
-    model = BASELINES[args.baseline]().build(method_cfg, data_spec).to(args.device)
+    try:
+        model = BASELINES[args.baseline]().build(method_cfg, data_spec).to(args.device)
+    except OfficialImportError as exc:
+        if args.experiment_mode == "paper" and _official_request_mode(method_cfg) == "official_or_skip":
+            _skip_paper_run(
+                args,
+                capability,
+                method_cfg,
+                f"official backend unavailable: {exc}",
+                adapter_status="official_import_failed",
+            )
+            return
+        raise
     backend_info = _backend_info(model, method_cfg)
     eligibility = _paper_table_eligibility(capability, backend_info)
     capability_info["paper_table_eligible"] = eligibility
     if capability.support_status != "unsupported":
         capability_info["unsupported_reason"] = ""
     method_budget_fields = _method_budget_fields(method_cfg, args.baseline)
-    if args.experiment_mode == "paper" and _requested_official(method_cfg) and backend_info["fallback_used"]:
+    request_mode = _official_request_mode(method_cfg)
+    if args.experiment_mode == "paper" and request_mode in {"official", "official_or_skip"} and backend_info["fallback_used"]:
+        reason = (
+            f"{args.baseline} requested {request_mode} backend for paper mode but used fallback backend "
+            f"{backend_info['backend_used']!r}: {backend_info.get('backend_warning', '')}"
+        )
+        if request_mode == "official_or_skip":
+            _skip_paper_run(args, capability, method_cfg, reason, backend_info=backend_info)
+            return
         raise RuntimeError(
             f"{args.baseline} requested official backend for paper mode but used fallback backend "
-            f"{backend_info['backend_used']!r}. Install/enable the official dependency or set official_backend:auto explicitly."
+            f"{backend_info['backend_used']!r}. Install/enable the official dependency or use implementation_mode: official_or_skip."
         )
 
     train_start = time.perf_counter()
@@ -1044,17 +1062,78 @@ def _backend_info(model, method_cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _default_skip_backend_info(method_cfg: dict[str, Any], reason: str, adapter_status: str = "skipped") -> dict[str, Any]:
+    requested = str(method_cfg.get("implementation_mode", method_cfg.get("official_backend", "auto")) or "auto").lower()
+    return {
+        "backend_used": "skipped",
+        "official_backend": str(method_cfg.get("official_backend", "")),
+        "fallback_used": False,
+        "backend_warning": reason,
+        "implementation_mode_requested": requested,
+        "implementation_mode_effective": "skipped",
+        "implementation_source": "skipped",
+        "official_repo": "",
+        "official_commit_or_version": "",
+        "official_import_path": "",
+        "official_import_success": False,
+        "adapter_status": adapter_status,
+    }
+
+
+def _skip_paper_run(
+    args: argparse.Namespace,
+    capability,
+    method_cfg: dict[str, Any],
+    reason: str,
+    *,
+    backend_info: dict[str, Any] | None = None,
+    adapter_status: str = "skipped",
+) -> dict[str, Any]:
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    backend_info = dict(backend_info or _default_skip_backend_info(method_cfg, reason, adapter_status=adapter_status))
+    backend_info["fallback_used"] = bool(backend_info.get("fallback_used", False))
+    backend_info["backend_warning"] = str(backend_info.get("backend_warning") or reason)
+    if adapter_status != "skipped" and not backend_info.get("adapter_status"):
+        backend_info["adapter_status"] = adapter_status
+    row = capability_skip_row(capability, task_group=args.task_group)
+    row.update(
+        {
+            "reason": reason,
+            "unsupported_reason": reason,
+            "paper_table_eligible": False,
+            "backend_used": backend_info.get("backend_used", "skipped"),
+            "official_backend": backend_info.get("official_backend", ""),
+            "fallback_used": bool(backend_info.get("fallback_used", False)),
+            "backend_warning": backend_info.get("backend_warning", reason),
+            **_implementation_fields(backend_info),
+        }
+    )
+    append_result_jsonl(out_dir / "skipped_combinations.jsonl", _json_safe(row))
+    print(json.dumps(_json_safe({"status": "skipped", **row}), indent=2, sort_keys=True))
+    return row
+
+
+def _official_request_mode(method_cfg: dict[str, Any]) -> str:
+    implementation_mode = str(method_cfg.get("implementation_mode", "") or "").lower()
+    if implementation_mode in {"official", "official_or_skip", "official_architecture", "adapted", "canonical_math"}:
+        return implementation_mode
+    backend = str(method_cfg.get("official_backend", "auto") or "auto").lower()
+    if backend == "official":
+        return "official"
+    return implementation_mode or backend
+
+
 def _requested_official(method_cfg: dict[str, Any]) -> bool:
-    implementation_mode = str(method_cfg.get("implementation_mode", "")).lower()
-    if implementation_mode in {"official", "official_or_skip"}:
-        return True
-    return str(method_cfg.get("official_backend", "auto")).lower() == "official"
+    return _official_request_mode(method_cfg) in {"official", "official_or_skip"}
 
 
 def _paper_table_eligibility(capability, backend_info: dict[str, Any]) -> bool:
-    if backend_info.get("fallback_used"):
-        return False
-    return capability_paper_table_eligible(capability, str(backend_info.get("implementation_mode_effective", "")))
+    return capability_paper_table_eligible(
+        capability,
+        str(backend_info.get("implementation_mode_effective", "")),
+        backend_info=backend_info,
+    )
 
 
 def _implementation_fields(backend_info: dict[str, Any]) -> dict[str, Any]:
@@ -1081,6 +1160,8 @@ def _capability_fields(capability_info: dict[str, Any]) -> dict[str, Any]:
         "citation_key": capability_info.get("citation_key", ""),
         "source_key": capability_info.get("source_key", ""),
         "notes_for_paper": capability_info.get("notes_for_paper", ""),
+        "official_architecture_allowed": bool(capability_info.get("official_architecture_allowed", False)),
+        "eligible_implementation_modes": json.dumps(list(capability_info.get("eligible_implementation_modes", []))),
         "paper_table_eligible": bool(capability_info.get("paper_table_eligible", False)),
     }
 

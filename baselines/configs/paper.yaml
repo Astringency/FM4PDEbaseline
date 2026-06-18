@@ -71,6 +71,8 @@ method_by_baseline:
     num_latents: 128
     heads: 4
   voronoicnn:
+    implementation_mode: official_architecture
+    official_backend: voronoicnn
     width: 64
   pinn_sparse:
     hidden: 128
@@ -95,6 +97,7 @@ method_by_baseline:
     lambda_obs: 1.0
   vivid:
     train_inverse_operator: true
+    uses_official_inverse_observation_operator: false
     refine_steps: 300
     lr: 0.005
     lambda_inverse_operator: 0.25

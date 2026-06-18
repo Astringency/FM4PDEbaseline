@@ -3,9 +3,39 @@
 Date: 2026-06-17
 Environment: `conda run -n FM4PDEbaseline`
 
+## 2026-06-18 Paper-Mode Gating Verification
+
+The current baseline layer is an official/native/canonical gating framework. Paper main rows require both a supported capability and an eligible implementation mode; adapted, style, surrogate, fallback, or local debug rows are routed to supplement or `skipped_combinations.jsonl`.
+
+Commands completed in the active workspace during this update:
+
+```bash
+python -m py_compile baselines/capabilities.py baselines/run.py baselines/aggregate_results.py baselines/experiment_matrix.py baselines/methods/vivid.py baselines/methods/voronoicnn.py baselines/methods/var4d.py baselines/methods/pinn_sparse.py
+python -m pytest -q tests/test_official_mode_no_fallback.py tests/test_paper_table_eligibility.py tests/test_time_varying_da_matrix.py tests/test_assimilation_mode.py tests/test_time_varying_sensor_guard.py tests/test_sparse_inverse_physics_baselines.py tests/test_aggregate_main_supplement_guard.py
+python -m py_compile baselines/run.py baselines/aggregate_results.py baselines/experiment_matrix.py baselines/capabilities.py baselines/common/*.py baselines/methods/*.py tests/test_*.py
+bash -n scripts/baselines/*.sh
+python -m pytest -q
+python -m baselines.experiment_matrix --dump-matrix --output outputs/baselines/capability_matrix_test
+```
+
+Verified behavior:
+
+- `implementation_mode: official` hard-fails when official FNO imports are unavailable.
+- `implementation_mode: official_or_skip` writes a complete skip row and does not write `results_summary.jsonl` when official FNO imports are unavailable.
+- Main-table eligibility rejects `fallback_used=true`, VIVID-style adapter statuses, RecFNO-UNet-as-VoronoiCNN, and official requirements satisfied by `canonical_math`.
+- PDE-Opt and PINN-Sparse static sparse inverse run on tiny synthetic `poisson`, `helmholtz`, `darcy`, and `steady_heat_conduction` fixtures.
+- Burgers time-varying 4D-Var now uses `full_trajectory` mode for `[B,1,T,X]` trajectories.
+
+Expected paper-mode skips until official adapters are added:
+
+- iFNO official/native forward/inverse skips under `official_or_skip` because the vendored iFNO scripts are not safely importable model components.
+- Native VIVID skips under `official_or_skip` because the vendored VIVID/invobs code is not exposed through a stable importable inverse-observation adapter. VIVID-style runs belong to supplement.
+
+Not paper main baselines: compact/local FNO, simplified local iFNO coupling blocks, VIVID-style refinement, generic PC-BNN particles outside official channel assumptions, and RecFNO UNet used as a VoronoiCNN surrogate.
+
 ## 2026-06-18 Targeted Fix Verification
 
-Current shell environment: `/opt/miniconda3/bin/python` 3.13.5. This environment does not have `torch` or `pytest` installed, and `/opt/miniconda3/envs/research/bin/python` also lacks `torch`, `pytest`, `yaml`, `h5py`, and `scipy`. Runner and pytest execution are therefore blocked in this shell until the intended `FM4PDEbaseline` environment is activated or installed.
+Earlier shell environment observed during the 2026-06-18 targeted fix pass: `/opt/miniconda3/bin/python` 3.13.5 did not have `torch` or `pytest` installed, and `/opt/miniconda3/envs/research/bin/python` also lacked `torch`, `pytest`, `yaml`, `h5py`, and `scipy`. That note is retained as historical environment context; the paper-mode gating checks above were run with the active workspace Python.
 
 Commands that completed in the current shell:
 
@@ -62,21 +92,23 @@ python -m baselines.run --baseline fno --pde reaction_diffusion --task forward -
 | `wave` | fallback only | passed | reserved key |
 | `advection_diffusion` | fallback only | passed | reserved key |
 
-## Baseline Status
+## Legacy Smoke Wrapper Status
+
+This table records smoke/debug wrapper coverage only. It does not imply paper main-table eligibility.
 
 | Baseline | Implemented | Wrapped/source referenced | Dry-run passed | Notes |
 | --- | ---: | ---: | ---: | --- |
-| FNO | yes | neuraloperator/FNO sources referenced | yes | compact PyTorch FNO2d |
+| FNO | yes | neuraloperator/FNO sources referenced | yes | compact PyTorch FNO2d is smoke/adapted only |
 | DeepONet | yes | DeepONet/DeepXDE referenced | yes | branch/trunk operator model |
-| iFNO | yes | official local `iFNO/` referenced | yes | bidirectional Fourier coupling core; optional VAE/posterior not included |
+| iFNO | yes | official local `iFNO/` referenced | yes | simplified bidirectional coupling is not official iFNO and is supplement/debug only |
 | RecFNO | yes | local `RecFNO/` referenced | yes | mask and Voronoi embeddings |
 | Senseiver | yes | local `Senseiver/` referenced | yes | lightweight Perceiver-IO variant |
-| VoronoiCNN | yes | local `Voronoi-CNN/` referenced | yes | PyTorch adaptation |
+| VoronoiCNN | yes | local `Voronoi-CNN/` referenced | yes | official-architecture Conv2D reimplementation can be main; RecFNO UNet surrogate cannot |
 | PINN-Sparse | yes | DeepXDE/PINN referenced | yes | neural-field per-instance optimizer with shared residuals |
 | PC-BNN | yes | PC-BNN upstream referenced | yes | SVGD particles with predictive mean/std |
 | PDE-Opt | yes | direct implementation | yes | per-instance PDE-constrained grid optimization |
 | 4D-Var | yes | direct implementation | yes | full-space weak 4D-Var; uses available trajectory segment |
-| VIVID | yes | VIVID/invobs referenced | yes | Voronoi inverse op + variational refinement |
+| VIVID | yes | VIVID/invobs referenced | yes | current wrapper is VIVID-style supplement unless official VIVID/invobs import succeeds |
 
 ## Limitations
 
