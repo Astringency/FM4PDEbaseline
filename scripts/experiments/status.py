@@ -5,27 +5,40 @@ import argparse
 import csv
 import json
 import os
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser("Summarize FM4PDE baseline matrix run status.")
     parser.add_argument("--output-root", default=os.environ.get("OUT_ROOT", "outputs/baselines_large"))
     parser.add_argument("--matrix", default=os.environ.get("MATRIX", ""))
+    parser.add_argument("--scope", choices=["main", "all", "matrix"], default="main")
     parser.add_argument("--all-matrices", action="store_true", help="Scan every matrix JSONL under matrices/, excluding *_skipped.jsonl.")
-    return parser.parse_args()
+    raw_argv = sys.argv[1:] if argv is None else argv
+    scope_explicit = any(arg == "--scope" or arg.startswith("--scope=") for arg in raw_argv)
+    args = parser.parse_args(argv)
+    if args.all_matrices:
+        args.scope = "all"
+    elif args.matrix and not scope_explicit:
+        args.scope = "matrix"
+    if args.matrix and scope_explicit and args.scope != "matrix":
+        parser.error("--matrix requires --scope matrix unless --scope is omitted")
+    if args.scope == "matrix" and not args.matrix:
+        parser.error("--scope matrix requires --matrix")
+    return args
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     out_root = Path(args.output_root)
-    matrix_paths = _matrix_paths(out_root, args.matrix, args.all_matrices)
+    matrix_paths = _matrix_paths(out_root, args.scope, args.matrix)
     rows = []
     for path in matrix_paths:
         rows.extend(_read_jsonl(path))
-    matrix_names = {path.stem for path in matrix_paths}
+    matrix_names = _selected_matrix_names(args.scope, matrix_paths, args.matrix)
     skipped_rows = [
         row
         for row in _read_jsonl(out_root / "skipped_combinations.jsonl")
@@ -57,27 +70,66 @@ def main() -> None:
     counts["total"] = total
     counts["pending"] = len(rows) - counts["done"] - counts["running"] - counts["failed"]
 
-    status_csv = out_root / "status.csv"
-    status_md = out_root / "status.md"
+    status_csv, status_md = _status_paths(out_root, args.scope, matrix_paths)
+    latest_status_csv = out_root / "status.csv"
+    latest_status_md = out_root / "status.md"
     _write_grouped_csv(status_csv, grouped, skipped_rows)
-    status_md.write_text(_status_markdown(matrix_paths, counts, grouped, skipped_rows), encoding="utf-8")
-    print(json.dumps({"matrices": [str(p) for p in matrix_paths], "status_csv": str(status_csv), **dict(counts)}, indent=2, sort_keys=True))
+    if latest_status_csv != status_csv:
+        _write_grouped_csv(latest_status_csv, grouped, skipped_rows)
+    markdown = _status_markdown(args.scope, matrix_paths, counts, grouped, skipped_rows)
+    status_md.write_text(markdown, encoding="utf-8")
+    if latest_status_md != status_md:
+        latest_status_md.write_text(markdown, encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "scope": args.scope,
+                "matrices": [str(p) for p in matrix_paths],
+                "status_csv": str(status_csv),
+                "status_md": str(status_md),
+                "latest_status_csv": str(latest_status_csv),
+                "latest_status_md": str(latest_status_md),
+                **dict(counts),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
-def _matrix_paths(out_root: Path, explicit: str, all_matrices: bool = False) -> list[Path]:
-    if explicit:
-        return [Path(explicit)]
+def _matrix_paths(out_root: Path, scope: str, explicit: str = "") -> list[Path]:
     matrix_dir = out_root / "matrices"
-    if all_matrices:
+    if scope == "matrix":
+        return [Path(explicit)]
+    if scope == "main":
+        return [matrix_dir / "main_results.jsonl"]
+    if scope == "all":
         if not matrix_dir.exists():
             return []
         return [p for p in sorted(matrix_dir.glob("*.jsonl")) if not p.name.endswith("_skipped.jsonl")]
-    main_results = out_root / "matrices" / "main_results.jsonl"
-    if main_results.exists():
-        return [main_results]
-    if not matrix_dir.exists():
-        return []
-    return [p for p in sorted(matrix_dir.glob("*.jsonl")) if not p.name.endswith("_skipped.jsonl")]
+    raise ValueError(f"unknown status scope: {scope}")
+
+
+def _selected_matrix_names(scope: str, matrix_paths: list[Path], explicit: str = "") -> set[str]:
+    if scope == "main":
+        return {"main_results"}
+    if scope == "matrix":
+        return {Path(explicit).stem}
+    return {path.stem for path in matrix_paths}
+
+
+def _status_paths(out_root: Path, scope: str, matrix_paths: list[Path]) -> tuple[Path, Path]:
+    if scope == "matrix":
+        stem = matrix_paths[0].stem if matrix_paths else "matrix"
+        suffix = _safe_status_suffix(stem)
+    else:
+        suffix = scope
+    return out_root / f"status_{suffix}.csv", out_root / f"status_{suffix}.md"
+
+
+def _safe_status_suffix(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value)
+    return safe or "matrix"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -124,11 +176,11 @@ def _write_grouped_csv(path: Path, grouped: Counter, skipped_rows: list[dict[str
         writer.writerows(rows)
 
 
-def _status_markdown(matrix_paths: list[Path], counts: Counter, grouped: Counter, skipped_rows: list[dict[str, Any]]) -> str:
-    lines = ["# Large Baseline Status", ""]
+def _status_markdown(scope: str, matrix_paths: list[Path], counts: Counter, grouped: Counter, skipped_rows: list[dict[str, Any]]) -> str:
+    lines = ["# Large Baseline Status", f"Scope: {scope}", ""]
     lines.append("Matrices:")
     for path in matrix_paths:
-        lines.append(f"- `{path}`")
+        lines.append(f"- {path}")
     lines.extend(["", "## Totals", ""])
     for key in ["total", "done", "running", "failed", "skipped", "pending"]:
         lines.append(f"- {key}: {int(counts.get(key, 0))}")

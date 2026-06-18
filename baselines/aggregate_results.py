@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-GROUP_KEYS = [
+BASE_GROUP_KEYS = [
     "experiment_kind",
     "ablation_factor",
     "task_group",
@@ -21,12 +21,17 @@ GROUP_KEYS = [
     "num_sensors",
     "sensor_mode",
     "noise_level",
+    "backend_used",
+]
+
+BUDGET_GROUP_KEYS = [
     "steps",
     "refine_steps",
     "particles",
     "method_budget_label",
-    "backend_used",
 ]
+
+GROUP_KEYS = BASE_GROUP_KEYS + BUDGET_GROUP_KEYS
 
 METRICS = [
     "relative_l2_solution",
@@ -70,13 +75,20 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[tuple[str, Any], ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        key = tuple(_norm(row.get(k, "")) for k in GROUP_KEYS)
+        key_fields = _group_keys_for_item(row)
+        key = tuple((field, _norm(row.get(field, ""))) for field in key_fields)
         groups[key].append(row)
     out: list[dict[str, Any]] = []
-    for key, items in sorted(groups.items(), key=lambda kv: kv[0]):
-        result = {k: v for k, v in zip(GROUP_KEYS, key)}
+    for key, items in sorted(groups.items(), key=lambda kv: _sort_key(kv[0])):
+        result = {field: value for field, value in key}
+        runtime_budget_group = result.get("ablation_factor") == "runtime_budget"
+        result["grouping_budget_mode"] = "budget_grouped" if runtime_budget_group else "budget_recorded_only"
+        result["budget_variation_warning"] = _budget_variation_warning(items, runtime_budget_group)
+        for field in BUDGET_GROUP_KEYS:
+            if field not in result:
+                result[field] = _representative_value(items, field)
         residual_counts: Counter[str] = Counter()
         assimilation_counts: Counter[str] = Counter()
         for item in items:
@@ -99,6 +111,28 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
         out.append(result)
     return out
+
+
+def _group_keys_for_item(row: dict[str, Any]) -> list[str]:
+    if row.get("ablation_factor") == "runtime_budget":
+        return BASE_GROUP_KEYS + BUDGET_GROUP_KEYS
+    return BASE_GROUP_KEYS
+
+
+def _budget_variation_warning(items: list[dict[str, Any]], runtime_budget_group: bool) -> str:
+    if runtime_budget_group:
+        return ""
+    for field in BUDGET_GROUP_KEYS:
+        values = {_norm(item.get(field, "")) for item in items}
+        if len(values) > 1:
+            return "budget fields vary within this non-runtime group"
+    return ""
+
+
+def _representative_value(items: list[dict[str, Any]], field: str) -> Any:
+    if not items:
+        return ""
+    return items[0].get(field, "")
 
 
 def _metric_stats_from_items(items: list[dict[str, Any]], metric: str) -> tuple[dict[str, float | int], str]:
@@ -292,6 +326,10 @@ def _norm(value: Any) -> Any:
     if isinstance(value, bool):
         return int(value)
     return value
+
+
+def _sort_key(key: tuple[tuple[str, Any], ...]) -> tuple[tuple[str, str], ...]:
+    return tuple((field, str(value)) for field, value in key)
 
 
 if __name__ == "__main__":

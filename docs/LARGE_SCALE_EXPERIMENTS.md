@@ -171,6 +171,21 @@ Status:
 OUT_ROOT=outputs/baselines_large bash scripts/experiments/08_status.sh
 ```
 
+By default this scans only `main_results.jsonl`. To scan every generated matrix:
+
+```bash
+STATUS_SCOPE=all OUT_ROOT=outputs/baselines_large bash scripts/experiments/08_status.sh
+ALL_MATRICES=1 OUT_ROOT=outputs/baselines_large bash scripts/experiments/08_status.sh
+```
+
+To inspect one ablation matrix:
+
+```bash
+MATRIX=outputs/baselines_large/matrices/noise_ablation.jsonl \
+STATUS_SCOPE=matrix OUT_ROOT=outputs/baselines_large \
+bash scripts/experiments/08_status.sh
+```
+
 Retry failed rows:
 
 ```bash
