@@ -28,6 +28,9 @@ class BaselineModel(nn.Module):
         self.official_commit_or_version: str = ""
         self.official_import_path: str = ""
         self.official_import_success: bool = False
+        self.official_reimplementation_success: bool = False
+        self.official_alignment_level: str = "local"
+        self.official_alignment_notes: str = ""
         self.adapter_status: str = "local_adapted"
 
     def build(self, config, data_spec):
@@ -48,6 +51,9 @@ class BaselineModel(nn.Module):
         official_commit_or_version: str = "",
         official_import_path: str = "",
         official_import_success: bool | None = None,
+        official_reimplementation_success: bool | None = None,
+        official_alignment_level: str | None = None,
+        official_alignment_notes: str = "",
         adapter_status: str | None = None,
     ) -> None:
         self.backend_used = str(backend_used)
@@ -61,8 +67,13 @@ class BaselineModel(nn.Module):
         self.official_commit_or_version = str(official_commit_or_version or "")
         self.official_import_path = str(official_import_path or "")
         if official_import_success is None:
-            official_import_success = self.implementation_mode_effective in {"official", "official_architecture"} and not self.fallback_used
+            official_import_success = self.implementation_mode_effective == "official" and not self.fallback_used
         self.official_import_success = bool(official_import_success)
+        if official_reimplementation_success is None:
+            official_reimplementation_success = self.implementation_mode_effective in {"official_architecture", "official_aligned"} and not self.fallback_used
+        self.official_reimplementation_success = bool(official_reimplementation_success)
+        self.official_alignment_level = str(official_alignment_level or _default_alignment_level(self.implementation_mode_effective))
+        self.official_alignment_notes = str(official_alignment_notes or "")
         self.adapter_status = str(adapter_status or _default_adapter_status(self.implementation_mode_effective, self.fallback_used))
 
     def mark_canonical_math(self, source: str, adapter_status: str = "canonical_math") -> None:
@@ -73,6 +84,8 @@ class BaselineModel(nn.Module):
             implementation_mode_effective="canonical_math",
             implementation_source=source,
             official_import_success=False,
+            official_reimplementation_success=False,
+            official_alignment_level="objective",
             adapter_status=adapter_status,
         )
 
@@ -85,17 +98,48 @@ class BaselineModel(nn.Module):
     def save(self, path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"state_dict": self.state_dict(), "config": self.config, "data_spec": self.data_spec}, path)
+        torch.save(
+            {
+                "state_dict": self.state_dict(),
+                "config": self.config,
+                "data_spec": self.data_spec,
+                "backend": self.backend_metadata(),
+            },
+            path,
+        )
 
     def load(self, path):
         payload = torch.load(path, map_location="cpu")
         self.load_state_dict(payload["state_dict"])
         self.config = payload.get("config", {})
         self.data_spec = payload.get("data_spec", {})
+        backend = payload.get("backend", {})
+        for key, value in backend.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
         return self
 
     def parameter_count(self) -> int:
         return int(sum(p.numel() for p in self.parameters() if p.requires_grad))
+
+    def backend_metadata(self) -> dict[str, Any]:
+        return {
+            "backend_used": self.backend_used,
+            "official_backend": self.official_backend,
+            "fallback_used": self.fallback_used,
+            "backend_warning": self.backend_warning,
+            "implementation_mode_requested": self.implementation_mode_requested,
+            "implementation_mode_effective": self.implementation_mode_effective,
+            "implementation_source": self.implementation_source,
+            "official_repo": self.official_repo,
+            "official_commit_or_version": self.official_commit_or_version,
+            "official_import_path": self.official_import_path,
+            "official_import_success": self.official_import_success,
+            "official_reimplementation_success": self.official_reimplementation_success,
+            "official_alignment_level": self.official_alignment_level,
+            "official_alignment_notes": self.official_alignment_notes,
+            "adapter_status": self.adapter_status,
+        }
 
 
 def _requested_implementation_mode(config: dict[str, Any]) -> str:
@@ -115,6 +159,8 @@ def _default_effective_mode(backend_used: str, fallback_used: bool) -> str:
     backend = str(backend_used).lower()
     if backend in {"pde_opt", "var4d", "canonical_math"}:
         return "canonical_math"
+    if backend in {"official_architecture", "official_aligned"}:
+        return backend
     if fallback_used or backend in {"local", "none"}:
         return "adapted"
     return "official"
@@ -128,9 +174,24 @@ def _default_adapter_status(effective_mode: str, fallback_used: bool) -> str:
         return "official_code"
     if mode == "official_architecture":
         return "official_architecture_reimplementation"
+    if mode == "official_aligned":
+        return "official_aligned_reimplementation"
     if mode == "canonical_math":
         return "canonical_math"
     return "local_adapted"
+
+
+def _default_alignment_level(effective_mode: str) -> str:
+    mode = str(effective_mode).lower()
+    if mode == "official":
+        return "exact_code"
+    if mode == "official_architecture":
+        return "architecture"
+    if mode == "official_aligned":
+        return "objective"
+    if mode == "canonical_math":
+        return "objective"
+    return "local"
 
 
 def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):

@@ -55,6 +55,11 @@ OFFICIAL_SOURCE_INFO: dict[str, dict[str, str]] = {
         "official_commit_or_version": "vendored",
         "official_import_path": str(OFFICIAL_ROOT / "invobs-data-assimilation"),
     },
+    "vivid_invobs": {
+        "official_repo": "https://github.com/DL-WG/VIVID; https://github.com/googleinterns/invobs-data-assimilation",
+        "official_commit_or_version": "vendored",
+        "official_import_path": f"{OFFICIAL_ROOT / 'VIVID'}; {OFFICIAL_ROOT / 'invobs-data-assimilation'}",
+    },
     "voronoi_cnn": {
         "official_repo": "https://github.com/kfukami/Voronoi-CNN",
         "official_commit_or_version": "vendored",
@@ -84,7 +89,7 @@ def requested_implementation_mode(config: dict[str, Any]) -> str:
 
 def allows_adapted_fallback(config: dict[str, Any]) -> bool:
     mode = requested_implementation_mode(config)
-    if mode in {"official", "official_or_skip", "canonical_math", "official_architecture"}:
+    if mode in {"official", "official_or_skip", "canonical_math", "official_architecture", "official_aligned"}:
         return False
     backend = str(config.get("official_backend", "auto")).lower()
     return backend not in {"official"}
@@ -200,6 +205,18 @@ def get_ifno_official_status() -> None:
     raise OfficialImportError("vendored iFNO scripts are not safely importable model components")
 
 
+def get_ifno_official_aligned_status() -> None:
+    """Validate local availability of the iFNO official-aligned adapter."""
+
+    path = OFFICIAL_ROOT / "iFNO"
+    if not path.exists():
+        raise OfficialImportError(f"iFNO source tree not found: {path}")
+    try:
+        import baselines.methods.ifno_official_aligned  # noqa: F401
+    except Exception as exc:
+        raise OfficialImportError(f"iFNO official-aligned adapter unavailable: {exc}") from exc
+
+
 def get_vivid_official_status() -> None:
     """Validate whether vendored VIVID/invobs can be used as official components.
 
@@ -216,3 +233,30 @@ def get_vivid_official_status() -> None:
     if not invobs.exists():
         raise OfficialImportError(f"invobs source tree not found: {invobs}")
     raise OfficialImportError("vendored VIVID/invobs is not exposed as a stable importable inverse-observation adapter")
+
+
+def get_vivid_official_aligned_status() -> None:
+    """Validate local availability of the VIVID/invobs official-aligned adapter."""
+
+    vivid = OFFICIAL_ROOT / "VIVID"
+    invobs = OFFICIAL_ROOT / "invobs-data-assimilation"
+    if not vivid.exists():
+        raise OfficialImportError(f"VIVID source tree not found: {vivid}")
+    if not invobs.exists():
+        raise OfficialImportError(f"invobs source tree not found: {invobs}")
+    try:
+        import baselines.methods.vivid_official_aligned  # noqa: F401
+    except Exception as exc:
+        raise OfficialImportError(f"VIVID official-aligned adapter unavailable: {exc}") from exc
+
+
+def get_pc_bnn_official_aligned_status() -> None:
+    """Validate local availability of the PC-BNN official-aligned adapter."""
+
+    path = OFFICIAL_ROOT / "PC-BNN" / "code"
+    if not path.exists():
+        raise OfficialImportError(f"PC-BNN source tree not found: {path}")
+    try:
+        import baselines.methods.pc_bnn  # noqa: F401
+    except Exception as exc:
+        raise OfficialImportError(f"PC-BNN official-aligned adapter unavailable: {exc}") from exc

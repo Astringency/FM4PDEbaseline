@@ -1,6 +1,6 @@
 method:
-  implementation_mode: official_or_skip
-  official_backend: auto
+  implementation_mode: official_aligned
+  official_backend: ifno
   epochs: 200
   lr: 0.001
   width: 64

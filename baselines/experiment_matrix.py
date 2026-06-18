@@ -72,6 +72,9 @@ def capability_skip_row(
         "citation_key": capability.citation_key,
         "source_key": capability.source_key,
         "notes_for_paper": capability.notes_for_paper,
+        "official_architecture_allowed": capability.official_architecture_allowed,
+        "official_aligned_allowed": capability.official_aligned_allowed,
+        "eligible_implementation_modes": list(capability.eligible_implementation_modes),
         "paper_table_eligible": capability.paper_table_eligible,
     }
     if extra:

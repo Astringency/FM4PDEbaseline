@@ -67,6 +67,7 @@ def test_official_architecture_must_be_explicitly_allowed():
         backend_info={
             "implementation_mode_effective": "official_architecture",
             "official_import_success": False,
+            "official_reimplementation_success": False,
             "fallback_used": False,
             "adapter_status": "official_architecture_reimplementation",
         },
@@ -88,6 +89,7 @@ def test_official_architecture_must_be_explicitly_allowed():
         backend_info={
             "implementation_mode_effective": "official_architecture",
             "official_import_success": False,
+            "official_reimplementation_success": True,
             "fallback_used": False,
             "adapter_status": "official_architecture_reimplementation",
         },

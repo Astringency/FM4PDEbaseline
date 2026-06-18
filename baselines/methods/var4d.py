@@ -114,9 +114,16 @@ def _initial_trajectory(batch: PDEBatch):
         input_idx = int(batch.metadata.get("input_time_index", 0))
         initial = full[:, :, input_idx].to(guess.device, guess.dtype)
         steps = max(full.shape[2] - input_idx, 2)
-        final_guess = guess[:, : initial.shape[1]]
-        alpha = torch.linspace(0.0, 1.0, steps, device=guess.device, dtype=guess.dtype).view(1, 1, steps, 1, 1)
-        state0 = initial[:, :, None] * (1.0 - alpha) + final_guess[:, :, None] * alpha
+        if guess.ndim == 5:
+            state0 = guess[:, : initial.shape[1], :steps].clone()
+            if state0.shape[2] < steps:
+                pad = state0[:, :, -1:].expand(-1, -1, steps - state0.shape[2], -1, -1)
+                state0 = torch.cat([state0, pad], dim=2)
+        else:
+            final_guess = guess[:, : initial.shape[1]]
+            alpha = torch.linspace(0.0, 1.0, steps, device=guess.device, dtype=guess.dtype).view(1, 1, steps, 1, 1)
+            state0 = initial[:, :, None] * (1.0 - alpha) + final_guess[:, :, None] * alpha
+        state0[:, :, 0] = initial
         total_t = float(batch.metadata.get("final_time", 1.0 if pde == "shallow_water" else 5.0))
         segment_t = total_t * (steps - 1) / max(full.shape[2] - 1, 1)
 

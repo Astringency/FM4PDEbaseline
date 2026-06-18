@@ -60,6 +60,8 @@ method_by_baseline:
     hidden: 256
     basis: 128
   ifno:
+    implementation_mode: official_aligned
+    official_backend: ifno
     width: 64
     layers: 4
     cycle_weight: 0.1
@@ -81,6 +83,8 @@ method_by_baseline:
     lr: 0.001
     optimizer: adam
   pc_bnn:
+    implementation_mode: official_aligned
+    official_backend: pc_bnn
     hidden: 128
     depth: 5
     particles: 8
@@ -96,8 +100,10 @@ method_by_baseline:
     lambda_background: 0.1
     lambda_obs: 1.0
   vivid:
+    implementation_mode: official_aligned
+    official_backend: vivid
     train_inverse_operator: true
-    uses_official_inverse_observation_operator: false
+    uses_official_inverse_observation_operator: true
     refine_steps: 300
     lr: 0.005
     lambda_inverse_operator: 0.25

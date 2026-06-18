@@ -169,7 +169,7 @@ def _main_eligibility_issue(row: dict[str, Any]) -> str:
     if status not in {"native", "official_adapter"}:
         return f"capability_status={status or 'missing'}"
     adapter_status = str(row.get("adapter_status", "") or "").lower()
-    if any(token in adapter_status for token in ("fallback", "local", "surrogate", "style", "adapted")):
+    if any(token in adapter_status for token in ("fallback", "local", "surrogate", "style", "adapted", "toy", "debug", "target_change")):
         return f"adapter_status={adapter_status}"
     mode = str(row.get("implementation_mode_effective", "") or "").lower()
     allowed = _eligible_modes_from_row(row)
@@ -178,6 +178,10 @@ def _main_eligibility_issue(row: dict[str, Any]) -> str:
     required = str(row.get("implementation_required", "") or "").lower()
     if required == "official" and mode == "official" and not _truthy(row.get("official_import_success", False)):
         return "official_import_success=false"
+    if required == "official" and mode in {"official_architecture", "official_aligned"} and not _truthy(
+        row.get("official_reimplementation_success", False)
+    ):
+        return "official_reimplementation_success=false"
     if required == "canonical_math" and mode != "canonical_math":
         return f"canonical_math required, got {mode or 'missing'}"
     if required == "adapted_allowed":
@@ -209,6 +213,8 @@ def _eligible_modes_from_row(row: dict[str, Any]) -> set[str]:
         modes = {"official"}
         if _truthy(row.get("official_architecture_allowed", False)):
             modes.add("official_architecture")
+        if _truthy(row.get("official_aligned_allowed", False)):
+            modes.add("official_aligned")
         return modes
     return set()
 

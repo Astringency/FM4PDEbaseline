@@ -98,6 +98,7 @@ class Capability:
     source_key: str
     notes_for_paper: str
     official_architecture_allowed: bool
+    official_aligned_allowed: bool
     eligible_implementation_modes: tuple[str, ...]
     paper_table_eligible: bool
 
@@ -286,7 +287,10 @@ def resolve_capability(
                 "official",
                 family,
                 "iFNO is defined for full forward and inverse operator learning",
-                "Use vendored/original iFNO components; skip if they cannot be imported/adapted reliably.",
+                "Use direct iFNO components if importable; otherwise use the disclosed official-aligned invertible FNO architecture reimplementation.",
+                official_architecture_allowed=True,
+                official_aligned_allowed=True,
+                eligible_implementation_modes=("official", "official_architecture", "official_aligned"),
             )
         return _cap(
             baseline,
@@ -460,6 +464,20 @@ def resolve_capability(
 
     if baseline == "pc_bnn":
         if family == "sparse_reconstruction":
+            if pde == "shallow_water":
+                return _cap(
+                    baseline,
+                    pde,
+                    task,
+                    sensor_mode,
+                    "official_adapter",
+                    "official",
+                    family,
+                    "PC-BNN sparse/noisy flow reconstruction assumptions match the 2D three-channel shallow-water field setting",
+                    "Use the official Net/SVGD/physics-constrained objective as an official-aligned reimplementation.",
+                    official_aligned_allowed=True,
+                    eligible_implementation_modes=("official_aligned",),
+                )
             return _cap(
                 baseline,
                 pde,
@@ -586,13 +604,15 @@ def paper_table_eligible(
     if mode not in set(capability.eligible_implementation_modes):
         return False
     adapter_status = str(backend_info.get("adapter_status", "") or "").lower()
-    if any(token in adapter_status for token in ("_style", "fallback", "local_adapted", "surrogate", "adapted")):
+    if any(token in adapter_status for token in ("style", "toy", "debug", "local", "fallback", "surrogate", "target_change", "adapted")):
         return False
     if capability.implementation_required == "official":
         if mode == "official":
             return bool(backend_info.get("official_import_success", False))
         if mode == "official_architecture":
-            return bool(capability.official_architecture_allowed)
+            return bool(capability.official_architecture_allowed) and bool(backend_info.get("official_reimplementation_success", False))
+        if mode == "official_aligned":
+            return bool(capability.official_aligned_allowed) and bool(backend_info.get("official_reimplementation_success", False))
         return False
     if capability.implementation_required == "canonical_math":
         return mode == "canonical_math"
@@ -623,10 +643,10 @@ def iter_capability_matrix(
                             task,
                             "" if sensor_mode == "none" else sensor_mode,
                             "time_varying" if sensor_mode == "time_varying" else "",
-            load_full_trajectory=load_full_trajectory,
-            train_inverse_operator=True,
-            uses_official_inverse_observation_operator=False,
-        )
+                            load_full_trajectory=load_full_trajectory,
+                            train_inverse_operator=True,
+                            uses_official_inverse_observation_operator=True,
+                        )
                     )
     return rows
 
@@ -755,7 +775,9 @@ def _time_varying_capability(
             "official",
             family,
             "VIVID is native for learned inverse-observation initialization plus variational trajectory refinement",
-            "Must train or load the inverse observation operator and use trajectory observations.",
+            "Use direct VIVID/invobs components if importable; otherwise use the disclosed official-aligned inverse-observation plus variational refinement reimplementation.",
+            official_aligned_allowed=True,
+            eligible_implementation_modes=("official", "official_aligned"),
         )
     return _cap(
         baseline,
@@ -782,6 +804,7 @@ def _cap(
     *,
     eligible: bool | None = None,
     official_architecture_allowed: bool = False,
+    official_aligned_allowed: bool = False,
     eligible_implementation_modes: Iterable[str] | None = None,
 ) -> Capability:
     if support_status not in SUPPORT_STATUSES:
@@ -794,7 +817,12 @@ def _cap(
         if not eligible:
             modes: tuple[str, ...] = ()
         elif implementation_required == "official":
-            modes = ("official", "official_architecture") if official_architecture_allowed else ("official",)
+            modes_list = ["official"]
+            if official_architecture_allowed:
+                modes_list.append("official_architecture")
+            if official_aligned_allowed:
+                modes_list.append("official_aligned")
+            modes = tuple(modes_list)
         elif implementation_required == "canonical_math":
             modes = ("canonical_math",)
         else:
@@ -814,6 +842,7 @@ def _cap(
         source_key=SOURCE_KEYS.get(baseline, ""),
         notes_for_paper=notes_for_paper,
         official_architecture_allowed=bool(official_architecture_allowed),
+        official_aligned_allowed=bool(official_aligned_allowed),
         eligible_implementation_modes=modes,
         paper_table_eligible=bool(eligible),
     )

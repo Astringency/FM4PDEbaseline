@@ -3,6 +3,35 @@
 Date: 2026-06-17
 Environment: `conda run -n FM4PDEbaseline`
 
+## 2026-06-19 Official-Aligned Baseline Reimplementation Verification
+
+This update adds main-table eligible official-aligned reimplementations where the vendored official repositories are script/checkpoint/data-pipeline oriented rather than safely importable as libraries.
+
+Focused commands completed during implementation:
+
+```bash
+python -m py_compile baselines/methods/base.py baselines/methods/official.py baselines/capabilities.py baselines/run.py baselines/aggregate_results.py baselines/methods/ifno.py baselines/methods/ifno_official_aligned.py baselines/methods/vivid.py baselines/methods/vivid_official_aligned.py baselines/methods/pc_bnn.py
+python -m baselines.run --baseline ifno --pde darcy --task forward --experiment-mode smoke --dry-run --synthetic-data --synthetic-resolution 8 --train-size 4 --test-size 2 --batch-size 1 --epochs 1 --implementation-mode official_aligned --output-dir outputs/baselines/dev_smoke_ifno_forward
+python -m baselines.run --baseline ifno --pde darcy --task inverse --experiment-mode smoke --dry-run --synthetic-data --synthetic-resolution 8 --train-size 4 --test-size 2 --batch-size 1 --epochs 1 --implementation-mode official_aligned --output-dir outputs/baselines/dev_smoke_ifno_inverse
+python -m baselines.run --baseline pc_bnn --pde shallow_water --task sparse_solution --experiment-mode smoke --dry-run --synthetic-data --synthetic-resolution 8 --train-size 2 --test-size 1 --batch-size 1 --num-sensors 4 --steps 1 --particles 2 --implementation-mode official_aligned --output-dir outputs/baselines/dev_smoke_pcbnn_swe
+python -m baselines.run --baseline vivid --pde reaction_diffusion --task sparse_solution --task-group time_varying --sensor-mode time_varying --load-full-trajectory --experiment-mode smoke --dry-run --synthetic-data --synthetic-resolution 8 --train-size 4 --test-size 2 --batch-size 1 --num-sensors 4 --output-dir outputs/baselines/dev_smoke_vivid_auto
+python -m pytest -q tests/test_ifno_official_aligned.py tests/test_vivid_official_aligned.py tests/test_pcbnn_official_aligned.py tests/test_preflight_backend_availability.py tests/test_paper_table_eligibility.py tests/test_metadata_backend_fields.py tests/test_baseline_forward_shapes.py
+python -m py_compile baselines/run.py baselines/aggregate_results.py baselines/experiment_matrix.py baselines/capabilities.py baselines/common/*.py baselines/methods/*.py tests/test_*.py
+bash -n scripts/baselines/*.sh
+python -m pytest -q
+python -m baselines.experiment_matrix --dump-matrix --output outputs/baselines/capability_matrix_test
+python -m baselines.run --baseline ifno --pde darcy --task forward --experiment-mode smoke --dry-run --synthetic-data --synthetic-resolution 8 --train-size 4 --test-size 2 --batch-size 1 --output-dir outputs/baselines/smoke_ifno_forward
+python -m baselines.run --baseline ifno --pde darcy --task inverse --experiment-mode smoke --dry-run --synthetic-data --synthetic-resolution 8 --train-size 4 --test-size 2 --batch-size 1 --output-dir outputs/baselines/smoke_ifno_inverse
+python -m baselines.run --baseline vivid --pde reaction_diffusion --task sparse_solution --task-group time_varying --sensor-mode time_varying --load-full-trajectory --experiment-mode smoke --dry-run --synthetic-data --synthetic-resolution 8 --train-size 4 --test-size 2 --batch-size 1 --num-sensors 8 --output-dir outputs/baselines/smoke_vivid_da
+```
+
+Verified behavior:
+
+- iFNO full forward/full inverse run as `implementation_mode_effective=official_aligned`, set `official_reimplementation_success=true`, and are `paper_table_eligible=true`; sparse iFNO remains unsupported.
+- VIVID time-varying DA defaults to `official_aligned_vivid_invobs_reimplementation`, trains/uses an inverse observation operator, records `assimilation_mode=full_trajectory`, and is main-table eligible. Explicit `implementation_mode=adapted` VIVID-style remains supplement-only.
+- PC-BNN shallow-water sparse reconstruction runs as `official_aligned_pcbnn_reimplementation` and is main-table eligible. Scalar generic PC-BNN remains supplement-only.
+- These rows do not claim direct official import. `official_import_success=false` is paired with `official_reimplementation_success=true` and alignment notes.
+
 ## 2026-06-18 Paper-Mode Gating Verification
 
 The current baseline layer is an official/native/canonical gating framework. Paper main rows require both a supported capability and an eligible implementation mode; adapted, style, surrogate, fallback, or local debug rows are routed to supplement or `skipped_combinations.jsonl`.
@@ -25,11 +54,6 @@ Verified behavior:
 - Main-table eligibility rejects `fallback_used=true`, VIVID-style adapter statuses, RecFNO-UNet-as-VoronoiCNN, and official requirements satisfied by `canonical_math`.
 - PDE-Opt and PINN-Sparse static sparse inverse run on tiny synthetic `poisson`, `helmholtz`, `darcy`, and `steady_heat_conduction` fixtures.
 - Burgers time-varying 4D-Var now uses `full_trajectory` mode for `[B,1,T,X]` trajectories.
-
-Expected paper-mode skips until official adapters are added:
-
-- iFNO official/native forward/inverse skips under `official_or_skip` because the vendored iFNO scripts are not safely importable model components.
-- Native VIVID skips under `official_or_skip` because the vendored VIVID/invobs code is not exposed through a stable importable inverse-observation adapter. VIVID-style runs belong to supplement.
 
 Not paper main baselines: compact/local FNO, simplified local iFNO coupling blocks, VIVID-style refinement, generic PC-BNN particles outside official channel assumptions, and RecFNO UNet used as a VoronoiCNN surrogate.
 
@@ -100,15 +124,15 @@ This table records smoke/debug wrapper coverage only. It does not imply paper ma
 | --- | ---: | ---: | ---: | --- |
 | FNO | yes | neuraloperator/FNO sources referenced | yes | compact PyTorch FNO2d is smoke/adapted only |
 | DeepONet | yes | DeepONet/DeepXDE referenced | yes | branch/trunk operator model |
-| iFNO | yes | official local `iFNO/` referenced | yes | simplified bidirectional coupling is not official iFNO and is supplement/debug only |
+| iFNO | yes | official local `iFNO/` referenced | yes | official-aligned invertible FNO reimplementation is main-eligible for full forward/inverse; simplified local coupling is supplement/debug only |
 | RecFNO | yes | local `RecFNO/` referenced | yes | mask and Voronoi embeddings |
 | Senseiver | yes | local `Senseiver/` referenced | yes | lightweight Perceiver-IO variant |
 | VoronoiCNN | yes | local `Voronoi-CNN/` referenced | yes | official-architecture Conv2D reimplementation can be main; RecFNO UNet surrogate cannot |
 | PINN-Sparse | yes | DeepXDE/PINN referenced | yes | neural-field per-instance optimizer with shared residuals |
-| PC-BNN | yes | PC-BNN upstream referenced | yes | SVGD particles with predictive mean/std |
+| PC-BNN | yes | PC-BNN upstream referenced | yes | official-aligned for matched shallow-water three-channel sparse reconstruction; generic SVGD is supplement only |
 | PDE-Opt | yes | direct implementation | yes | per-instance PDE-constrained grid optimization |
 | 4D-Var | yes | direct implementation | yes | full-space weak 4D-Var; uses available trajectory segment |
-| VIVID | yes | VIVID/invobs referenced | yes | current wrapper is VIVID-style supplement unless official VIVID/invobs import succeeds |
+| VIVID | yes | VIVID/invobs referenced | yes | official-aligned inverse-observation plus variational refinement is main-eligible for time-varying DA; VIVID-style adapted is supplement only |
 
 ## Limitations
 

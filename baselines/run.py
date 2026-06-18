@@ -32,6 +32,11 @@ from baselines.methods.deeponet import DeepONetBaseline
 from baselines.methods.fno import FNOBaseline
 from baselines.methods.ifno import IFNOBaseline
 from baselines.methods.official import OfficialImportError
+from baselines.methods.official import (
+    get_ifno_official_aligned_status,
+    get_pc_bnn_official_aligned_status,
+    get_vivid_official_aligned_status,
+)
 from baselines.methods.pc_bnn import PCBNNBaseline
 from baselines.methods.pde_opt import PDEOptBaseline
 from baselines.methods.pinn_sparse import PINNSparseBaseline
@@ -101,6 +106,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=None, help="Override per-instance optimization steps in the method config.")
     parser.add_argument("--refine-steps", type=int, default=None, help="Override VIVID refinement steps in the method config.")
     parser.add_argument("--particles", type=int, default=None, help="Override PC-BNN particle count in the method config.")
+    parser.add_argument("--implementation-mode", default=None, help="Override method implementation_mode.")
+    parser.add_argument("--official-backend", default=None, help="Override method official_backend.")
+    parser.add_argument("--method-override", action="append", default=[], help="Override a method config key as key=value. Can be repeated.")
     return parser.parse_args(argv)
 
 
@@ -130,6 +138,15 @@ def build_method_config(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         merged["refine_steps"] = int(args.refine_steps)
     if args.particles is not None:
         merged["particles"] = int(args.particles)
+    if args.implementation_mode is not None:
+        merged["implementation_mode"] = str(args.implementation_mode)
+    if args.official_backend is not None:
+        merged["official_backend"] = str(args.official_backend)
+    for override in args.method_override or []:
+        key, sep, value = str(override).partition("=")
+        if not sep or not key:
+            raise ValueError(f"--method-override must be key=value, got {override!r}")
+        merged[key] = _parse_override_value(value)
     merged["device"] = args.device
     merged.setdefault("seed", int(args.seed))
     if args.dry_run:
@@ -177,7 +194,7 @@ def main(argv: list[str] | None = None) -> None:
         args.task_group,
         load_full_trajectory=bool(args.load_full_trajectory or args.baseline in {"var4d", "vivid"}),
         train_inverse_operator=bool(method_cfg.get("train_inverse_operator", False)),
-        uses_official_inverse_observation_operator=bool(method_cfg.get("uses_official_inverse_observation_operator", False)),
+        uses_official_inverse_observation_operator=_uses_official_inverse_observation_operator(args.baseline, method_cfg),
     )
     capability_info = capability.to_row()
     if args.experiment_mode == "paper" and capability.support_status == "unsupported":
@@ -186,7 +203,7 @@ def main(argv: list[str] | None = None) -> None:
     if (
         args.experiment_mode == "paper"
         and capability.implementation_required == "adapted_allowed"
-        and _official_request_mode(method_cfg) in {"official", "official_or_skip"}
+        and _official_request_mode(method_cfg) in {"official", "official_or_skip", "official_architecture", "official_aligned"}
     ):
         _skip_paper_run(
             args,
@@ -194,6 +211,17 @@ def main(argv: list[str] | None = None) -> None:
             method_cfg,
             f"{capability.reason}; adapted-only capability skipped in official/official_or_skip paper mode",
             adapter_status="adapted_only_skipped",
+        )
+        return
+    preflight_skip = _preflight_backend_availability(args, capability, method_cfg)
+    if preflight_skip is not None:
+        _skip_paper_run(
+            args,
+            capability,
+            method_cfg,
+            preflight_skip["reason"],
+            backend_info=preflight_skip.get("backend_info"),
+            adapter_status=preflight_skip.get("adapter_status", "official_backend_unavailable"),
         )
         return
 
@@ -204,7 +232,9 @@ def main(argv: list[str] | None = None) -> None:
     val_dataset, split_info = _make_val_dataset_if_requested(registry, args, val_size, train_size, use_sensors)
     effective_train_size = int(split_info["effective_train_size"])
     is_per_instance = args.baseline in PER_INSTANCE_BASELINES
-    if args.baseline == "vivid" and bool(method_cfg.get("train_inverse_operator", False)):
+    if args.baseline == "vivid" and (
+        bool(method_cfg.get("train_inverse_operator", False)) or _uses_official_inverse_observation_operator(args.baseline, method_cfg)
+    ):
         is_per_instance = False
     spec_size = max(1, min(int(args.batch_size), 4, max(effective_train_size, 1)))
     if is_per_instance:
@@ -280,7 +310,7 @@ def main(argv: list[str] | None = None) -> None:
         capability_info["unsupported_reason"] = ""
     method_budget_fields = _method_budget_fields(method_cfg, args.baseline)
     request_mode = _official_request_mode(method_cfg)
-    if args.experiment_mode == "paper" and request_mode in {"official", "official_or_skip"} and backend_info["fallback_used"]:
+    if args.experiment_mode == "paper" and request_mode in {"official", "official_or_skip", "official_architecture", "official_aligned"} and backend_info["fallback_used"]:
         reason = (
             f"{args.baseline} requested {request_mode} backend for paper mode but used fallback backend "
             f"{backend_info['backend_used']!r}: {backend_info.get('backend_warning', '')}"
@@ -396,6 +426,21 @@ def _resolve_data_loading_mode(args: argparse.Namespace) -> str:
     if args.data_loading_mode:
         return str(args.data_loading_mode)
     return "lazy" if args.experiment_mode == "paper" else "eager"
+
+
+def _parse_override_value(value: str) -> Any:
+    text = str(value)
+    lowered = text.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"none", "null"}:
+        return None
+    try:
+        if any(ch in text for ch in (".", "e", "E")):
+            return float(text)
+        return int(text)
+    except ValueError:
+        return text
 
 
 def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str, Any]:
@@ -674,6 +719,8 @@ def _evaluate_full_test_loader(
             "residual_mode_counts": json.dumps(metric_payload["residual_mode_counts"], sort_keys=True),
             "assimilation_mode": str(batch.metadata.get("assimilation_mode", "")),
             "assimilation_mode_counts": json.dumps(_assimilation_mode_counts(batch), sort_keys=True),
+            "inverse_observation_operator_used": bool(batch.metadata.get("inverse_observation_operator_used", False)),
+            "posterior_particles": int(batch.metadata.get("posterior_particles", 0) or 0),
             "train_time": train_time,
             "inference_time": elapsed,
             "inference_optimization_time": inf_opt,
@@ -858,6 +905,8 @@ def _summarize_run(
         "batch_count": len(rows),
         "residual_mode_counts": json.dumps(dict(_residual_mode_counter(rows)), sort_keys=True),
         "assimilation_mode_counts": json.dumps(dict(_assimilation_mode_counter(rows)), sort_keys=True),
+        "inverse_observation_operator_used": any(bool(row.get("inverse_observation_operator_used", False)) for row in rows),
+        "posterior_particles": max((int(row.get("posterior_particles", 0) or 0) for row in rows), default=0),
         "inference_time_total": eval_totals["inference_time_total"],
         "inference_time_per_sample": eval_totals["inference_time_total"] / max(len(test_dataset), 1),
         "inference_optimization_time_total": eval_totals["inference_optimization_time_total"],
@@ -923,7 +972,13 @@ def _to_device_batch_for_eval(batch: PDEBatch, device: str) -> PDEBatch:
 
 
 def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
-    for key in ("inference_optimization_time", "assimilation_mode"):
+    for key in (
+        "inference_optimization_time",
+        "assimilation_mode",
+        "inverse_observation_operator_used",
+        "posterior_particles",
+        "official_alignment_level",
+    ):
         if key in src.metadata:
             dst.metadata[key] = src.metadata[key]
 
@@ -1035,6 +1090,50 @@ def _tensor_float(value: Any) -> float:
     return float(value)
 
 
+def _uses_official_inverse_observation_operator(baseline: str, method_cfg: dict[str, Any]) -> bool:
+    if baseline != "vivid":
+        return bool(method_cfg.get("uses_official_inverse_observation_operator", False))
+    mode = _official_request_mode(method_cfg)
+    return bool(method_cfg.get("uses_official_inverse_observation_operator", False)) or mode in {
+        "official",
+        "official_or_skip",
+        "official_aligned",
+        "auto",
+    }
+
+
+def _preflight_backend_availability(
+    args: argparse.Namespace,
+    capability,
+    method_cfg: dict[str, Any],
+) -> dict[str, Any] | None:
+    if args.experiment_mode != "paper" or capability.implementation_required != "official":
+        return None
+    mode = _official_request_mode(method_cfg)
+    if mode not in {"official", "official_or_skip", "official_architecture", "official_aligned"}:
+        return None
+    try:
+        if args.baseline == "ifno" and capability.task_family in {"full_forward", "full_inverse"}:
+            get_ifno_official_aligned_status()
+            return None
+        if args.baseline == "vivid" and capability.task_family == "time_varying_da":
+            get_vivid_official_aligned_status()
+            return None
+        if args.baseline == "pc_bnn" and capability.task_family == "sparse_reconstruction":
+            if args.pde.lower() != "shallow_water":
+                raise OfficialImportError("official-aligned PC-BNN is only enabled for 2D three-channel shallow-water fields")
+            get_pc_bnn_official_aligned_status()
+            return None
+    except OfficialImportError as exc:
+        reason = f"official backend unavailable before dataset loading: {exc}"
+        backend_info = _default_skip_backend_info(method_cfg, reason, adapter_status="official_backend_unavailable")
+        backend_info["fallback_used"] = mode == "official_or_skip"
+        if mode == "official_or_skip":
+            return {"reason": reason, "backend_info": backend_info, "adapter_status": "official_backend_unavailable"}
+        raise RuntimeError(reason) from exc
+    return None
+
+
 def _backend_info(model, method_cfg: dict[str, Any]) -> dict[str, Any]:
     official_backend = str(getattr(model, "official_backend", "local"))
     backend_used = str(getattr(model, "backend_used", "") or official_backend or "local")
@@ -1058,6 +1157,9 @@ def _backend_info(model, method_cfg: dict[str, Any]) -> dict[str, Any]:
         "official_commit_or_version": str(getattr(model, "official_commit_or_version", "")),
         "official_import_path": str(getattr(model, "official_import_path", "")),
         "official_import_success": bool(getattr(model, "official_import_success", False)),
+        "official_reimplementation_success": bool(getattr(model, "official_reimplementation_success", False)),
+        "official_alignment_level": str(getattr(model, "official_alignment_level", "")),
+        "official_alignment_notes": str(getattr(model, "official_alignment_notes", "")),
         "adapter_status": str(getattr(model, "adapter_status", "")),
     }
 
@@ -1076,6 +1178,9 @@ def _default_skip_backend_info(method_cfg: dict[str, Any], reason: str, adapter_
         "official_commit_or_version": "",
         "official_import_path": "",
         "official_import_success": False,
+        "official_reimplementation_success": False,
+        "official_alignment_level": "",
+        "official_alignment_notes": "",
         "adapter_status": adapter_status,
     }
 
@@ -1116,7 +1221,7 @@ def _skip_paper_run(
 
 def _official_request_mode(method_cfg: dict[str, Any]) -> str:
     implementation_mode = str(method_cfg.get("implementation_mode", "") or "").lower()
-    if implementation_mode in {"official", "official_or_skip", "official_architecture", "adapted", "canonical_math"}:
+    if implementation_mode in {"official", "official_or_skip", "official_architecture", "official_aligned", "adapted", "canonical_math"}:
         return implementation_mode
     backend = str(method_cfg.get("official_backend", "auto") or "auto").lower()
     if backend == "official":
@@ -1125,7 +1230,7 @@ def _official_request_mode(method_cfg: dict[str, Any]) -> str:
 
 
 def _requested_official(method_cfg: dict[str, Any]) -> bool:
-    return _official_request_mode(method_cfg) in {"official", "official_or_skip"}
+    return _official_request_mode(method_cfg) in {"official", "official_or_skip", "official_architecture", "official_aligned"}
 
 
 def _paper_table_eligibility(capability, backend_info: dict[str, Any]) -> bool:
@@ -1145,6 +1250,9 @@ def _implementation_fields(backend_info: dict[str, Any]) -> dict[str, Any]:
         "official_commit_or_version": backend_info.get("official_commit_or_version", ""),
         "official_import_path": backend_info.get("official_import_path", ""),
         "official_import_success": bool(backend_info.get("official_import_success", False)),
+        "official_reimplementation_success": bool(backend_info.get("official_reimplementation_success", False)),
+        "official_alignment_level": backend_info.get("official_alignment_level", ""),
+        "official_alignment_notes": backend_info.get("official_alignment_notes", ""),
         "adapter_status": backend_info.get("adapter_status", ""),
     }
 
@@ -1161,6 +1269,7 @@ def _capability_fields(capability_info: dict[str, Any]) -> dict[str, Any]:
         "source_key": capability_info.get("source_key", ""),
         "notes_for_paper": capability_info.get("notes_for_paper", ""),
         "official_architecture_allowed": bool(capability_info.get("official_architecture_allowed", False)),
+        "official_aligned_allowed": bool(capability_info.get("official_aligned_allowed", False)),
         "eligible_implementation_modes": json.dumps(list(capability_info.get("eligible_implementation_modes", []))),
         "paper_table_eligible": bool(capability_info.get("paper_table_eligible", False)),
     }

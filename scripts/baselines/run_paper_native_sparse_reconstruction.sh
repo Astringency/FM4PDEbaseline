@@ -22,6 +22,7 @@ BASELINES="${BASELINES:-recfno senseiver voronoicnn pinn_sparse pc_bnn pde_opt}"
 SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
 DATA_LOADING_MODE="${DATA_LOADING_MODE:-lazy}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
+PCBNN_IMPLEMENTATION_MODE="${PCBNN_IMPLEMENTATION_MODE:-official_aligned}"
 SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
 mkdir -p "$OUT"
 
@@ -30,6 +31,10 @@ for seed in $SEEDS; do
     for baseline in $BASELINES; do
       for sensors in $SENSOR_COUNTS; do
         for sensor_mode in $SENSOR_MODES; do
+          method_args=()
+          if [ "$baseline" = "pc_bnn" ]; then
+            method_args+=(--implementation-mode "$PCBNN_IMPLEMENTATION_MODE" --official-backend pc_bnn)
+          fi
           if ! python -m baselines.experiment_matrix --baseline "$baseline" --pde "$pde" --task sparse_solution --sensor-mode "$sensor_mode" --skipped-path "$SKIPPED"; then
             continue
           fi
@@ -43,7 +48,8 @@ for seed in $SEEDS; do
               --epochs "$EPOCHS" --seed "$seed" --device "$DEVICE" \
               --num-sensors "$sensors" --sensor-mode "$sensor_mode" --noise-level "$noise" \
               --data-loading-mode "$DATA_LOADING_MODE" \
-              --scalar-param-mode "$SCALAR_PARAM_MODE" --output-dir "$OUT"
+              --scalar-param-mode "$SCALAR_PARAM_MODE" --output-dir "$OUT" \
+              "${method_args[@]}"
           done
         done
       done

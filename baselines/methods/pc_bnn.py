@@ -26,28 +26,37 @@ class PCBNNBaseline(BaselineModel):
         self.hidden = int(self.config.get("hidden", 64))
         self.depth = int(self.config.get("depth", 4))
         self.official_net_cls = None
+        self.official_aligned = False
         backend = str(self.config.get("official_backend", "auto")).lower()
         implementation_mode = requested_implementation_mode(self.config)
         fallback_reason = ""
-        if self.coord_dim == 2 and self.target_channels == 3 and implementation_mode != "adapted" and backend in {"auto", "pc_bnn", "official"}:
+        matched_official_setting = _pc_bnn_official_setting(data_spec)
+        if matched_official_setting and implementation_mode != "adapted" and backend in {"auto", "pc_bnn", "official"}:
             try:
                 self.official_net_cls = get_pc_bnn_net_class()
-                self.set_backend(
-                    "pc_bnn",
-                    "pc_bnn",
-                    fallback_used=False,
-                    implementation_mode_effective="official",
-                    implementation_source="pc_bnn",
-                    official_import_success=True,
-                    adapter_status="official_code_adapter",
-                    **official_source_info("pc_bnn"),
-                )
             except OfficialImportError as exc:
                 fallback_reason = f"pc_bnn unavailable: {exc}"
-                if backend in {"pc_bnn", "official"}:
-                    warnings.warn(f"PC-BNN official Net unavailable, using local particle fallback: {exc}", RuntimeWarning, stacklevel=2)
+                self.official_net_cls = OfficialAlignedPCBNNNet
+            self.official_aligned = True
+            self.set_backend(
+                "pc_bnn_official_aligned",
+                "pc_bnn",
+                fallback_used=False,
+                warning=fallback_reason,
+                implementation_mode_effective="official_aligned",
+                implementation_source="pc_bnn_official_aligned_reimplementation",
+                official_import_success=False,
+                official_reimplementation_success=True,
+                official_alignment_level="objective",
+                official_alignment_notes=(
+                    "Uses the official PC-BNN sparse/noisy flow setting: coordinate-to-(u,v,p)-style "
+                    "Swish MLP particles, SVGD posterior updates, observation likelihood, and physics-constrained residual loss."
+                ),
+                adapter_status="official_aligned_pcbnn_reimplementation",
+                **official_source_info("pc_bnn"),
+            )
         elif implementation_mode != "adapted" and backend in {"auto", "pc_bnn", "official"}:
-            fallback_reason = "official PC-BNN adapter only supports 2D three-channel targets"
+            fallback_reason = "official-aligned PC-BNN supports only matched 2D three-channel shallow-water sparse reconstruction"
         if self.official_net_cls is None:
             requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
             self.set_backend(
@@ -58,7 +67,10 @@ class PCBNNBaseline(BaselineModel):
                 implementation_mode_effective="adapted",
                 implementation_source="local_svgd_particle_field",
                 official_import_success=False,
-                adapter_status="local_adapted" if requested_local else "fallback_adapted",
+                official_reimplementation_success=False,
+                official_alignment_level="local",
+                official_alignment_notes="Generic local SVGD neural field; supplement/debug only.",
+                adapter_status="local_generic_svgd_pcbnn" if requested_local else "fallback_generic_svgd_pcbnn",
             )
         return self
 
@@ -121,6 +133,7 @@ class PCBNNBaseline(BaselineModel):
         mean = torch.cat(all_means, dim=0)
         std = torch.cat(all_stds, dim=0)
         batch.metadata["predictive_std"] = std
+        batch.metadata["posterior_particles"] = int(self.particles)
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         return mean
 
@@ -128,6 +141,36 @@ class PCBNNBaseline(BaselineModel):
         if self.official_net_cls is not None and coord_dim == 2 and out_channels == 3:
             return self.official_net_cls(coord_dim, self.hidden)
         return NeuralField(coord_dim, out_channels, hidden=self.hidden, depth=self.depth)
+
+
+class OfficialAlignedPCBNNNet(nn.Module):
+    def __init__(self, n_feature: int, n_hidden: int) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Linear(n_feature, n_hidden),
+            _Swish(),
+            nn.Linear(n_hidden, n_hidden),
+            _Swish(),
+            nn.Linear(n_hidden, n_hidden),
+            _Swish(),
+            nn.Linear(n_hidden, 3),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.features(x)
+
+
+class _Swish(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.sigmoid(x)
+
+
+def _pc_bnn_official_setting(data_spec: dict) -> bool:
+    pde = str(data_spec.get("pde", "")).lower()
+    target_shape = tuple(data_spec.get("target_shape", ()))
+    target_channels = int(data_spec.get("target_channels", 0) or 0)
+    coord_dim = max(len(target_shape) - 2, 0)
+    return pde == "shallow_water" and coord_dim == 2 and target_channels == 3
 
 
 def _flatten_params(model: torch.nn.Module) -> torch.Tensor:

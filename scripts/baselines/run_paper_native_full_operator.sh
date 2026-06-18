@@ -22,6 +22,7 @@ SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
 SUPERVISED_SCALAR_PARAM_MODE="${SUPERVISED_SCALAR_PARAM_MODE:-materialize}"
 DATA_LOADING_MODE="${DATA_LOADING_MODE:-lazy}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
+IFNO_IMPLEMENTATION_MODE="${IFNO_IMPLEMENTATION_MODE:-official_aligned}"
 SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
 mkdir -p "$OUT"
 
@@ -44,6 +45,10 @@ run_one() {
   if is_future_pde "$pde" && [ -z "$SCALAR_PARAM_MODE_WAS_SET" ]; then
     scalar_mode="$SUPERVISED_SCALAR_PARAM_MODE"
   fi
+  local method_args=()
+  if [ "$baseline" = "ifno" ]; then
+    method_args+=(--implementation-mode "$IFNO_IMPLEMENTATION_MODE" --official-backend ifno)
+  fi
   python -m baselines.run \
     --experiment-mode paper \
     --baseline "$baseline" --pde "$pde" --task "$task" \
@@ -52,7 +57,8 @@ run_one() {
     --train-shards "$TRAIN_SHARDS" --batch-size "$BATCH_SIZE" \
     --epochs "$EPOCHS" --seed "$seed" --device "$DEVICE" \
     --data-loading-mode "$DATA_LOADING_MODE" \
-    --scalar-param-mode "$scalar_mode" --output-dir "$OUT"
+    --scalar-param-mode "$scalar_mode" --output-dir "$OUT" \
+    "${method_args[@]}"
 }
 
 for seed in $SEEDS; do

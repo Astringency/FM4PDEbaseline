@@ -17,10 +17,11 @@ SEEDS="${SEEDS:-1 2 3}"
 SENSOR_COUNTS="${SENSOR_COUNTS:-50 100 250 500}"
 NOISE_LEVELS="${NOISE_LEVELS:-0.0 0.01 0.05}"
 PDES="${PDES:-nsnonbounded burger reaction_diffusion shallow_water}"
-BASELINES="${BASELINES:-senseiver var4d}"
+BASELINES="${BASELINES:-senseiver var4d vivid}"
 SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
 DATA_LOADING_MODE="${DATA_LOADING_MODE:-lazy}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
+VIVID_IMPLEMENTATION_MODE="${VIVID_IMPLEMENTATION_MODE:-official_aligned}"
 SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
 mkdir -p "$OUT"
 
@@ -28,7 +29,13 @@ for seed in $SEEDS; do
   for pde in $PDES; do
     for baseline in $BASELINES; do
       for sensors in $SENSOR_COUNTS; do
-        if ! python -m baselines.experiment_matrix --baseline "$baseline" --pde "$pde" --task sparse_solution --sensor-mode time_varying --task-group time_varying --load-full-trajectory --train-inverse-operator --skipped-path "$SKIPPED"; then
+        matrix_args=()
+        method_args=()
+        if [ "$baseline" = "vivid" ]; then
+          matrix_args+=(--uses-official-inverse-observation-operator)
+          method_args+=(--implementation-mode "$VIVID_IMPLEMENTATION_MODE" --official-backend vivid --method-override uses_official_inverse_observation_operator=true)
+        fi
+        if ! python -m baselines.experiment_matrix --baseline "$baseline" --pde "$pde" --task sparse_solution --sensor-mode time_varying --task-group time_varying --load-full-trajectory --train-inverse-operator "${matrix_args[@]}" --skipped-path "$SKIPPED"; then
           continue
         fi
         for noise in $NOISE_LEVELS; do
@@ -42,7 +49,8 @@ for seed in $SEEDS; do
             --num-sensors "$sensors" --sensor-mode time_varying --noise-level "$noise" \
             --task-group time_varying --load-full-trajectory \
             --data-loading-mode "$DATA_LOADING_MODE" \
-            --scalar-param-mode "$SCALAR_PARAM_MODE" --output-dir "$OUT"
+            --scalar-param-mode "$SCALAR_PARAM_MODE" --output-dir "$OUT" \
+            "${method_args[@]}"
         done
       done
     done

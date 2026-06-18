@@ -7,7 +7,14 @@ import torch.nn.functional as F
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, _to_device_batch
-from .official import OfficialImportError, get_ifno_official_status, official_source_info, requested_implementation_mode
+from .ifno_official_aligned import OfficialAlignedIFNO2d
+from .official import (
+    OfficialImportError,
+    get_ifno_official_aligned_status,
+    get_ifno_official_status,
+    official_source_info,
+    requested_implementation_mode,
+)
 from .shared import SpectralConv2d, grid_channels
 
 
@@ -46,31 +53,72 @@ class IFNOBaseline(BaselineModel):
         modes1 = int(self.config.get("modes1", 12))
         modes2 = int(self.config.get("modes2", 12))
         layers = int(self.config.get("layers", 3))
+        beta = float(self.config.get("beta", 2.0))
+        padding = int(self.config.get("padding", 0))
         backend = str(self.config.get("official_backend", "auto")).lower()
         implementation_mode = requested_implementation_mode(self.config)
-        fallback_warning = ""
-        if implementation_mode != "adapted" and backend in {"auto", "ifno", "official"}:
-            try:
-                get_ifno_official_status()
-            except OfficialImportError as exc:
-                fallback_warning = f"official iFNO unavailable: {exc}"
         self.input_channels = int(data_spec["input_channels"])
         self.target_channels = int(data_spec["target_channels"])
+        requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
+        self.official_aligned = not requested_local
+        if self.official_aligned and backend in {"auto", "ifno", "official"}:
+            direct_import_warning = ""
+            try:
+                get_ifno_official_status()
+                direct_import_success = True
+            except OfficialImportError as exc:
+                direct_import_success = False
+                direct_import_warning = f"direct official iFNO import unavailable; using official-aligned reimplementation: {exc}"
+            if not direct_import_success:
+                get_ifno_official_aligned_status()
+            self.operator = OfficialAlignedIFNO2d(
+                self.input_channels,
+                self.target_channels,
+                width=width,
+                modes1=modes1,
+                modes2=modes2,
+                layers=layers,
+                beta=beta,
+                padding=padding,
+            )
+            effective = "official_architecture" if implementation_mode == "official_architecture" else "official_aligned"
+            self.set_backend(
+                "ifno_official_aligned",
+                "ifno",
+                fallback_used=False,
+                warning=direct_import_warning,
+                implementation_mode_effective=effective,
+                implementation_source="ifno_official_aligned_reimplementation",
+                official_import_success=direct_import_success,
+                official_reimplementation_success=not direct_import_success,
+                official_alignment_level="architecture" if effective == "official_architecture" else "objective",
+                official_alignment_notes=(
+                    "Reimplements vendored iFNO p1/p2 lift, q1/q2 pointwise projections, "
+                    "multiplicative FNO coupling blocks, grid-coordinate augmentation, and bidirectional/cycle objectives."
+                ),
+                adapter_status="official_architecture_ifno_reimplementation"
+                if effective == "official_architecture"
+                else "official_aligned_ifno_reimplementation",
+                **official_source_info("ifno"),
+            )
+            return self
         self.lift_x = nn.Conv2d(self.input_channels + 2, width, 1)
         self.lift_y = nn.Conv2d(self.target_channels + 2, width, 1)
         self.blocks = nn.ModuleList([_CouplingBlock(width, modes1, modes2) for _ in range(layers)])
         self.proj_y = nn.Sequential(nn.Conv2d(width, width, 1), nn.GELU(), nn.Conv2d(width, self.target_channels, 1))
         self.proj_x = nn.Sequential(nn.Conv2d(width, width, 1), nn.GELU(), nn.Conv2d(width, self.input_channels, 1))
-        requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
         self.set_backend(
             "local_ifno_simplified",
-            "local" if requested_local else "official",
-            fallback_used=not requested_local,
-            warning="" if requested_local else fallback_warning,
+            "local",
+            fallback_used=False,
+            warning="explicit local/debug iFNO path; not paper main-table eligible",
             implementation_mode_effective="adapted",
             implementation_source="local_simplified_ifno",
             official_import_success=False,
-            adapter_status="local_adapted" if requested_local else "fallback_adapted_not_official_ifno",
+            official_reimplementation_success=False,
+            official_alignment_level="local",
+            official_alignment_notes="Simplified local/debug iFNO-style coupling, not an official architecture claim.",
+            adapter_status="local_debug_ifno",
             **official_source_info("ifno"),
         )
         return self
@@ -94,12 +142,13 @@ class IFNOBaseline(BaselineModel):
                 batch = _to_device_batch(batch, device)
                 x, y = _physical_pair(batch)
                 opt.zero_grad(set_to_none=True)
-                y_pred = self._forward_map(x)
-                x_pred = self._inverse_map(y)
+                y_pred, recon_x = self._forward_map_with_aux(x)
+                x_pred, recon_y = self._inverse_map_with_aux(y)
                 cycle_x = self._inverse_map(y_pred)
                 cycle_y = self._forward_map(x_pred)
                 loss = F.mse_loss(y_pred, y) + F.mse_loss(x_pred, x)
                 loss = loss + cycle_weight * (F.mse_loss(cycle_x, x) + F.mse_loss(cycle_y, y))
+                loss = loss + float(self.config.get("reconstruction_weight", 0.1)) * (recon_x + recon_y)
                 loss.backward()
                 opt.step()
                 total += float(loss.detach().cpu())
@@ -108,25 +157,40 @@ class IFNOBaseline(BaselineModel):
         return history
 
     def predict(self, batch: PDEBatch):
-        if batch.task in {"inverse", "sparse_inverse"}:
-            if batch.task == "sparse_inverse":
-                raise NotImplementedError("iFNO sparse_inverse is unsupported without an official posterior/sparse inference adapter")
-            x = batch.input_fields
-            return self._inverse_map(x)
+        if batch.task.startswith("sparse"):
+            raise NotImplementedError("iFNO sparse reconstruction/inverse is unsupported without an official sparse inference adapter")
+        if batch.task == "inverse":
+            return self._inverse_map(batch.input_fields)
         x = batch.input_fields
         return self._forward_map(x)
 
     def _forward_map(self, x: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "official_aligned", False):
+            pred, _ = self.operator.forward_map(x)
+            return pred
         z = self.lift_x(torch.cat([x, grid_channels(x)], dim=1))
         for block in self.blocks:
             z = block(z, inverse=False)
         return self.proj_y(z)
 
     def _inverse_map(self, y: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "official_aligned", False):
+            pred, _ = self.operator.inverse_map(y)
+            return pred
         z = self.lift_y(torch.cat([y, grid_channels(y)], dim=1))
         for block in reversed(self.blocks):
             z = block(z, inverse=True)
         return self.proj_x(z)
+
+    def _forward_map_with_aux(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if getattr(self, "official_aligned", False):
+            return self.operator.forward_map(x)
+        return self._forward_map(x), torch.tensor(0.0, device=x.device, dtype=x.dtype)
+
+    def _inverse_map_with_aux(self, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if getattr(self, "official_aligned", False):
+            return self.operator.inverse_map(y)
+        return self._inverse_map(y), torch.tensor(0.0, device=y.device, dtype=y.dtype)
 
 
 def _physical_pair(batch: PDEBatch) -> tuple[torch.Tensor, torch.Tensor]:
