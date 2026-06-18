@@ -209,11 +209,37 @@ def build_matrix(
         pdes = _resolve_pdes(cfg, group_cfg, experiment_kind, ablation_factor)
         baselines = _resolve_baselines(cfg, task_group, task, group_cfg, experiment_kind, ablation_factor)
         extra_skip_baselines = list(group_cfg.get("extra_skip_baselines", []) or [])
-        candidate_baselines = baselines + [baseline for baseline in extra_skip_baselines if baseline not in baselines]
+        candidate_baselines = list(baselines)
         seeds = _env_list("SEEDS", group_cfg.get("seeds", global_defaults["seeds"]), int)
         expansion = _group_expansion(cfg, group_cfg, global_defaults, task_group, task)
 
         for pde in pdes:
+            for baseline in extra_skip_baselines:
+                if baseline in baselines:
+                    continue
+                budget_variants = _budget_variants(cfg, group_cfg, baseline, ablation_factor, experiment_kind)
+                for sensor_mode in expansion["sensor_modes"]:
+                    skipped_row = {
+                        "matrix_name": matrix_name,
+                        "experiment_kind": experiment_kind,
+                        "ablation_factor": ablation_factor,
+                        "task_group": task_group,
+                        "task": task,
+                        "pde": pde,
+                        "baseline": baseline,
+                        "sensor_mode": sensor_mode,
+                        "reason": "baseline is intentionally skipped for this task_group",
+                        "would_have_expanded": (
+                            len(seeds)
+                            * len(expansion["sensor_counts"])
+                            * len(expansion["noise_levels"])
+                            * len(expansion["train_sizes"])
+                            * len(budget_variants)
+                        ),
+                    }
+                    _merge_skip(skipped, skipped_row)
+                    if include_skipped:
+                        rows.append(_skipped_matrix_row(skipped_row, global_defaults, output_root))
             for baseline in candidate_baselines:
                 budget_variants = _budget_variants(cfg, group_cfg, baseline, ablation_factor, experiment_kind)
                 for sensor_mode in expansion["sensor_modes"]:

@@ -78,6 +78,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", default="outputs/baselines")
+    parser.add_argument("--experiment-kind", default="")
+    parser.add_argument("--ablation-factor", default="")
+    parser.add_argument("--task-group", default="")
     parser.add_argument("--run-id", default="", help="Stable external run identifier used in output filenames.")
     parser.add_argument("--run-name", default="", help="Human-readable external run name stored in metadata.")
     parser.add_argument("--dry-run", action="store_true")
@@ -228,6 +231,7 @@ def main(argv: list[str] | None = None) -> None:
 
     model = BASELINES[args.baseline]().build(method_cfg, data_spec).to(args.device)
     backend_info = _backend_info(model, method_cfg)
+    method_budget_fields = _method_budget_fields(method_cfg, args.baseline)
     if args.experiment_mode == "paper" and _requested_official(method_cfg) and backend_info["fallback_used"]:
         raise RuntimeError(
             f"{args.baseline} requested official backend for paper mode but used fallback backend "
@@ -245,7 +249,7 @@ def main(argv: list[str] | None = None) -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_prefix = _run_file_prefix(args)
-    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info)
+    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields)
     train_history_path = out_dir / f"{run_prefix}_train_history.json"
     train_history_path.write_text(json.dumps(_json_safe(train_history), indent=2), encoding="utf-8")
     checkpoint_path = ""
@@ -269,8 +273,20 @@ def main(argv: list[str] | None = None) -> None:
         val_dataset=val_dataset,
         test_dataset=test_dataset,
         split_info=split_info,
+        method_budget_fields=method_budget_fields,
     )
-    summary = _summarize_run(raw_rows, eval_totals, args, train_dataset_for_fit, spec_dataset, val_dataset, test_dataset, backend_info, split_info)
+    summary = _summarize_run(
+        raw_rows,
+        eval_totals,
+        args,
+        train_dataset_for_fit,
+        spec_dataset,
+        val_dataset,
+        test_dataset,
+        backend_info,
+        split_info,
+        method_budget_fields,
+    )
     summary.update(
         {
             "train_time": train_time,
@@ -323,6 +339,37 @@ def _resolve_data_loading_mode(args: argparse.Namespace) -> str:
     if args.data_loading_mode:
         return str(args.data_loading_mode)
     return "lazy" if args.experiment_mode == "paper" else "eager"
+
+
+def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str, Any]:
+    steps = int(method_cfg.get("steps", 0) or 0)
+    refine_steps = int(method_cfg.get("refine_steps", 0) or 0)
+    particles = int(method_cfg.get("particles", 0) or 0)
+    labels = []
+    if refine_steps > 0 and baseline == "vivid":
+        labels.append(f"refine_steps={refine_steps}")
+    if steps > 0:
+        labels.append(f"steps={steps}")
+    if particles > 0 and baseline == "pc_bnn":
+        labels.append(f"particles={particles}")
+    if refine_steps > 0 and baseline != "vivid":
+        labels.append(f"refine_steps={refine_steps}")
+    if particles > 0 and baseline != "pc_bnn":
+        labels.append(f"particles={particles}")
+    return {
+        "steps": steps,
+        "refine_steps": refine_steps,
+        "particles": particles,
+        "method_budget_label": ",".join(labels),
+    }
+
+
+def _experiment_fields(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "experiment_kind": args.experiment_kind,
+        "ablation_factor": args.ablation_factor,
+        "task_group": args.task_group,
+    }
 
 
 def _split_load_full_trajectory(args: argparse.Namespace, split: str) -> bool:
@@ -474,6 +521,7 @@ def _evaluate_full_test_loader(
     val_dataset: PDEBatchDataset | None,
     test_dataset: PDEBatchDataset,
     split_info: dict[str, Any],
+    method_budget_fields: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     model.eval()
     rows: list[dict[str, Any]] = []
@@ -500,6 +548,8 @@ def _evaluate_full_test_loader(
         row = {
             "run_id": args.run_id,
             "run_name": args.run_name,
+            **_experiment_fields(args),
+            **method_budget_fields,
             "pde": args.pde,
             "task": args.task,
             "baseline": args.baseline,
@@ -678,6 +728,7 @@ def _summarize_run(
     test_dataset: PDEBatchDataset,
     backend_info: dict[str, Any],
     split_info: dict[str, Any],
+    method_budget_fields: dict[str, Any],
 ) -> dict[str, Any]:
     metric_keys = [
         "relative_l2_solution",
@@ -695,6 +746,8 @@ def _summarize_run(
     summary: dict[str, Any] = {
         "run_id": args.run_id,
         "run_name": args.run_name,
+        **_experiment_fields(args),
+        **method_budget_fields,
         "pde": args.pde,
         "task": args.task,
         "baseline": args.baseline,
@@ -955,7 +1008,15 @@ def _run_file_prefix(args: argparse.Namespace) -> str:
     return f"{args.baseline}_{args.pde}_{args.task}_seed{args.seed}"
 
 
-def _write_config_snapshot(out_dir: Path, args: argparse.Namespace, cfg: dict[str, Any], method_cfg: dict[str, Any], data_spec: dict[str, Any], backend_info: dict[str, Any]) -> Path:
+def _write_config_snapshot(
+    out_dir: Path,
+    args: argparse.Namespace,
+    cfg: dict[str, Any],
+    method_cfg: dict[str, Any],
+    data_spec: dict[str, Any],
+    backend_info: dict[str, Any],
+    method_budget_fields: dict[str, Any],
+) -> Path:
     prefix = _run_file_prefix(args)
     path = out_dir / f"{prefix}_config.json"
     payload = {
@@ -971,6 +1032,8 @@ def _write_config_snapshot(out_dir: Path, args: argparse.Namespace, cfg: dict[st
         "load_full_trajectory": bool(args.load_full_trajectory),
         "run_id": args.run_id,
         "run_name": args.run_name,
+        **_experiment_fields(args),
+        **method_budget_fields,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     if args.config:

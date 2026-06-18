@@ -10,6 +10,9 @@ from typing import Any
 
 
 GROUP_KEYS = [
+    "experiment_kind",
+    "ablation_factor",
+    "task_group",
     "pde",
     "task",
     "baseline",
@@ -18,6 +21,10 @@ GROUP_KEYS = [
     "num_sensors",
     "sensor_mode",
     "noise_level",
+    "steps",
+    "refine_steps",
+    "particles",
+    "method_budget_label",
     "backend_used",
 ]
 
@@ -71,9 +78,12 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for key, items in sorted(groups.items(), key=lambda kv: kv[0]):
         result = {k: v for k, v in zip(GROUP_KEYS, key)}
         residual_counts: Counter[str] = Counter()
+        assimilation_counts: Counter[str] = Counter()
         for item in items:
-            residual_counts.update(_parse_residual_counts(item))
+            residual_counts.update(_parse_counts(item, "residual_mode_counts", "residual_mode"))
+            assimilation_counts.update(_parse_counts(item, "assimilation_mode_counts", "assimilation_mode"))
         result["residual_mode_counts"] = json.dumps(dict(residual_counts), sort_keys=True)
+        result["assimilation_mode_counts"] = json.dumps(dict(assimilation_counts), sort_keys=True)
         result["run_count"] = len(items)
         metric_modes: list[str] = []
         for metric in METRICS:
@@ -177,19 +187,23 @@ def _aggregation_mode(modes: list[str]) -> str:
     return "+".join(sorted(relevant))
 
 
-def _parse_residual_counts(item: dict[str, Any]) -> Counter[str]:
-    if "residual_mode_counts" in item:
-        value = item["residual_mode_counts"]
-        if isinstance(value, str):
+def _parse_counts(item: dict[str, Any], counts_key: str, mode_key: str) -> Counter[str]:
+    if counts_key in item:
+        value = item[counts_key]
+        if value is None or value == "":
+            pass
+        elif isinstance(value, str):
             try:
                 parsed = json.loads(value)
                 return Counter({str(k): int(v) for k, v in parsed.items()})
             except Exception:
                 return Counter({value: 1})
-        if isinstance(value, dict):
+        elif isinstance(value, dict):
             return Counter({str(k): int(v) for k, v in value.items()})
-    if "residual_mode" in item:
-        return Counter({str(item["residual_mode"]): int(item.get("sample_count", 1) or 1)})
+    if mode_key in item:
+        mode = str(item[mode_key])
+        if mode:
+            return Counter({mode: int(item.get("sample_count", 1) or 1)})
     return Counter()
 
 
@@ -239,6 +253,7 @@ def _latex_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "task": row.get("task", ""),
                 "baseline": row.get("baseline", ""),
                 "train_size": row.get("train_size", ""),
+                "method_budget_label": row.get("method_budget_label", ""),
                 "scalar_param_mode": row.get("scalar_param_mode", ""),
                 "relative_l2_solution": _pm(row, "relative_l2_solution"),
                 "mse": _pm(row, "mse"),
@@ -247,6 +262,7 @@ def _latex_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "n": row.get("relative_l2_solution_n", 0),
                 "nan_count": row.get("relative_l2_solution_nan_count", 0),
                 "residual_mode_counts": row.get("residual_mode_counts", "{}"),
+                "assimilation_mode_counts": row.get("assimilation_mode_counts", "{}"),
             }
         )
     return out

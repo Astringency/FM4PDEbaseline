@@ -46,6 +46,7 @@ def load_row(matrix: str | Path, index: int) -> dict[str, Any]:
 
 
 def build_command(row: dict[str, Any]) -> list[str]:
+    values = effective_command_values(row)
     data_root = os.environ.get("DATA_ROOT", "")
     if not data_root:
         raise RuntimeError("DATA_ROOT must be set to a real PDE data root for paper-mode runs")
@@ -64,29 +65,35 @@ def build_command(row: dict[str, Any]) -> list[str]:
         "--data-root",
         data_root,
         "--config",
-        os.environ.get("CONFIG", str(row["config"])),
+        str(values["config"]),
         "--train-size",
-        str(_env_or_row("TRAIN_SIZE", row, "train_size")),
+        str(values["train_size"]),
         "--val-size",
-        str(_env_or_row("VAL_SIZE", row, "val_size")),
+        str(values["val_size"]),
         "--test-size",
-        str(_env_or_row("TEST_SIZE", row, "test_size")),
+        str(values["test_size"]),
         "--train-shards",
-        str(_env_or_row("TRAIN_SHARDS", row, "train_shards")),
+        str(values["train_shards"]),
         "--batch-size",
-        str(_env_or_row("BATCH_SIZE", row, "batch_size")),
+        str(values["batch_size"]),
         "--epochs",
-        str(_env_or_row("EPOCHS", row, "epochs")),
+        str(values["epochs"]),
         "--seed",
         str(row["seed"]),
         "--device",
         os.environ.get("DEVICE", str(row["device"])),
         "--data-loading-mode",
-        os.environ.get("DATA_LOADING_MODE", str(row["data_loading_mode"])),
+        str(values["data_loading_mode"]),
         "--scalar-param-mode",
-        os.environ.get("SCALAR_PARAM_MODE", str(row["scalar_param_mode"])),
+        str(values["scalar_param_mode"]),
         "--output-dir",
         str(row["output_dir"]),
+        "--experiment-kind",
+        str(row.get("experiment_kind", "")),
+        "--ablation-factor",
+        str(row.get("ablation_factor", "")),
+        "--task-group",
+        str(row.get("task_group", "")),
         "--run-id",
         str(row["run_id"]),
         "--run-name",
@@ -96,19 +103,19 @@ def build_command(row: dict[str, Any]) -> list[str]:
         cmd.extend(
             [
                 "--num-sensors",
-                str(row["num_sensors"]),
+                str(values["num_sensors"]),
                 "--sensor-mode",
-                str(row["sensor_mode"]),
+                str(values["sensor_mode"]),
                 "--noise-level",
-                str(row["noise_level"]),
+                str(values["noise_level"]),
             ]
         )
     if _as_bool(row.get("load_full_trajectory", False)):
         cmd.append("--load-full-trajectory")
 
-    steps = _method_steps(row)
-    refine_steps = _method_refine_steps(row)
-    particles = _method_particles(row)
+    steps = int(values["steps"])
+    refine_steps = int(values["refine_steps"])
+    particles = int(values["particles"])
     if steps > 0:
         cmd.extend(["--steps", str(steps)])
     if refine_steps > 0:
@@ -120,6 +127,29 @@ def build_command(row: dict[str, Any]) -> list[str]:
     if forbidden:
         raise RuntimeError(f"paper command contains forbidden flags: {sorted(forbidden)}")
     return cmd
+
+
+def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
+    allow_override = _env_flag("ALLOW_ROW_OVERRIDE")
+    values = {
+        "config": row_value(row, "config", "CONFIG", allow_override),
+        "train_size": row_value(row, "train_size", "TRAIN_SIZE", allow_override),
+        "val_size": row_value(row, "val_size", "VAL_SIZE", allow_override),
+        "test_size": row_value(row, "test_size", "TEST_SIZE", allow_override),
+        "train_shards": row_value(row, "train_shards", "TRAIN_SHARDS", allow_override),
+        "batch_size": row_value(row, "batch_size", "BATCH_SIZE", allow_override),
+        "epochs": row_value(row, "epochs", "EPOCHS", allow_override),
+        "scalar_param_mode": row_value(row, "scalar_param_mode", "SCALAR_PARAM_MODE", allow_override),
+        "data_loading_mode": row_value(row, "data_loading_mode", "DATA_LOADING_MODE", allow_override),
+        "num_sensors": row_value(row, "num_sensors", "NUM_SENSORS", allow_override),
+        "sensor_mode": row_value(row, "sensor_mode", "SENSOR_MODE", allow_override),
+        "noise_level": row_value(row, "noise_level", "NOISE_LEVEL", allow_override),
+        "steps": _method_steps(row, allow_override),
+        "refine_steps": _method_refine_steps(row, allow_override),
+        "particles": _method_particles(row, allow_override),
+        "allow_row_override": allow_override,
+    }
+    return values
 
 
 def run_one(row: dict[str, Any], cmd: list[str]) -> int:
@@ -164,7 +194,19 @@ def run_one(row: dict[str, Any], cmd: list[str]) -> int:
     running.write_text(json.dumps({**start_payload, "pid": os.getpid()}, indent=2, sort_keys=True), encoding="utf-8")
     (output_dir / "command.txt").write_text(command_text + "\n", encoding="utf-8")
     (output_dir / "env.txt").write_text(_env_text(), encoding="utf-8")
-    (output_dir / "metadata.json").write_text(json.dumps({"row": row, "command": cmd, "attempt": attempt}, indent=2, sort_keys=True), encoding="utf-8")
+    (output_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "row": row,
+                "command": cmd,
+                "effective_command_values": effective_command_values(row),
+                "attempt": attempt,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     _write_status(status_file, row, "running", "")
 
     stdout_path = output_dir / "stdout.log"
@@ -209,32 +251,34 @@ def run_one(row: dict[str, Any], cmd: list[str]) -> int:
     return int(proc.returncode)
 
 
-def _env_or_row(env_name: str, row: dict[str, Any], key: str) -> Any:
-    return os.environ.get(env_name, row[key])
+def row_value(row: dict[str, Any], key: str, env_name: str | None = None, allow_override: bool = False) -> Any:
+    if allow_override and env_name and os.environ.get(env_name) not in {None, ""}:
+        return os.environ[env_name]
+    return row[key]
 
 
-def _method_steps(row: dict[str, Any]) -> int:
+def _method_steps(row: dict[str, Any], allow_override: bool) -> int:
     baseline = str(row["baseline"])
     if baseline == "pinn_sparse":
-        return int(os.environ.get("PINN_STEPS", row.get("steps", 0) or 0))
+        return int(row_value(row, "steps", "PINN_STEPS", allow_override) or 0)
     if baseline == "pde_opt":
-        return int(os.environ.get("PDEOPT_STEPS", row.get("steps", 0) or 0))
+        return int(row_value(row, "steps", "PDEOPT_STEPS", allow_override) or 0)
     if baseline == "var4d":
-        return int(os.environ.get("VAR4D_STEPS", row.get("steps", 0) or 0))
+        return int(row_value(row, "steps", "VAR4D_STEPS", allow_override) or 0)
     if baseline == "pc_bnn":
-        return int(os.environ.get("PCBNN_STEPS", row.get("steps", 0) or 0))
+        return int(row_value(row, "steps", "PCBNN_STEPS", allow_override) or 0)
     return int(row.get("steps", 0) or 0)
 
 
-def _method_refine_steps(row: dict[str, Any]) -> int:
+def _method_refine_steps(row: dict[str, Any], allow_override: bool) -> int:
     if str(row["baseline"]) == "vivid":
-        return int(os.environ.get("VIVID_REFINE_STEPS", row.get("refine_steps", 0) or 0))
+        return int(row_value(row, "refine_steps", "VIVID_REFINE_STEPS", allow_override) or 0)
     return int(row.get("refine_steps", 0) or 0)
 
 
-def _method_particles(row: dict[str, Any]) -> int:
+def _method_particles(row: dict[str, Any], allow_override: bool) -> int:
     if str(row["baseline"]) == "pc_bnn":
-        return int(os.environ.get("PCBNN_PARTICLES", row.get("particles", 0) or 0))
+        return int(row_value(row, "particles", "PCBNN_PARTICLES", allow_override) or 0)
     return int(row.get("particles", 0) or 0)
 
 

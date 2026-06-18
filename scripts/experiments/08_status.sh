@@ -6,7 +6,9 @@ cd "$ROOT"
 
 OUT_ROOT="${OUT_ROOT:-outputs/baselines_large}"
 args=(--output-root "$OUT_ROOT")
-if [ -n "${MATRIX:-}" ]; then
+if [ "${ALL_MATRICES:-0}" = "1" ]; then
+  args+=(--all-matrices)
+elif [ -n "${MATRIX:-}" ]; then
   args+=(--matrix "$MATRIX")
 fi
 python scripts/experiments/status.py "${args[@]}"

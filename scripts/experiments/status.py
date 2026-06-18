@@ -14,13 +14,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("Summarize FM4PDE baseline matrix run status.")
     parser.add_argument("--output-root", default=os.environ.get("OUT_ROOT", "outputs/baselines_large"))
     parser.add_argument("--matrix", default=os.environ.get("MATRIX", ""))
+    parser.add_argument("--all-matrices", action="store_true", help="Scan every matrix JSONL under matrices/, excluding *_skipped.jsonl.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     out_root = Path(args.output_root)
-    matrix_paths = _matrix_paths(out_root, args.matrix)
+    matrix_paths = _matrix_paths(out_root, args.matrix, args.all_matrices)
     rows = []
     for path in matrix_paths:
         rows.extend(_read_jsonl(path))
@@ -63,13 +64,17 @@ def main() -> None:
     print(json.dumps({"matrices": [str(p) for p in matrix_paths], "status_csv": str(status_csv), **dict(counts)}, indent=2, sort_keys=True))
 
 
-def _matrix_paths(out_root: Path, explicit: str) -> list[Path]:
+def _matrix_paths(out_root: Path, explicit: str, all_matrices: bool = False) -> list[Path]:
     if explicit:
         return [Path(explicit)]
+    matrix_dir = out_root / "matrices"
+    if all_matrices:
+        if not matrix_dir.exists():
+            return []
+        return [p for p in sorted(matrix_dir.glob("*.jsonl")) if not p.name.endswith("_skipped.jsonl")]
     main_results = out_root / "matrices" / "main_results.jsonl"
     if main_results.exists():
         return [main_results]
-    matrix_dir = out_root / "matrices"
     if not matrix_dir.exists():
         return []
     return [p for p in sorted(matrix_dir.glob("*.jsonl")) if not p.name.endswith("_skipped.jsonl")]
