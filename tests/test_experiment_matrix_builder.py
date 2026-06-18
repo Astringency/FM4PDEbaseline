@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+from baselines.experiment_matrix import compatibility_reason
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_sanity_matrix_generation_unique_run_ids_and_skips(tmp_path: Path):
+    out = tmp_path / "large"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/experiments/build_matrix.py",
+            "--config",
+            "configs/experiments/sanity.yaml",
+            "--output-root",
+            str(out),
+            "--matrix-name",
+            "sanity",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    rows = _read_jsonl(out / "matrices" / "sanity.jsonl")
+    assert rows
+    run_ids = [row["run_id"] for row in rows]
+    assert len(run_ids) == len(set(run_ids))
+    skipped = _read_jsonl(out / "skipped_combinations.jsonl")
+    assert any(row["task"] == "sparse_inverse" and row["baseline"] == "pde_opt" for row in skipped)
+
+
+def test_future_supervised_defaults_to_materialize(tmp_path: Path):
+    out = tmp_path / "large"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/experiments/build_matrix.py",
+            "--config",
+            "configs/experiments/sanity.yaml",
+            "--output-root",
+            str(out),
+            "--matrix-name",
+            "sanity",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    rows = _read_jsonl(out / "matrices" / "sanity.jsonl")
+    heat_forward = [row for row in rows if row["pde"] == "heat" and row["task"] == "forward"]
+    assert heat_forward
+    assert {row["scalar_param_mode"] for row in heat_forward} == {"materialize"}
+
+
+def test_sparse_inverse_per_instance_and_time_varying_unsupported_are_skipped():
+    assert "forward solve" in compatibility_reason("pde_opt", "poisson", "sparse_inverse")
+    assert "5D trajectory" in compatibility_reason(
+        "fno",
+        "reaction_diffusion",
+        "sparse_solution",
+        sensor_mode="time_varying",
+        task_group="time_varying",
+    )
+
+
+def test_diffusionpde_and_fm4pde_are_outside_matrix():
+    assert "DiffusionPDE" in compatibility_reason("fno", "DiffusionPDE", "forward")
+    assert "FM4PDE" in compatibility_reason("FM4PDE", "darcy", "forward")

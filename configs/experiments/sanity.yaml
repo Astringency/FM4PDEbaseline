@@ -1,0 +1,62 @@
+name: sanity
+config: baselines/configs/paper.yaml
+pdes: [darcy, poisson, nsnonbounded, reaction_diffusion, shallow_water, heat]
+seeds: [1]
+train_size: 128
+val_size: 0
+test_size: 16
+train_shards: 5
+sensor_counts: [50]
+sensor_modes: [random]
+noise_levels: [0.0]
+data_loading_mode: lazy
+device: cuda
+task_groups:
+  - full_forward
+  - full_inverse
+  - sparse_solution_amortized
+  - sparse_solution_physics
+  - sparse_inverse
+task_group_overrides:
+  full_forward:
+    pdes: [darcy, heat]
+    baselines: [fno]
+  full_inverse:
+    pdes: [poisson, heat]
+    baselines: [deeponet]
+  sparse_solution_amortized:
+    pdes: [darcy, reaction_diffusion]
+    baselines: [recfno, senseiver]
+  sparse_solution_physics:
+    pdes: [poisson, shallow_water]
+    baselines: [pde_opt, var4d]
+  sparse_inverse:
+    pdes: [darcy, heat]
+    baselines: [fno, pde_opt]
+resources:
+  amortized_default:
+    batch_size: 16
+    epochs: 1
+    device: cuda
+  per_instance_default:
+    batch_size: 1
+    epochs: 1
+    device: cuda
+  pinn_sparse:
+    batch_size: 1
+    steps: 2
+  pc_bnn:
+    batch_size: 1
+    particles: 2
+    steps: 2
+  pde_opt:
+    batch_size: 1
+    steps: 2
+  var4d:
+    batch_size: 1
+    steps: 2
+    load_full_trajectory: true
+  vivid:
+    batch_size: 1
+    refine_steps: 2
+    load_full_trajectory: true

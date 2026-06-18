@@ -78,6 +78,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", default="outputs/baselines")
+    parser.add_argument("--run-id", default="", help="Stable external run identifier used in output filenames.")
+    parser.add_argument("--run-name", default="", help="Human-readable external run name stored in metadata.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--synthetic-data", action="store_true", help="Use deterministic synthetic data for smoke/debug tests.")
     parser.add_argument("--allow-synthetic-fallback", action="store_true", help="Fall back to synthetic data when requested real files are missing.")
@@ -89,6 +91,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--physics-metric-mode", choices=["per_sample", "per_batch"], default=None)
     parser.add_argument("--strict-size", action="store_true", help="Fail if requested split size exceeds available samples.")
     parser.add_argument("--save-checkpoint", action="store_true")
+    parser.add_argument("--steps", type=int, default=None, help="Override per-instance optimization steps in the method config.")
+    parser.add_argument("--refine-steps", type=int, default=None, help="Override VIVID refinement steps in the method config.")
+    parser.add_argument("--particles", type=int, default=None, help="Override PC-BNN particle count in the method config.")
     return parser.parse_args(argv)
 
 
@@ -112,7 +117,14 @@ def build_method_config(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         merged["lr"] = args.lr
     else:
         merged.setdefault("lr", float(cfg.get("learning_rate", 1e-3)))
+    if args.steps is not None:
+        merged["steps"] = int(args.steps)
+    if args.refine_steps is not None:
+        merged["refine_steps"] = int(args.refine_steps)
+    if args.particles is not None:
+        merged["particles"] = int(args.particles)
     merged["device"] = args.device
+    merged.setdefault("seed", int(args.seed))
     if args.dry_run:
         merged["max_steps"] = min(int(merged.get("max_steps", 1) or 1), 1)
         merged["max_val_steps"] = min(int(merged.get("max_val_steps", 1) or 1), 1)
@@ -232,12 +244,13 @@ def main(argv: list[str] | None = None) -> None:
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    run_prefix = _run_file_prefix(args)
     config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info)
-    train_history_path = out_dir / f"{args.baseline}_{args.pde}_{args.task}_seed{args.seed}_train_history.json"
+    train_history_path = out_dir / f"{run_prefix}_train_history.json"
     train_history_path.write_text(json.dumps(_json_safe(train_history), indent=2), encoding="utf-8")
     checkpoint_path = ""
     if args.save_checkpoint:
-        ckpt = out_dir / f"{args.baseline}_{args.pde}_{args.task}_seed{args.seed}.pt"
+        ckpt = out_dir / f"{run_prefix}.pt"
         model.save(ckpt)
         checkpoint_path = str(ckpt)
 
@@ -269,12 +282,18 @@ def main(argv: list[str] | None = None) -> None:
             "dry_run": bool(args.dry_run),
             "synthetic_data": bool(args.synthetic_data),
             "experiment_mode": args.experiment_mode,
+            "run_id": args.run_id,
+            "run_name": args.run_name,
             "train_history": json.dumps(_json_safe(train_history)),
         }
     )
     append_result_jsonl(out_dir / "results_summary.jsonl", _json_safe(summary))
     append_result_csv(out_dir / "results_summary.csv", _json_safe(summary))
-    _write_latest_csv(out_dir / "results_summary_latest.csv", _json_safe(summary))
+    latest_path = out_dir / (f"{run_prefix}_results_summary_latest.csv" if args.run_id else "results_summary_latest.csv")
+    _write_latest_csv(latest_path, _json_safe(summary))
+    (out_dir / "summary.json").write_text(json.dumps(_json_safe(summary), indent=2, sort_keys=True), encoding="utf-8")
+    if args.run_id:
+        (out_dir / f"{run_prefix}_summary.json").write_text(json.dumps(_json_safe(summary), indent=2, sort_keys=True), encoding="utf-8")
 
     print(json.dumps(_json_safe(summary), indent=2, sort_keys=True))
 
@@ -479,6 +498,8 @@ def _evaluate_full_test_loader(
         mae_values = _mae_values(pred_cpu, target)
         metric_payload = _batch_metric_payload(pred_cpu, target, batch, args)
         row = {
+            "run_id": args.run_id,
+            "run_name": args.run_name,
             "pde": args.pde,
             "task": args.task,
             "baseline": args.baseline,
@@ -672,6 +693,8 @@ def _summarize_run(
         "physics_loss",
     ]
     summary: dict[str, Any] = {
+        "run_id": args.run_id,
+        "run_name": args.run_name,
         "pde": args.pde,
         "task": args.task,
         "baseline": args.baseline,
@@ -926,8 +949,15 @@ def _file_summary(train_dataset: PDEBatchDataset, val_dataset: PDEBatchDataset |
     return {"train": one(train_dataset), "val": one(val_dataset), "test": one(test_dataset)}
 
 
+def _run_file_prefix(args: argparse.Namespace) -> str:
+    if args.run_id:
+        return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in args.run_id)
+    return f"{args.baseline}_{args.pde}_{args.task}_seed{args.seed}"
+
+
 def _write_config_snapshot(out_dir: Path, args: argparse.Namespace, cfg: dict[str, Any], method_cfg: dict[str, Any], data_spec: dict[str, Any], backend_info: dict[str, Any]) -> Path:
-    path = out_dir / f"{args.baseline}_{args.pde}_{args.task}_seed{args.seed}_config.json"
+    prefix = _run_file_prefix(args)
+    path = out_dir / f"{prefix}_config.json"
     payload = {
         "args": vars(args),
         "config": cfg,
@@ -939,12 +969,14 @@ def _write_config_snapshot(out_dir: Path, args: argparse.Namespace, cfg: dict[st
         "scalar_params_used_as_input": _scalar_params_used_as_input_from_spec(data_spec),
         "data_loading_mode": args.data_loading_mode,
         "load_full_trajectory": bool(args.load_full_trajectory),
+        "run_id": args.run_id,
+        "run_name": args.run_name,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     if args.config:
         src = Path(args.config)
         if src.exists():
-            shutil.copy2(src, out_dir / f"{args.baseline}_{args.pde}_{args.task}_seed{args.seed}_{src.name}")
+            shutil.copy2(src, out_dir / f"{prefix}_{src.name}")
     return path
 
 

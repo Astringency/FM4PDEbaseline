@@ -1,0 +1,26 @@
+{
+  "by_task_group": {
+    "full_forward": 2,
+    "full_inverse": 2,
+    "sparse_inverse": 2,
+    "sparse_solution_amortized": 4,
+    "sparse_solution_physics": 3
+  },
+  "by_task_group_baseline": {
+    "full_forward/fno": 2,
+    "full_inverse/deeponet": 2,
+    "sparse_inverse/fno": 2,
+    "sparse_solution_amortized/recfno": 2,
+    "sparse_solution_amortized/senseiver": 2,
+    "sparse_solution_physics/pde_opt": 2,
+    "sparse_solution_physics/var4d": 1
+  },
+  "matrix_name": "sanity",
+  "run_count": 13,
+  "skipped_by_task_group": {
+    "sparse_inverse": 2,
+    "sparse_solution_physics": 1
+  },
+  "skipped_combo_count": 3,
+  "skipped_expanded_count": 3
+}
