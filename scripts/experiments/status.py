@@ -66,9 +66,9 @@ def main() -> None:
 def _matrix_paths(out_root: Path, explicit: str) -> list[Path]:
     if explicit:
         return [Path(explicit)]
-    core = out_root / "matrices" / "core.jsonl"
-    if core.exists():
-        return [core]
+    main_results = out_root / "matrices" / "main_results.jsonl"
+    if main_results.exists():
+        return [main_results]
     matrix_dir = out_root / "matrices"
     if not matrix_dir.exists():
         return []

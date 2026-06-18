@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     out_root = Path(args.output_root)
-    matrix = Path(args.matrix) if args.matrix else out_root / "matrices" / "core.jsonl"
+    matrix = Path(args.matrix) if args.matrix else out_root / "matrices" / "main_results.jsonl"
     rows = _read_jsonl(matrix)
     retry_rows = []
     for row in rows:

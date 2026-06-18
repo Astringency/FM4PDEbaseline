@@ -1,0 +1,82 @@
+{
+  "ablation_factor": "noise_level",
+  "by_baseline": {
+    "pde_opt": 72,
+    "pinn_sparse": 72,
+    "recfno": 72,
+    "senseiver": 72,
+    "voronoicnn": 72
+  },
+  "by_pde": {
+    "advection_diffusion": 60,
+    "darcy": 60,
+    "heat": 60,
+    "nsnonbounded": 60,
+    "reaction_diffusion": 60,
+    "shallow_water": 60
+  },
+  "by_task_group": {
+    "noise_ablation": 360
+  },
+  "by_task_group_baseline": {
+    "noise_ablation/pde_opt": 72,
+    "noise_ablation/pinn_sparse": 72,
+    "noise_ablation/recfno": 72,
+    "noise_ablation/senseiver": 72,
+    "noise_ablation/voronoicnn": 72
+  },
+  "experiment_kind": "ablation",
+  "fixed_fields": {
+    "load_full_trajectory": "False",
+    "num_sensors": "500",
+    "sensor_mode": "random",
+    "task": "sparse_solution",
+    "task_group": "noise_ablation",
+    "train_size": "50000"
+  },
+  "matrix_name": "noise_ablation",
+  "run_count": 360,
+  "skipped_by_task_group": {},
+  "skipped_combo_count": 0,
+  "skipped_expanded_count": 0,
+  "varied_fields": {
+    "baseline": {
+      "count": 5,
+      "values": [
+        "pde_opt",
+        "pinn_sparse",
+        "recfno",
+        "senseiver",
+        "voronoicnn"
+      ]
+    },
+    "noise_level": {
+      "count": 4,
+      "values": [
+        "0.0",
+        "0.01",
+        "0.05",
+        "0.1"
+      ]
+    },
+    "pde": {
+      "count": 6,
+      "values": [
+        "advection_diffusion",
+        "darcy",
+        "heat",
+        "nsnonbounded",
+        "reaction_diffusion",
+        "shallow_water"
+      ]
+    },
+    "seed": {
+      "count": 3,
+      "values": [
+        "1",
+        "2",
+        "3"
+      ]
+    }
+  }
+}

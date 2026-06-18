@@ -12,7 +12,7 @@ TIME="${TIME:-24:00:00}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 MEM="${MEM:-64G}"
 GRES="${GRES:-gpu:1}"
-JOB_NAME="${JOB_NAME:-fm4pde_baselines}"
+JOB_NAME="${JOB_NAME:-fm4pde_main_results}"
 DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
 DEVICE="${DEVICE:-cuda}"
 

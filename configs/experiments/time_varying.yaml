@@ -1,4 +1,9 @@
+legacy: true
+description: "Exhaustive grid retained for debugging only; not used by default paper experiments."
 name: time_varying
+experiment_kind: ablation
+ablation_factor: time_varying_sensor_count
+allow_multi_factor_grid: true
 config: baselines/configs/paper.yaml
 pdes: [nsnonbounded, burger, reaction_diffusion, shallow_water]
 seeds: [1, 2, 3]

@@ -4,21 +4,28 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
 OUT_ROOT="${OUT_ROOT:-outputs/baselines_large}"
-
-if [ ! -d "$DATA_ROOT" ]; then
-  echo "DATA_ROOT does not exist: $DATA_ROOT" >&2
-  exit 2
-fi
 
 mkdir -p "$OUT_ROOT/matrices"
 rm -f "$OUT_ROOT/skipped_combinations.jsonl"
 
-python scripts/experiments/build_matrix.py --config configs/experiments/sanity.yaml --output-root "$OUT_ROOT" --matrix-name sanity
-python scripts/experiments/build_matrix.py --config configs/experiments/core.yaml --output-root "$OUT_ROOT" --matrix-name core
-python scripts/experiments/build_matrix.py --config configs/experiments/full_all.yaml --output-root "$OUT_ROOT" --matrix-name full_all
-python scripts/experiments/build_matrix.py --config configs/experiments/time_varying.yaml --output-root "$OUT_ROOT" --matrix-name time_varying
+matrices=(
+  sanity_main
+  main_results
+  sensor_count_ablation
+  noise_ablation
+  sensor_mode_ablation
+  time_varying_sensor_ablation
+  runtime_budget_ablation
+  train_size_ablation
+)
+
+for matrix in "${matrices[@]}"; do
+  python scripts/experiments/build_matrix.py \
+    --config "configs/experiments/${matrix}.yaml" \
+    --output-root "$OUT_ROOT" \
+    --matrix-name "$matrix"
+done
 
 python - "$OUT_ROOT" <<'PY'
 from __future__ import annotations

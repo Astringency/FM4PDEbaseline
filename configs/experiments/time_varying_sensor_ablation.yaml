@@ -1,0 +1,39 @@
+name: time_varying_sensor_ablation
+experiment_kind: ablation
+ablation_factor: time_varying_sensor_count
+config: baselines/configs/paper.yaml
+pdes:
+  - nsnonbounded
+  - burger
+  - reaction_diffusion
+  - shallow_water
+baselines: [var4d, vivid, senseiver]
+seeds: [1, 2, 3]
+train_size: 50000
+val_size: 0
+test_size: 1000
+train_shards: 5
+load_full_trajectory: true
+sensor_counts: [50, 100, 250, 500]
+sensor_mode: time_varying
+noise_level: 0.0
+data_loading_mode: lazy
+device: cuda
+task_groups: [time_varying_sensor_ablation]
+resources:
+  amortized_default:
+    batch_size: 16
+    epochs: 200
+    device: cuda
+  per_instance_default:
+    batch_size: 1
+    epochs: 1
+    device: cuda
+  var4d:
+    batch_size: 1
+    steps: 500
+    load_full_trajectory: true
+  vivid:
+    batch_size: 1
+    refine_steps: 300
+    load_full_trajectory: true

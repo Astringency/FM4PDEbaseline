@@ -42,7 +42,7 @@ def test_core_and_full_all_configs_cover_expected_pdes_and_resources():
 
 def test_aggregate_script_finds_results_files(tmp_path: Path):
     out_root = tmp_path / "large"
-    result_dir = out_root / "runs" / "task_group=full_forward" / "dummy"
+    result_dir = out_root / "runs" / "main_results" / "task_group=full_forward_main" / "dummy"
     result_dir.mkdir(parents=True)
     row = {
         "pde": "heat",
@@ -65,6 +65,6 @@ def test_aggregate_script_finds_results_files(tmp_path: Path):
     (result_dir / "results_summary.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     env = {**os.environ, "OUT_ROOT": str(out_root)}
     subprocess.run(["bash", "scripts/experiments/06_aggregate_all.sh"], cwd=ROOT, env=env, check=True)
-    assert (out_root / "aggregate" / "full_forward" / "summary.csv").exists()
-    all_summary = json.loads((out_root / "aggregate" / "all" / "summary.json").read_text(encoding="utf-8"))
+    assert (out_root / "aggregate" / "main_results" / "summary.csv").exists()
+    all_summary = json.loads((out_root / "aggregate" / "main_results" / "summary.json").read_text(encoding="utf-8"))
     assert any(row["pde"] == "heat" and row["baseline"] == "fno" for row in all_summary)

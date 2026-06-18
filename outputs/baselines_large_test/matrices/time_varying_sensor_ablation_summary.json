@@ -1,0 +1,72 @@
+{
+  "ablation_factor": "time_varying_sensor_count",
+  "by_baseline": {
+    "senseiver": 48,
+    "var4d": 48,
+    "vivid": 48
+  },
+  "by_pde": {
+    "burger": 36,
+    "nsnonbounded": 36,
+    "reaction_diffusion": 36,
+    "shallow_water": 36
+  },
+  "by_task_group": {
+    "time_varying_sensor_ablation": 144
+  },
+  "by_task_group_baseline": {
+    "time_varying_sensor_ablation/senseiver": 48,
+    "time_varying_sensor_ablation/var4d": 48,
+    "time_varying_sensor_ablation/vivid": 48
+  },
+  "experiment_kind": "ablation",
+  "fixed_fields": {
+    "load_full_trajectory": "True",
+    "noise_level": "0.0",
+    "sensor_mode": "time_varying",
+    "task": "sparse_solution",
+    "task_group": "time_varying_sensor_ablation",
+    "train_size": "50000"
+  },
+  "matrix_name": "time_varying_sensor_ablation",
+  "run_count": 144,
+  "skipped_by_task_group": {},
+  "skipped_combo_count": 0,
+  "skipped_expanded_count": 0,
+  "varied_fields": {
+    "baseline": {
+      "count": 3,
+      "values": [
+        "senseiver",
+        "var4d",
+        "vivid"
+      ]
+    },
+    "num_sensors": {
+      "count": 4,
+      "values": [
+        "100",
+        "250",
+        "50",
+        "500"
+      ]
+    },
+    "pde": {
+      "count": 4,
+      "values": [
+        "burger",
+        "nsnonbounded",
+        "reaction_diffusion",
+        "shallow_water"
+      ]
+    },
+    "seed": {
+      "count": 3,
+      "values": [
+        "1",
+        "2",
+        "3"
+      ]
+    }
+  }
+}

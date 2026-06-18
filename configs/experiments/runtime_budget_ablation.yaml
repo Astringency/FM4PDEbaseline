@@ -1,38 +1,38 @@
-legacy: true
-description: "Exhaustive grid retained for debugging only; not used by default paper experiments."
-name: core
+name: runtime_budget_ablation
 experiment_kind: ablation
-ablation_factor: sensor_count
-allow_multi_factor_grid: true
+ablation_factor: runtime_budget
 config: baselines/configs/paper.yaml
 pdes:
-  - darcy
   - poisson
-  - helmholtz
   - nsnonbounded
-  - burger
   - reaction_diffusion
   - shallow_water
-  - heat
-  - wave
-  - advection_diffusion
-  - steady_heat_conduction
+baselines: [pinn_sparse, pc_bnn, pde_opt, var4d, vivid]
 seeds: [1, 2, 3]
 train_size: 50000
 val_size: 0
 test_size: 1000
 train_shards: 5
-sensor_counts: [50, 100, 250, 500, 1000]
-sensor_modes: [random, fixed, grid]
-noise_levels: [0.0, 0.01, 0.05]
+num_sensors: 500
+sensor_mode: random
+noise_level: 0.0
 data_loading_mode: lazy
 device: cuda
-task_groups:
-  - full_forward
-  - full_inverse
-  - sparse_solution_amortized
-  - sparse_solution_physics
-  - sparse_inverse
+task_groups: [runtime_budget_ablation]
+task_group_overrides:
+  runtime_budget_ablation:
+    budget_by_baseline:
+      pinn_sparse:
+        steps: [50, 100, 250, 500, 1000]
+      pc_bnn:
+        steps: [50, 100, 250, 500, 1000]
+        particles: 8
+      pde_opt:
+        steps: [50, 100, 250, 500, 1000]
+      var4d:
+        steps: [50, 100, 250, 500, 1000]
+      vivid:
+        refine_steps: [50, 100, 250, 500]
 resources:
   amortized_default:
     batch_size: 16

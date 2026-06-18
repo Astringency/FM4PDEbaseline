@@ -4,20 +4,33 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+ABLATION="${ABLATION:-}"
+case "$ABLATION" in
+  sensor_count_ablation|noise_ablation|sensor_mode_ablation|time_varying_sensor_ablation|runtime_budget_ablation|train_size_ablation) ;;
+  "")
+    echo "Set ABLATION to one of: sensor_count_ablation noise_ablation sensor_mode_ablation time_varying_sensor_ablation runtime_budget_ablation train_size_ablation" >&2
+    exit 2
+    ;;
+  *)
+    echo "Unknown ABLATION=$ABLATION" >&2
+    exit 2
+    ;;
+esac
+
 OUT_ROOT="${OUT_ROOT:-outputs/baselines_large}"
-MATRIX="${MATRIX:-$OUT_ROOT/matrices/main_results.jsonl}"
+MATRIX="${MATRIX:-$OUT_ROOT/matrices/${ABLATION}.jsonl}"
 MAX_ARRAY_CONCURRENT="${MAX_ARRAY_CONCURRENT:-16}"
 PARTITION="${PARTITION:-gpu}"
 TIME="${TIME:-24:00:00}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 MEM="${MEM:-64G}"
 GRES="${GRES:-gpu:1}"
-JOB_NAME="${JOB_NAME:-fm4pde_baselines}"
+JOB_NAME="${JOB_NAME:-fm4pde_${ABLATION}}"
 DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
 DEVICE="${DEVICE:-cuda}"
 
 if [ ! -f "$MATRIX" ]; then
-  python scripts/experiments/build_matrix.py --config configs/experiments/main_results.yaml --output-root "$OUT_ROOT" --matrix-name main_results
+  python scripts/experiments/build_matrix.py --config "configs/experiments/${ABLATION}.yaml" --output-root "$OUT_ROOT" --matrix-name "$ABLATION"
 fi
 if [ ! -d "$DATA_ROOT" ]; then
   echo "DATA_ROOT does not exist: $DATA_ROOT" >&2

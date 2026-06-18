@@ -1,4 +1,4 @@
-name: sanity
+name: sanity_main
 experiment_kind: main
 config: baselines/configs/paper.yaml
 pdes: [darcy, poisson, nsnonbounded, reaction_diffusion, shallow_water, heat]
@@ -7,33 +7,46 @@ train_size: 128
 val_size: 0
 test_size: 16
 train_shards: 5
-sensor_counts: [50]
-sensor_modes: [random]
-noise_levels: [0.0]
 data_loading_mode: lazy
 device: cuda
 task_groups:
-  - full_forward
-  - full_inverse
-  - sparse_solution_amortized
-  - sparse_solution_physics
-  - sparse_inverse
+  - full_forward_main
+  - full_inverse_main
+  - sparse_solution_main_amortized
+  - sparse_solution_main_physics
+  - sparse_inverse_main
 task_group_overrides:
-  full_forward:
+  full_forward_main:
     pdes: [darcy, heat]
     baselines: [fno]
-  full_inverse:
+    num_sensors: 0
+    sensor_mode: none
+    noise_level: 0.0
+  full_inverse_main:
     pdes: [poisson, heat]
     baselines: [deeponet]
-  sparse_solution_amortized:
+    num_sensors: 0
+    sensor_mode: none
+    noise_level: 0.0
+  sparse_solution_main_amortized:
     pdes: [darcy, reaction_diffusion]
     baselines: [recfno, senseiver]
-  sparse_solution_physics:
+    num_sensors: 50
+    sensor_mode: random
+    noise_level: 0.0
+  sparse_solution_main_physics:
     pdes: [poisson, shallow_water]
     baselines: [pde_opt, var4d]
-  sparse_inverse:
+    num_sensors: 50
+    sensor_mode: random
+    noise_level: 0.0
+  sparse_inverse_main:
     pdes: [darcy, heat]
-    baselines: [fno, pde_opt]
+    baselines: [fno]
+    extra_skip_baselines: [pde_opt]
+    num_sensors: 50
+    sensor_mode: random
+    noise_level: 0.0
 resources:
   amortized_default:
     batch_size: 16
