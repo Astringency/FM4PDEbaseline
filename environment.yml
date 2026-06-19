@@ -1,0 +1,27 @@
+name: FM4PDEbaseline
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch
+  - pytorch-cuda=12.1
+  - numpy
+  - scipy
+  - h5py
+  - pyyaml
+  - pytest
+  - matplotlib
+  - scikit-learn
+  - pip
+  - pip:
+      - tensorly
+      - tensorly-torch
+      - ruamel.yaml
+      - configmypy
+      - zencfg
+      - opt-einsum
+      - zarr
+      - wandb
