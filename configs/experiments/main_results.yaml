@@ -27,6 +27,7 @@ task_groups:
   - sparse_solution_main_amortized
   - sparse_solution_main_physics
   - sparse_inverse_main
+  - time_varying_da_main
 task_group_overrides:
   full_forward_main:
     task: forward
@@ -48,7 +49,7 @@ task_group_overrides:
     noise_level: 0.0
   sparse_solution_main_physics:
     task: sparse_solution
-    baselines: [pinn_sparse, pde_opt]
+    baselines: [pinn_sparse, pc_bnn, pde_opt]
     num_sensors: 500
     sensor_mode: random
     noise_level: 0.0
@@ -58,6 +59,14 @@ task_group_overrides:
     num_sensors: 500
     sensor_mode: random
     noise_level: 0.0
+  time_varying_da_main:
+    task: sparse_solution
+    pdes: [nsnonbounded, burger, reaction_diffusion, shallow_water]
+    baselines: [senseiver, var4d, vivid]
+    num_sensors: 500
+    sensor_mode: time_varying
+    noise_level: 0.0
+    load_full_trajectory: true
 resources:
   amortized_default:
     batch_size: 16

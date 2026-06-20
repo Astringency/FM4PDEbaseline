@@ -116,7 +116,7 @@ def task_family_for(task: str, sensor_mode: str = "", task_group: str = "") -> s
     task = str(task).lower()
     sensor_mode = str(sensor_mode or "").lower()
     task_group = str(task_group or "").lower()
-    if task_group in {"time_varying", "time_varying_da"} or sensor_mode == "time_varying":
+    if task_group in {"time_varying", "time_varying_da"} or task_group.startswith("time_varying") or sensor_mode == "time_varying":
         return "time_varying_da"
     if task == "forward":
         return "full_forward"

@@ -177,6 +177,14 @@ class VIVIDBaseline(BaselineModel):
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         return output_view(state).detach()
 
+    def predict_physical(self, batch: PDEBatch):
+        # VIVID.predict normalizes only the inverse-observation operator input,
+        # denormalizes the learned state before variational refinement, and
+        # returns the refined state in physical units. The base implementation
+        # would normalize the whole batch and denormalize the already-physical
+        # refined output a second time.
+        return self.predict(batch)
+
     def _fit_official_aligned_inverse_operator(self, train_loader, val_loader=None):
         device = torch.device(self.config.get("device", "cpu"))
         epochs = int(self.config.get("epochs", 1))

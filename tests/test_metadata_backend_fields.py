@@ -78,3 +78,13 @@ def test_official_source_info_records_unknown_commit_and_vendored_path():
     assert "offical/deepxde" in info["official_vendored_path"]
     assert info["official_local_modifications"] == "unknown"
     assert "record" in info["official_metadata_note"]
+
+
+def test_official_source_metadata_doc_lists_manual_unknown_records():
+    path = Path(__file__).resolve().parents[1] / "baselines" / "OFFICIAL_SOURCE_METADATA.md"
+    text = path.read_text(encoding="utf-8")
+    assert "official_commit_or_version" in text
+    assert "official_local_modifications" in text
+    assert "unknown" in text
+    assert "offical/neuraloperator" in text
+    assert "official-aligned" in text.lower()
