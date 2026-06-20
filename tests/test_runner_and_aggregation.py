@@ -84,13 +84,13 @@ def test_aggregate_results_mean_std_ci_nan_and_residual_counts():
     assert json.loads(summary["residual_mode_counts"]) == {"two_level": 2}
 
 
-def test_paper_scripts_do_not_default_to_debug_data_flags():
+def test_experiment_scripts_do_not_default_to_debug_data_flags():
     root = Path(__file__).resolve().parents[1]
     paper_scripts = [
-        root / "scripts/baselines/run_paper_sparse_reconstruction.sh",
-        root / "scripts/baselines/run_paper_full_operator.sh",
-        root / "scripts/baselines/run_paper_physics_da.sh",
-        root / "scripts/baselines/run_paper_all.sh",
+        root / "scripts/experiments/01_run_sanity_main.sh",
+        root / "scripts/experiments/02_run_main_results_local.sh",
+        root / "scripts/experiments/04_run_ablation_local.sh",
+        root / "scripts/experiments/05_run_one.sh",
     ]
     forbidden = ["--prefer-test", "--synthetic-data", "--dry-run"]
     for script in paper_scripts:

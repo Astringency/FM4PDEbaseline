@@ -18,17 +18,3 @@ def test_time_varying_sensor_ablation_valid_rows_exclude_2d_only_baselines(tmp_p
     valid_baselines = {row["baseline"] for row in rows}
     assert valid_baselines == {"var4d", "vivid", "senseiver"}
     assert {"fno", "deeponet", "recfno", "voronoicnn"}.isdisjoint(valid_baselines)
-
-
-def test_extra_skip_baselines_are_not_active_time_varying_rows(tmp_path: Path, monkeypatch):
-    for key in MATRIX_ENV:
-        monkeypatch.delenv(key, raising=False)
-    cfg = load_config(ROOT / "configs" / "experiments" / "time_varying.yaml")
-    rows, skipped, _summary = build_matrix(cfg, tmp_path / "time_varying", "time_varying")
-
-    valid_baselines = {row["baseline"] for row in rows}
-    skipped_baselines = {row["baseline"] for row in skipped}
-    assert valid_baselines == {"var4d", "vivid", "senseiver"}
-    assert {"fno", "deeponet", "recfno", "voronoicnn"}.isdisjoint(valid_baselines)
-    assert {"fno", "deeponet", "recfno", "voronoicnn"}.issubset(skipped_baselines)
-    assert all("intentionally skipped" in row["reason"] for row in skipped if row["baseline"] in {"fno", "deeponet", "recfno", "voronoicnn"})

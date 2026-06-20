@@ -1,185 +1,146 @@
 # FM4PDE Baseline
 
-这是一个面向 FM4PDE 论文对比实验的 external baseline 项目。项目目标不是把所有方法都改写成本地统一模型，而是提供一个 reviewer-facing 的 baseline framework：优先调用原始论文/官方仓库实现，明确区分 native、official adapter、adapted 和 unsupported，避免把本地简化实现伪装成官方 baseline。
+This repository runs and audits external baseline experiments for FM4PDE. The
+active entry points are the matrix-based scripts under `scripts/experiments/`;
+older per-task shell interfaces have been removed.
 
-## 项目定位
+## Scope
 
-本仓库用于运行和审计 FM4PDE 外部 baseline 对比实验，覆盖：
+The framework covers:
 
 - full-grid supervised operator learning
 - sparse sensor field reconstruction
 - static sparse inverse problems
 - time-varying data assimilation
 
-当前重点是外部 baseline 对比，不包含 FM4PDE 自身内部消融和 DiffusionPDE 对比。
+FM4PDE internal ablations and DiffusionPDE comparisons are outside this external
+baseline matrix.
 
-## 目录结构
+## Layout
 
 ```text
-baselines/                  baseline 框架核心代码
-  capabilities.py           baseline/task/PDE/sensor capability registry
-  experiment_matrix.py      capability-aware experiment matrix 和 skip 逻辑
-  run.py                    单次 baseline runner
-  aggregate_results.py      主表、补充表和 skip 结果聚合
-  methods/                  各 baseline wrapper
-  common/                   数据适配、传感器、物理残差和指标
-  configs/                  paper/debug 配置
-  README.md                 baseline 框架详细说明
-  BASELINE_SOURCES.md       论文、官方代码和启用范围说明
-  NATIVE_CAPABILITY_MATRIX.md
+baselines/                  baseline framework code
+  capabilities.py           baseline/task/PDE capability registry
+  experiment_matrix.py      capability checks and skip rows
+  run.py                    single-run baseline runner
+  aggregate_results.py      result aggregation
+  common/                   data, sensors, physics residuals, metrics
+  methods/                  baseline wrappers
+  configs/                  runner method configs
 
-configs/experiments/        大规模实验矩阵配置
-scripts/baselines/          paper/smoke baseline 运行脚本
-scripts/experiments/        matrix 构建、单任务运行、聚合脚本
-tests/                      pytest 测试
-offical/                    vendored 官方代码快照（目录名沿用现有拼写）
-outputs/                    实验输出，默认不应作为论文源码依赖
+configs/experiments/        matrix configs for main and ablation experiments
+scripts/experiments/        matrix build, run, status, retry, aggregation scripts
+tests/                      pytest coverage
+offical/                    vendored official source snapshots
+outputs/                    generated outputs and checked-in fixtures
 ```
 
-## Baseline 能力状态
+Do not edit `offical/` unless intentionally updating the vendored snapshots.
 
-每个 baseline/PDE/task/sensor_mode 组合都会通过 `baselines.capabilities.resolve_capability(...)` 判定。
+## Active Experiment Flow
 
-| 状态 | 含义 | 是否进入主表 |
-| --- | --- | --- |
-| `native` | 属于原论文/标准方法能力范围 | 满足实现要求时进入 |
-| `official_adapter` | 使用官方组件，并由本仓库做数据适配 | 满足实现要求时进入 |
-| `adapted` | 本地改写、目标变换、style 实现或 surrogate | 只进入 supplement |
-| `unsupported` | 不属于标准能力或缺少必要目标/轨迹/残差 | paper mode 跳过 |
-
-paper mode 默认使用：
-
-```yaml
-method:
-  implementation_mode: official_or_skip
-```
-
-也就是说，要求官方实现的 baseline 如果无法导入官方代码/组件，会失败或跳过，不会静默 fallback 到 local compact implementation。
-
-## 数据要求
-
-默认数据根目录：
+Set the data root and output root first:
 
 ```bash
-/home/tat512/C01Python/PDEdata
+export DATA_ROOT=/path/to/PDEdata
+export OUT_ROOT=outputs/baselines_large
+export DEVICE=cuda
 ```
 
-可通过环境变量覆盖：
+Build matrices:
 
 ```bash
-DATA_ROOT=/path/to/PDEdata
+bash scripts/experiments/00_build_matrices.sh
 ```
 
-runner 会记录数据接口元信息，包括 raw input shape、native/official input shape、target shape、观测字段、预测字段、scalar PDE 参数是否进入输入、是否加载 full trajectory、sensor mode 等。
-
-## 正式运行
-
-运行 native/full-grid operator baseline：
+Run the small sanity matrix:
 
 ```bash
-DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_native_full_operator.sh
+N_JOBS=1 bash scripts/experiments/01_run_sanity_main.sh
 ```
 
-运行 native sparse reconstruction baseline：
+Run the main paper matrix:
 
 ```bash
-DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_native_sparse_reconstruction.sh
+N_JOBS=1 bash scripts/experiments/02_run_main_results_local.sh
 ```
 
-运行 static sparse inverse baseline：
+Run a selected ablation:
 
 ```bash
-DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_static_sparse_inverse.sh
+ABLATION=sensor_count_ablation N_JOBS=1 bash scripts/experiments/04_run_ablation_local.sh
 ```
 
-运行 time-varying data assimilation baseline：
+Supported ablation names are:
+
+```text
+sensor_count_ablation
+noise_ablation
+sensor_mode_ablation
+time_varying_sensor_ablation
+runtime_budget_ablation
+train_size_ablation
+```
+
+Check status:
 
 ```bash
-DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_time_varying_da.sh
+bash scripts/experiments/08_status.sh
 ```
 
-运行完整 native paper matrix：
+Retry failed runs:
 
 ```bash
-DATA_ROOT=/home/tat512/C01Python/PDEdata DEVICE=cuda:0 \
-  bash scripts/baselines/run_paper_all_native.sh
+RETRY_LIMIT=3 bash scripts/experiments/09_retry_failed.sh
 ```
 
-兼容入口：
+Aggregate results:
 
 ```bash
-bash scripts/baselines/run_paper_all.sh
+bash scripts/experiments/06_aggregate_main_results.sh
+bash scripts/experiments/07_aggregate_ablations.sh
 ```
 
-该脚本会委托到 native paper matrix。旧的 per-task paper 脚本仍保留用于 supplement/debug，但 adapted/surrogate/local 结果不会混入主表。
+## Slurm
 
-## 聚合结果
+Submit the main matrix:
 
 ```bash
-OUT=outputs/baselines/paper \
-  bash scripts/baselines/aggregate_paper_results.sh
+DATA_ROOT=/path/to/PDEdata \
+OUT_ROOT=outputs/baselines_large \
+PARTITION=gpu \
+GRES=gpu:1 \
+MAX_ARRAY_CONCURRENT=16 \
+bash scripts/experiments/03_submit_main_results_slurm.sh
 ```
 
-聚合输出包括：
-
-- `summary_main.csv/json`：只包含 `paper_table_eligible=true`
-- `summary_supplement.csv/json`：adapted、surrogate、local 或 fallback 结果
-- `skipped_combinations.csv/json`：paper mode 跳过组合
-- `baseline_capability_matrix.csv/json`：完整能力矩阵
-- `latex_table.csv/tex`：只从 main summary 生成
-
-## 能力矩阵
-
-导出完整 baseline capability matrix：
+Submit an ablation matrix:
 
 ```bash
-python -m baselines.experiment_matrix \
-  --dump-matrix \
-  --output outputs/baselines/capability_matrix
+ABLATION=noise_ablation \
+DATA_ROOT=/path/to/PDEdata \
+OUT_ROOT=outputs/baselines_large \
+PARTITION=gpu \
+GRES=gpu:1 \
+MAX_ARRAY_CONCURRENT=16 \
+bash scripts/experiments/05_submit_ablation_slurm.sh
 ```
 
-详细说明见：
-
-- `baselines/README.md`
-- `baselines/BASELINE_SOURCES.md`
-- `baselines/NATIVE_CAPABILITY_MATRIX.md`
-
-## Smoke 和测试
-
-快速 smoke：
-
-```bash
-bash scripts/baselines/smoke_all.sh
-```
-
-推荐测试命令：
+## Testing
 
 ```bash
 python -m py_compile \
   baselines/run.py baselines/aggregate_results.py baselines/experiment_matrix.py \
-  baselines/capabilities.py baselines/common/*.py baselines/methods/*.py tests/test_*.py
+  baselines/capabilities.py baselines/common/*.py baselines/methods/*.py \
+  scripts/experiments/*.py tests/test_*.py
 
-bash -n scripts/baselines/*.sh
-
+bash -n scripts/experiments/*.sh
 python -m pytest -q
 ```
 
-如果系统里存在用户级 `pytest` shim，优先使用当前 conda 环境：
+## Principles
 
-```bash
-PATH=/home/tat512/.conda/envs/FM4PDEbaseline/bin:$PATH pytest -q
-```
-
-## 关键原则
-
-- 不把 local compact implementation 写成 official baseline。
-- 不把 adapted/surrogate 结果混入 paper main table。
-- 不支持的任务必须 skip，并记录 `unsupported_reason`。
-- FNO/DeepONet 的 sparse 或 inverse adaptation 只作为补充结果。
-- iFNO sparse tasks 不作为 native baseline。
-- 4D-Var/VIVID 只有 full trajectory 或 multi-time observations 才能进入 time-varying DA 主表。
-- PDE-Opt 是 canonical mathematical baseline，不声称官方代码来源。
+- Do not present local compact implementations as official baselines.
+- Do not mix adapted/surrogate results into the main paper table.
+- Unsupported combinations must skip with an explicit reason.
+- `pde_opt` is a canonical mathematical baseline, not an official-code claim.

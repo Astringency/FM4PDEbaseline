@@ -20,6 +20,8 @@ def _rows(name: str, tmp_path: Path, monkeypatch) -> list[dict]:
 def test_00_build_matrices_does_not_default_to_full_all():
     text = (ROOT / "scripts" / "experiments" / "00_build_matrices.sh").read_text(encoding="utf-8")
     assert "full_all" not in text
+    assert "core" not in text
+    assert "time_varying)" not in text
     assert "main_results" in text
     assert "sensor_count_ablation" in text
 
@@ -32,10 +34,3 @@ def test_main_results_has_no_sparse_factor_cartesian_product(tmp_path: Path, mon
     assert {row["noise_level"] for row in sparse_rows} == {0.0}
     expected_families = {(row["task_group"], row["pde"], row["baseline"], row["seed"]) for row in sparse_rows}
     assert len(sparse_rows) == len(expected_families)
-
-
-def test_legacy_full_all_is_marked_debug_only():
-    cfg = load_config(ROOT / "configs" / "experiments" / "full_all.yaml")
-    assert cfg["legacy"] is True
-    assert "debugging only" in cfg["description"]
-    assert cfg["allow_multi_factor_grid"] is True

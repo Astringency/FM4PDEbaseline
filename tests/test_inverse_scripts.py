@@ -6,18 +6,17 @@ from pathlib import Path
 import pytest
 
 from baselines import experiment_matrix
+from scripts.experiments.build_matrix import build_matrix, load_config
 
 
-def test_inverse_paper_scripts_exist_and_call_runner():
-    root = Path(__file__).resolve().parents[1]
-    full = root / "scripts/baselines/run_paper_full_inverse.sh"
-    sparse = root / "scripts/baselines/run_paper_sparse_inverse.sh"
-    assert full.exists()
-    assert sparse.exists()
-    assert "--task inverse" in full.read_text(encoding="utf-8")
-    assert "--task sparse_inverse" in sparse.read_text(encoding="utf-8")
-    assert "python -m baselines.run" in full.read_text(encoding="utf-8")
-    assert "python -m baselines.run" in sparse.read_text(encoding="utf-8")
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_main_results_matrix_includes_inverse_task_families(tmp_path):
+    cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
+    rows, _skipped, _summary = build_matrix(cfg, tmp_path / "main_results", "main_results")
+    assert any(row["task"] == "inverse" for row in rows)
+    assert any(row["task"] == "sparse_inverse" for row in rows)
 
 
 def test_sparse_inverse_unsupported_combo_records_skip(tmp_path):

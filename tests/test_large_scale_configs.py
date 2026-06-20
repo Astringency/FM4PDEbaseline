@@ -24,20 +24,19 @@ ALL_PDES = {
 }
 
 
-def test_core_and_full_all_configs_cover_expected_pdes_and_resources():
-    for name in ["core", "full_all"]:
-        cfg = yaml.safe_load((ROOT / "configs" / "experiments" / f"{name}.yaml").read_text(encoding="utf-8"))
-        assert set(cfg["pdes"]) == ALL_PDES
-        assert "DiffusionPDE" not in cfg["pdes"]
-        assert "fm4pde" not in json.dumps(cfg).lower()
-        resources = cfg["resources"]
-        assert resources["amortized_default"]["batch_size"] == 16
-        assert resources["amortized_default"]["epochs"] == 200
-        assert resources["per_instance_default"]["batch_size"] == 1
-        assert resources["pinn_sparse"]["steps"] == 1000
-        assert resources["pc_bnn"]["particles"] == 8
-        assert resources["var4d"]["load_full_trajectory"] is True
-        assert resources["vivid"]["refine_steps"] == 300
+def test_main_results_config_covers_expected_pdes_and_resources():
+    cfg = yaml.safe_load((ROOT / "configs" / "experiments" / "main_results.yaml").read_text(encoding="utf-8"))
+    assert set(cfg["pdes"]) == ALL_PDES
+    assert "DiffusionPDE" not in cfg["pdes"]
+    assert "fm4pde" not in json.dumps(cfg).lower()
+    resources = cfg["resources"]
+    assert resources["amortized_default"]["batch_size"] == 16
+    assert resources["amortized_default"]["epochs"] == 200
+    assert resources["per_instance_default"]["batch_size"] == 1
+    assert resources["pinn_sparse"]["steps"] == 1000
+    assert resources["pc_bnn"]["particles"] == 8
+    assert resources["var4d"]["load_full_trajectory"] is True
+    assert resources["vivid"]["refine_steps"] == 300
 
 
 def test_aggregate_script_finds_results_files(tmp_path: Path):
@@ -64,7 +63,7 @@ def test_aggregate_script_finds_results_files(tmp_path: Path):
     }
     (result_dir / "results_summary.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     env = {**os.environ, "OUT_ROOT": str(out_root)}
-    subprocess.run(["bash", "scripts/experiments/06_aggregate_all.sh"], cwd=ROOT, env=env, check=True)
+    subprocess.run(["bash", "scripts/experiments/06_aggregate_main_results.sh"], cwd=ROOT, env=env, check=True)
     assert (out_root / "aggregate" / "main_results" / "summary.csv").exists()
     all_summary = json.loads((out_root / "aggregate" / "main_results" / "summary.json").read_text(encoding="utf-8"))
     assert any(row["pde"] == "heat" and row["baseline"] == "fno" for row in all_summary)

@@ -22,16 +22,16 @@ def test_sanity_matrix_generation_unique_run_ids_and_skips(tmp_path: Path):
             sys.executable,
             "scripts/experiments/build_matrix.py",
             "--config",
-            "configs/experiments/sanity.yaml",
+            "configs/experiments/sanity_main.yaml",
             "--output-root",
             str(out),
             "--matrix-name",
-            "sanity",
+            "sanity_main",
         ],
         cwd=ROOT,
         check=True,
     )
-    rows = _read_jsonl(out / "matrices" / "sanity.jsonl")
+    rows = _read_jsonl(out / "matrices" / "sanity_main.jsonl")
     assert rows
     run_ids = [row["run_id"] for row in rows]
     assert len(run_ids) == len(set(run_ids))
@@ -47,16 +47,16 @@ def test_future_supervised_defaults_to_materialize(tmp_path: Path):
             sys.executable,
             "scripts/experiments/build_matrix.py",
             "--config",
-            "configs/experiments/sanity.yaml",
+            "configs/experiments/sanity_main.yaml",
             "--output-root",
             str(out),
             "--matrix-name",
-            "sanity",
+            "sanity_main",
         ],
         cwd=ROOT,
         check=True,
     )
-    rows = _read_jsonl(out / "matrices" / "sanity.jsonl")
+    rows = _read_jsonl(out / "matrices" / "sanity_main.jsonl")
     heat_forward = [row for row in rows if row["pde"] == "heat" and row["task"] == "forward"]
     assert heat_forward
     assert {row["scalar_param_mode"] for row in heat_forward} == {"materialize"}

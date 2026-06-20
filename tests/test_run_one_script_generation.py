@@ -21,20 +21,20 @@ def test_run_one_generates_paper_sparse_command_without_debug_flags(tmp_path: Pa
             sys.executable,
             "scripts/experiments/build_matrix.py",
             "--config",
-            "configs/experiments/sanity.yaml",
+            "configs/experiments/sanity_main.yaml",
             "--output-root",
             str(out),
             "--matrix-name",
-            "sanity",
+            "sanity_main",
         ],
         cwd=ROOT,
         check=True,
     )
-    rows = _read_jsonl(out / "matrices" / "sanity.jsonl")
+    rows = _read_jsonl(out / "matrices" / "sanity_main.jsonl")
     index = next(i for i, row in enumerate(rows) if row["task"] == "sparse_solution")
     env = {**os.environ, "PRINT_COMMAND_ONLY": "1", "DATA_ROOT": str(tmp_path / "PDEdata")}
     result = subprocess.run(
-        ["bash", "scripts/experiments/05_run_one.sh", str(out / "matrices" / "sanity.jsonl"), str(index)],
+        ["bash", "scripts/experiments/05_run_one.sh", str(out / "matrices" / "sanity_main.jsonl"), str(index)],
         cwd=ROOT,
         env=env,
         check=True,
@@ -59,18 +59,18 @@ def test_run_one_generates_load_full_trajectory_for_time_varying(tmp_path: Path)
             sys.executable,
             "scripts/experiments/build_matrix.py",
             "--config",
-            "configs/experiments/time_varying.yaml",
+            "configs/experiments/time_varying_sensor_ablation.yaml",
             "--output-root",
             str(out),
             "--matrix-name",
-            "time_varying",
+            "time_varying_sensor_ablation",
         ],
         cwd=ROOT,
         check=True,
     )
     env = {**os.environ, "PRINT_COMMAND_ONLY": "1", "DATA_ROOT": str(tmp_path / "PDEdata")}
     result = subprocess.run(
-        ["bash", "scripts/experiments/05_run_one.sh", str(out / "matrices" / "time_varying.jsonl"), "0"],
+        ["bash", "scripts/experiments/05_run_one.sh", str(out / "matrices" / "time_varying_sensor_ablation.jsonl"), "0"],
         cwd=ROOT,
         env=env,
         check=True,

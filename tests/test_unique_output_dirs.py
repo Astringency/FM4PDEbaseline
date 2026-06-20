@@ -20,23 +20,23 @@ def test_different_noise_levels_have_different_output_dirs(tmp_path: Path):
             sys.executable,
             "scripts/experiments/build_matrix.py",
             "--config",
-            "configs/experiments/core.yaml",
+            "configs/experiments/noise_ablation.yaml",
             "--output-root",
             str(out),
             "--matrix-name",
-            "core",
+            "noise_ablation",
         ],
         cwd=ROOT,
         check=True,
     )
     rows = [
         row
-        for row in _read_jsonl(out / "matrices" / "core.jsonl")
-        if row["task_group"] == "sparse_solution_amortized"
+        for row in _read_jsonl(out / "matrices" / "noise_ablation.jsonl")
+        if row["task_group"] == "noise_ablation"
         and row["pde"] == "darcy"
         and row["baseline"] == "recfno"
         and row["seed"] == 1
-        and row["num_sensors"] == 50
+        and row["num_sensors"] == 500
         and row["sensor_mode"] == "random"
     ]
     assert len({row["noise_level"] for row in rows}) >= 2

@@ -42,13 +42,6 @@ GROUP_TO_TASK = {
     "time_varying_sensor_ablation": "sparse_solution",
     "runtime_budget_ablation": "sparse_solution",
     "train_size_ablation": "sparse_solution",
-    # Legacy aliases retained for old debugging configs and tests.
-    "full_forward": "forward",
-    "full_inverse": "inverse",
-    "sparse_solution_amortized": "sparse_solution",
-    "sparse_solution_physics": "sparse_solution",
-    "sparse_inverse": "sparse_inverse",
-    "time_varying": "sparse_solution",
 }
 
 DEFAULT_BASELINES_BY_GROUP = {
@@ -63,13 +56,6 @@ DEFAULT_BASELINES_BY_GROUP = {
     "time_varying_sensor_ablation": ["var4d", "vivid", "senseiver"],
     "runtime_budget_ablation": ["pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"],
     "train_size_ablation": ["fno", "deeponet", "recfno", "senseiver", "voronoicnn"],
-    # Legacy aliases.
-    "full_forward": ["fno", "deeponet", "ifno"],
-    "full_inverse": ["fno", "deeponet", "ifno"],
-    "sparse_solution_amortized": ["recfno", "senseiver", "voronoicnn"],
-    "sparse_solution_physics": ["pinn_sparse", "pc_bnn", "pde_opt"],
-    "sparse_inverse": ["pinn_sparse", "pde_opt"],
-    "time_varying": ["var4d", "vivid", "senseiver"],
 }
 
 VALID_EXPERIMENT_KINDS = {"main", "ablation"}
@@ -433,7 +419,7 @@ def _group_expansion(cfg: dict[str, Any], group_cfg: dict[str, Any], defaults: d
         sensor_modes = ["none"]
         noise_levels = [0.0]
     train_sizes = _env_list("TRAIN_SIZES", group_cfg.get("train_sizes", cfg.get("train_sizes", [group_cfg.get("train_size", defaults["train_size"])])), int)
-    if task_group in {"time_varying", "time_varying_sensor_ablation"}:
+    if task_group == "time_varying_sensor_ablation":
         sensor_modes = ["time_varying"]
     return {
         "sensor_counts": sensor_counts,
@@ -587,7 +573,7 @@ def _make_run_row(
             resources.get("load_full_trajectory", defaults.get("load_full_trajectory", False)),
         )
     )
-    if sensor_mode == "time_varying" or task_group in {"time_varying", "time_varying_sensor_ablation"}:
+    if sensor_mode == "time_varying" or task_group == "time_varying_sensor_ablation":
         load_full_trajectory = True
     scalar_param_mode = _scalar_param_mode(defaults, pde, task)
     row: dict[str, Any] = {
