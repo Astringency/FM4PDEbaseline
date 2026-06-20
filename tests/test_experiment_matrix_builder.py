@@ -40,6 +40,32 @@ def test_sanity_matrix_generation_unique_run_ids_and_skips(tmp_path: Path):
     assert any(row["task"] == "sparse_inverse" and row["baseline"] == "pde_opt" for row in rows)
 
 
+def test_sanity_main_includes_main_table_ifno_inverse(tmp_path: Path):
+    out = tmp_path / "large"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/experiments/build_matrix.py",
+            "--config",
+            "configs/experiments/sanity_main.yaml",
+            "--output-root",
+            str(out),
+            "--matrix-name",
+            "sanity_main",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    rows = _read_jsonl(out / "matrices" / "sanity_main.jsonl")
+    inverse_rows = [row for row in rows if row["task_group"] == "full_inverse_main"]
+
+    assert inverse_rows
+    assert {row["baseline"] for row in inverse_rows} == {"ifno"}
+    assert {row["task"] for row in inverse_rows} == {"inverse"}
+    assert all(not row.get("skip_reason") for row in inverse_rows)
+    assert not any(row["task_group"] == "full_inverse_main" and row["baseline"] == "deeponet" for row in rows)
+
+
 def test_future_supervised_defaults_to_materialize(tmp_path: Path):
     out = tmp_path / "large"
     subprocess.run(

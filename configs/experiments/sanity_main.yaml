@@ -25,7 +25,7 @@ task_group_overrides:
     noise_level: 0.0
   full_inverse_main:
     pdes: [poisson, heat]
-    baselines: [deeponet]
+    baselines: [ifno]
     num_sensors: 0
     sensor_mode: none
     noise_level: 0.0

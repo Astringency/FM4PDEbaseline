@@ -28,6 +28,15 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
     }
     run_ids = [row["run_id"] for row in rows]
     assert len(run_ids) == len(set(run_ids))
+    assert {row["val_size"] for row in rows} == {1000}
+    assert set(summary["by_task_group"]) == {
+        "full_forward_main",
+        "full_inverse_main",
+        "sparse_solution_main_amortized",
+        "sparse_solution_main_physics",
+        "sparse_inverse_main",
+        "time_varying_da_main",
+    }
     assert len(skipped) == 46
     adapted_skips = [row for row in skipped if row["task_group"] == "full_inverse_main"]
     assert {row["baseline"] for row in adapted_skips} == {"fno", "deeponet"}
