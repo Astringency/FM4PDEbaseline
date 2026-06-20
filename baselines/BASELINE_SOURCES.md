@@ -35,8 +35,9 @@ This file is the source-key reference used by `baselines/capabilities.py`. Do no
 - Wrapper: `baselines/methods/ifno.py`.
 - Official files consulted: `offical/iFNO/darcy_curve.py`, `offical/iFNO/ns.py`, `offical/iFNO/utils.py`, `offical/iFNO/vanilla_vae.py`, `offical/iFNO/run.py`.
 - Standard capability: full forward and full inverse operator learning.
-- Enabled main tasks: `forward` and `inverse` using direct official components if they become importable, or the current `official_aligned` reimplementation.
+- Enabled main tasks: `forward` and `inverse`. `implementation_mode=official` requires direct official components and currently hard-fails because the vendored scripts are not safe importable model components. `implementation_mode=official_aligned` uses the disclosed reimplementation.
 - Reimplementation scope: `baselines/methods/ifno_official_aligned.py` follows the official p1/p2 coordinate-augmented lift, q1/q2 pointwise projections, multiplicative Softplus FNO coupling blocks, shared forward/backward invertible backbone, reconstruction terms, bidirectional supervised loss, and cycle consistency. It does not claim VAE posterior inference from the official scripts.
+- Appendix: see `baselines/OFFICIAL_ALIGNED_IMPLEMENTATION.md`.
 - Supplement only: explicit `implementation_mode: adapted` uses a simplified local/debug coupling path labeled `local_debug_ifno`.
 - Unsupported main tasks: sparse reconstruction and sparse inverse.
 
@@ -99,8 +100,9 @@ This file is the source-key reference used by `baselines/capabilities.py`. Do no
 - Wrapper: `baselines/methods/pc_bnn.py`.
 - Official files consulted: `offical/PC-BNN/code/FCN.py`, `offical/PC-BNN/code/BayesNN.py`, `offical/PC-BNN/code/SVGD.py`, `offical/PC-BNN/code/cases.py`, `offical/PC-BNN/code/mainsolve.py`.
 - Standard capability: physics-constrained Bayesian neural network for sparse/noisy flow reconstruction under the official channel/PDE assumptions.
-- Enabled main tasks: conditional `sparse_solution`/`sparse_reconstruction` for 2D three-channel shallow-water fields, labeled `official_aligned_pcbnn_reimplementation`.
+- Enabled main tasks: conditional `sparse_solution`/`sparse_reconstruction` for 2D three-channel shallow-water fields. Strict `implementation_mode=official` may use the vendored official `Net` class when importable and channel/PDE assumptions match; explicit `implementation_mode=official_aligned` uses `official_aligned_pcbnn_reimplementation`.
 - Reimplementation scope: coordinate-to-three-field Swish MLP particles, particle posterior approximation with SVGD RBF-kernel updates, observation likelihood on sparse/noisy samples, predictive mean/std, and physics-constrained residual terms. Scalar Poisson/Darcy/Helmholtz-style fields do not match the official flow/channel assumption and remain supplement-only.
+- Appendix: see `baselines/OFFICIAL_ALIGNED_IMPLEMENTATION.md`.
 - Supplement only: generic local SVGD particles with local residuals, labeled `local_generic_svgd_pcbnn` or `fallback_generic_svgd_pcbnn`.
 - Unsupported main tasks: sparse inverse without explicit parameter posterior objective; supervised full operators.
 
@@ -132,7 +134,8 @@ This file is the source-key reference used by `baselines/capabilities.py`. Do no
 - Wrapper: `baselines/methods/vivid.py`.
 - Official files consulted: `offical/VIVID/VIVID.py`, `offical/VIVID/VCNN_training.py`, `offical/VIVID/VIVID-POD.py`, `offical/VIVID/voronoi_preprocessing.py`, `offical/VIVID/shallow_water.py`, `offical/invobs-data-assimilation/run_train_inverse_observations.py`, `offical/invobs-data-assimilation/run_data_assimilation.py`, `offical/invobs-data-assimilation/da_methods.py`, `offical/invobs-data-assimilation/ml_methods.py`, `offical/invobs-data-assimilation/kolmogorov_ml.py`.
 - Standard capability: learned inverse-observation initialization plus variational refinement for sparse, unstructured, time-varying sensors.
-- Enabled main tasks: time-varying DA for `nsnonbounded`, `burger`, `reaction_diffusion`, and `shallow_water` when full trajectory/multi-time observations are available, using `official_aligned_vivid_invobs_reimplementation`.
-- Reimplementation scope: `baselines/methods/vivid_official_aligned.py` trains a Voronoi/sparse-observation inverse operator with VIVID-style convolutional reconstruction and invobs-style time-space convolution semantics, then `baselines/methods/vivid.py` performs variational refinement against observation, inverse/background, and dynamics/PDE residual losses. It does not claim direct TensorFlow/Keras/Flax checkpoint reuse.
+- Enabled main tasks: time-varying DA for `nsnonbounded`, `burger`, `reaction_diffusion`, and `shallow_water` when full trajectory/multi-time observations are available, using `official_aligned_vivid_invobs_reimplementation`. Strict `implementation_mode=official` requires a direct VIVID/invobs component import and currently hard-fails.
+- Reimplementation scope: `baselines/methods/vivid_official_aligned.py` trains a Voronoi/sparse-observation inverse operator with VIVID-style convolutional reconstruction and invobs-style time-space convolution semantics, then `baselines/methods/vivid.py` performs variational refinement against observation, inverse/background, and dynamics/PDE residual losses. NS future-only inverse predictions are inserted into the future segment of the optimized `[initial,future]` trajectory, and inverse-operator physics loss prepends the true/background initial frame before evaluating full-trajectory residuals. It does not claim direct TensorFlow/Keras/Flax checkpoint reuse.
+- Appendix: see `baselines/OFFICIAL_ALIGNED_IMPLEMENTATION.md`.
 - Supplement only: explicit `implementation_mode: adapted` locally trains VoronoiCNN initialization plus refinement, labeled `VIVID-style`.
 - Unsupported main tasks: static PDE main tables, endpoint-only main DA, and supervised full operators.

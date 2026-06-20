@@ -5,7 +5,7 @@ import torch
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .official import OfficialImportError, official_source_info, requested_implementation_mode
+from .official import OfficialImportError, official_source_info, requested_implementation_mode, wrap_official_adapter_error
 from .shared import FNO2dNet, OfficialRecFNOVoronoiFNO2dNet, grid_channels
 
 
@@ -44,8 +44,11 @@ class RecFNOBaseline(BaselineModel):
                     **official_source_info("recfno"),
                 )
                 return self
-            except OfficialImportError as exc:
+            except Exception as exc:
+                exc = wrap_official_adapter_error("RecFNO", exc)
                 self.backend_warning = f"recfno unavailable: {exc}"
+        if implementation_mode == "official" and self.backend_warning:
+            raise OfficialImportError(self.backend_warning)
         self.net = FNO2dNet(
             in_channels=in_channels,
             out_channels=target_channels,

@@ -53,7 +53,7 @@ def test_paper_official_unavailable_raises(monkeypatch, tiny_data_root, tmp_path
     monkeypatch.setattr(fno_module, "OfficialRecFNOVoronoiFNO2dNet", missing_recfno)
     config = tmp_path / "paper_official.yaml"
     config.write_text(yaml.safe_dump({"method": {"official_backend": "official"}, "epochs": 1}), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="requested official backend"):
+    with pytest.raises(OfficialImportError, match="unavailable"):
         main(
             [
                 "--baseline",

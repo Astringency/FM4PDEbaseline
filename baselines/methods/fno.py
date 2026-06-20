@@ -11,6 +11,7 @@ from .official import (
     get_neuraloperator_fno_class,
     official_source_info,
     requested_implementation_mode,
+    wrap_official_adapter_error,
 )
 from .shared import FNO2dNet, OfficialRecFNOVoronoiFNO2dNet
 
@@ -51,7 +52,8 @@ class FNOBaseline(BaselineModel):
                     **official_source_info("neuraloperator"),
                 )
                 return self
-            except OfficialImportError as exc:
+            except Exception as exc:
+                exc = wrap_official_adapter_error("neuraloperator FNO", exc)
                 fallback_reasons.append(f"neuraloperator unavailable: {exc}")
                 if backend in {"neuraloperator", "official"}:
                     warnings.warn(f"neuraloperator FNO unavailable, using fallback: {exc}", RuntimeWarning, stacklevel=2)
@@ -76,10 +78,14 @@ class FNOBaseline(BaselineModel):
                     **official_source_info("recfno"),
                 )
                 return self
-            except OfficialImportError as exc:
+            except Exception as exc:
+                exc = wrap_official_adapter_error("RecFNO VoronoiFNO2d", exc)
                 fallback_reasons.append(f"recfno unavailable: {exc}")
                 if backend in {"recfno", "official"}:
                     warnings.warn(f"RecFNO official FNO unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
+
+        if implementation_mode == "official" and fallback_reasons:
+            raise OfficialImportError("; ".join(fallback_reasons))
 
         self.net = FNO2dNet(
             in_channels=in_channels,

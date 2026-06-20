@@ -1,0 +1,65 @@
+data_root: /home/tat512/C01Python/PDEdata
+output_dir: outputs/baselines/tuning
+experiment_mode: debug
+
+train_size: 256
+val_size: 64
+test_size: 64
+batch_size: 8
+epochs: 5
+learning_rate: 0.001
+train_shards: 1
+scalar_param_mode: metadata
+sensor_budget_mode: per_time
+seeds: [1]
+
+method:
+  implementation_mode: official_or_skip
+  official_backend: auto
+  normalize: true
+  max_steps: 32
+  max_val_steps: 16
+  lambda_obs: 1.0
+  lambda_pde: 0.01
+  lambda_int: 0.01
+  lambda_bc: 0.01
+  lambda_ic: 0.01
+  physics_loss_mode: total
+
+tuning_grid:
+  fno:
+    width: [32, 64]
+    modes1: [12, 20]
+    modes2: [12, 20]
+    layers: [3, 4]
+    lr: [0.001, 0.0005]
+  deeponet:
+    hidden: [128, 256]
+    basis: [64, 128]
+    lr: [0.001, 0.0005]
+  ifno:
+    implementation_mode: [official_aligned]
+    width: [32, 64]
+    layers: [3, 4]
+    cycle_weight: [0.05, 0.1]
+    lr: [0.001]
+  recfno:
+    width: [32, 64]
+    token_dim: [64, 128]
+    lr: [0.001]
+  senseiver:
+    token_dim: [64, 128]
+    lr: [0.001]
+  voronoicnn:
+    width: [32, 64]
+    lr: [0.001]
+  vivid:
+    implementation_mode: [official_aligned]
+    steps: [100, 300]
+    refine_steps: [50, 100]
+    lr: [0.005, 0.001]
+  pc_bnn:
+    implementation_mode: [official_aligned]
+    particles: [4, 8]
+    steps: [100, 300]
+    lr: [0.001]

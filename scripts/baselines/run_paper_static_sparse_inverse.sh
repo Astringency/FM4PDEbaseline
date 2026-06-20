@@ -8,7 +8,7 @@ DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
 OUT="${OUT:-outputs/baselines/paper/static_sparse_inverse}"
 DEVICE="${DEVICE:-cpu}"
 TRAIN_SIZE="${TRAIN_SIZE:-50000}"
-VAL_SIZE="${VAL_SIZE:-0}"
+VAL_SIZE="${VAL_SIZE:-1000}"
 TEST_SIZE="${TEST_SIZE:-1000}"
 TRAIN_SHARDS="${TRAIN_SHARDS:-5}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -20,6 +20,7 @@ PDES="${PDES:-poisson helmholtz darcy steady_heat_conduction}"
 BASELINES="${BASELINES:-pinn_sparse pde_opt}"
 SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
 DATA_LOADING_MODE="${DATA_LOADING_MODE:-lazy}"
+SENSOR_BUDGET_MODE="${SENSOR_BUDGET_MODE:-per_time}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
 SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
 mkdir -p "$OUT"
@@ -42,6 +43,7 @@ for seed in $SEEDS; do
               --seed "$seed" --device "$DEVICE" \
               --num-sensors "$sensors" --sensor-mode "$sensor_mode" --noise-level "$noise" \
               --data-loading-mode "$DATA_LOADING_MODE" \
+              --sensor-budget-mode "$SENSOR_BUDGET_MODE" \
               --scalar-param-mode "$SCALAR_PARAM_MODE" --output-dir "$OUT"
           done
         done

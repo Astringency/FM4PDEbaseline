@@ -7,7 +7,7 @@ import torch
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .official import OfficialImportError, get_deepxde_deeponet_class, official_source_info, requested_implementation_mode
+from .official import OfficialImportError, get_deepxde_deeponet_class, official_source_info, requested_implementation_mode, wrap_official_adapter_error
 from .shared import MLP, flatten_grid
 
 
@@ -42,6 +42,7 @@ class DeepONetBaseline(BaselineModel):
                     num_outputs=out_channels,
                     multi_output_strategy="independent" if out_channels > 1 else None,
                 )
+                self._official_smoke_check(branch_in, coord_dim, out_channels)
                 self.set_backend(
                     "deepxde",
                     "deepxde",
@@ -52,10 +53,13 @@ class DeepONetBaseline(BaselineModel):
                     adapter_status="official_code_adapter",
                     **official_source_info("deepxde"),
                 )
-            except OfficialImportError as exc:
+            except Exception as exc:
+                exc = wrap_official_adapter_error("DeepXDE DeepONet", exc)
                 fallback_reason = f"deepxde unavailable: {exc}"
                 if backend in {"deepxde", "official"}:
                     warnings.warn(f"DeepXDE DeepONet unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
+        if implementation_mode == "official" and self.official_net is None and fallback_reason:
+            raise OfficialImportError(fallback_reason)
         if self.official_net is None:
             requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
             self.set_backend(
@@ -98,3 +102,17 @@ class DeepONetBaseline(BaselineModel):
         values = torch.einsum("bck,bqck->bqc", coeff, trunk) / (self.basis ** 0.5)
         spatial = tuple(self.out_shape[1:])
         return values.permute(0, 2, 1).reshape(b, self.out_channels, *spatial)
+
+    def _official_smoke_check(self, branch_in: int, coord_dim: int, out_channels: int) -> None:
+        if self.official_net is None:
+            return
+        coords = torch.zeros(1, 1, max(coord_dim, 1))
+        if coord_dim == 0:
+            coords = coords[..., :0]
+        branch = torch.zeros(1, branch_in)
+        with torch.no_grad():
+            values = self.official_net((branch, coords[0]))
+        if values.shape[0] != 1:
+            raise RuntimeError(f"DeepXDE smoke output batch mismatch: {tuple(values.shape)}")
+        if out_channels > 1 and values.reshape(1, -1).numel() < out_channels:
+            raise RuntimeError(f"DeepXDE smoke output too small for {out_channels} outputs: {tuple(values.shape)}")

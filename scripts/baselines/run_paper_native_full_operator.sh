@@ -8,7 +8,7 @@ DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
 OUT="${OUT:-outputs/baselines/paper/native_full_operator}"
 DEVICE="${DEVICE:-cpu}"
 TRAIN_SIZE="${TRAIN_SIZE:-50000}"
-VAL_SIZE="${VAL_SIZE:-0}"
+VAL_SIZE="${VAL_SIZE:-1000}"
 TEST_SIZE="${TEST_SIZE:-1000}"
 TRAIN_SHARDS="${TRAIN_SHARDS:-5}"
 EPOCHS="${EPOCHS:-200}"
@@ -21,6 +21,7 @@ SCALAR_PARAM_MODE_WAS_SET="${SCALAR_PARAM_MODE+x}"
 SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
 SUPERVISED_SCALAR_PARAM_MODE="${SUPERVISED_SCALAR_PARAM_MODE:-materialize}"
 DATA_LOADING_MODE="${DATA_LOADING_MODE:-lazy}"
+SENSOR_BUDGET_MODE="${SENSOR_BUDGET_MODE:-per_time}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
 IFNO_IMPLEMENTATION_MODE="${IFNO_IMPLEMENTATION_MODE:-official_aligned}"
 SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
@@ -57,6 +58,7 @@ run_one() {
     --train-shards "$TRAIN_SHARDS" --batch-size "$BATCH_SIZE" \
     --epochs "$EPOCHS" --seed "$seed" --device "$DEVICE" \
     --data-loading-mode "$DATA_LOADING_MODE" \
+    --sensor-budget-mode "$SENSOR_BUDGET_MODE" \
     --scalar-param-mode "$scalar_mode" --output-dir "$OUT" \
     "${method_args[@]}"
 }

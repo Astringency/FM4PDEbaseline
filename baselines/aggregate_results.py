@@ -20,7 +20,9 @@ BASE_GROUP_KEYS = [
     "baseline",
     "train_size",
     "scalar_param_mode",
+    "normalize",
     "num_sensors",
+    "sensor_budget_mode",
     "sensor_mode",
     "noise_level",
     "backend_used",
@@ -82,6 +84,9 @@ def main(argv: list[str] | None = None) -> None:
     (out / "summary_supplement.json").write_text(json.dumps(summary_supplement, indent=2, sort_keys=True), encoding="utf-8")
     _write_csv(out / "skipped_combinations.csv", skipped_rows)
     (out / "skipped_combinations.json").write_text(json.dumps(skipped_rows, indent=2, sort_keys=True), encoding="utf-8")
+    tuning_rows = tuning_summary(rows)
+    _write_csv(out / "tuning_summary.csv", tuning_rows)
+    (out / "tuning_summary.json").write_text(json.dumps(tuning_rows, indent=2, sort_keys=True), encoding="utf-8")
     write_capability_matrix(out)
     latex_rows = _latex_rows(summary_main)
     _write_csv(out / "latex_table.csv", latex_rows)
@@ -95,6 +100,7 @@ def main(argv: list[str] | None = None) -> None:
                 "main_groups": len(summary_main),
                 "supplement_groups": len(summary_supplement),
                 "skipped": len(skipped_rows),
+                "tuning_groups": len(tuning_rows),
                 "output_dir": str(out),
             },
             indent=2,
@@ -158,6 +164,46 @@ def partition_rows_for_tables(rows: list[dict[str, Any]]) -> tuple[list[dict[str
             downgraded["aggregation_warning"] = f"downgraded_to_supplement: {issue}"
         supplement.append(downgraded)
     return main, supplement
+
+
+def tuning_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [row for row in rows if _has_finite(row.get("best_val_loss"))]
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in candidates:
+        key = (
+            row.get("pde", ""),
+            row.get("task", ""),
+            row.get("baseline", ""),
+            row.get("sensor_mode", ""),
+            row.get("sensor_budget_mode", ""),
+            row.get("num_sensors", ""),
+            row.get("noise_level", ""),
+            row.get("implementation_mode_effective", ""),
+        )
+        groups[key].append(row)
+    out: list[dict[str, Any]] = []
+    for key, items in sorted(groups.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
+        best = min(items, key=lambda row: float(row.get("best_val_loss")))
+        out.append(
+            {
+                "pde": key[0],
+                "task": key[1],
+                "baseline": key[2],
+                "sensor_mode": key[3],
+                "sensor_budget_mode": key[4],
+                "num_sensors": key[5],
+                "noise_level": key[6],
+                "implementation_mode_effective": key[7],
+                "best_val_loss": float(best.get("best_val_loss")),
+                "best_epoch": best.get("best_epoch", ""),
+                "config_hash": best.get("config_hash", ""),
+                "selected_config_path": best.get("config_path", ""),
+                "run_id": best.get("run_id", ""),
+                "seed": best.get("seed", ""),
+                "candidate_count": len(items),
+            }
+        )
+    return out
 
 
 def _main_eligibility_issue(row: dict[str, Any]) -> str:
@@ -463,6 +509,13 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value).lower() in {"1", "true", "yes", "y"}
+
+
+def _has_finite(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except Exception:
+        return False
 
 
 def _sort_key(key: tuple[tuple[str, Any], ...]) -> tuple[tuple[str, str], ...]:

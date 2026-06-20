@@ -6,6 +6,7 @@ import torch
 from baselines.capabilities import paper_table_eligible, resolve_capability
 from baselines.common.data_adapter import build_default_registry
 from baselines.methods.ifno import IFNOBaseline
+from baselines.methods.official import OfficialImportError
 from baselines.run import _backend_info, build_data_spec
 
 
@@ -51,3 +52,9 @@ def test_ifno_local_debug_path_never_enters_main_table():
     assert backend["implementation_mode_effective"] == "adapted"
     assert backend["adapter_status"] == "local_debug_ifno"
     assert paper_table_eligible(cap, backend_info=backend) is False
+
+
+def test_ifno_strict_official_does_not_fallback_to_aligned():
+    batch = _batch("forward")
+    with pytest.raises(OfficialImportError):
+        IFNOBaseline().build(_cfg(implementation_mode="official", official_backend="ifno"), build_data_spec(batch))

@@ -1,6 +1,7 @@
 method:
   implementation_mode: official_or_skip
   official_backend: auto
+  normalize: false
   steps: 500
   lr: 0.01
   lambda_obs: 1.0

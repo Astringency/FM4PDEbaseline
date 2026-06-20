@@ -8,7 +8,7 @@ import torch.nn as nn
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .official import OfficialImportError, get_senseiver_classes, official_source_info, requested_implementation_mode
+from .official import OfficialImportError, get_senseiver_classes, official_source_info, requested_implementation_mode, wrap_official_adapter_error
 from .shared import MLP
 
 
@@ -62,10 +62,13 @@ class SenseiverBaseline(BaselineModel):
                     **official_source_info("senseiver"),
                 )
                 return self
-            except OfficialImportError as exc:
+            except Exception as exc:
+                exc = wrap_official_adapter_error("Senseiver", exc)
                 fallback_reason = f"senseiver unavailable: {exc}"
                 if backend in {"senseiver", "official"}:
                     warnings.warn(f"Senseiver official modules unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
+        if implementation_mode == "official" and self.official_encoder is None and fallback_reason:
+            raise OfficialImportError(fallback_reason)
         self.sensor_proj = MLP(coord_dim + self.out_channels, token_dim, hidden=token_dim, depth=2)
         self.query_proj = MLP(coord_dim, token_dim, hidden=token_dim, depth=2)
         self.latents = nn.Parameter(torch.randn(num_latents, token_dim) * 0.02)

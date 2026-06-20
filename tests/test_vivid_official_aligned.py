@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from torch.utils.data import DataLoader
+import pytest
 
 from baselines.capabilities import paper_table_eligible, resolve_capability
 from baselines.common.data_adapter import PDEBatchDataset, build_default_registry, pde_collate
+from baselines.methods.official import OfficialImportError
 from baselines.methods.vivid import VIVIDBaseline
 from baselines.run import _backend_info, build_data_spec
 
@@ -75,3 +77,14 @@ def test_vivid_style_adapted_path_is_supplement_only():
     )
     assert backend["implementation_mode_effective"] == "adapted"
     assert paper_table_eligible(cap, backend_info=backend) is False
+
+
+def test_vivid_strict_official_does_not_fallback_to_aligned():
+    batch = _time_varying_batch("reaction_diffusion")
+    cfg = {
+        "implementation_mode": "official",
+        "official_backend": "vivid",
+        "uses_official_inverse_observation_operator": True,
+    }
+    with pytest.raises(OfficialImportError):
+        VIVIDBaseline().build(cfg, build_data_spec(batch))

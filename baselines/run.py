@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import shutil
@@ -34,8 +35,11 @@ from baselines.methods.ifno import IFNOBaseline
 from baselines.methods.official import OfficialImportError
 from baselines.methods.official import (
     get_ifno_official_aligned_status,
+    get_ifno_official_status,
+    get_pc_bnn_net_class,
     get_pc_bnn_official_aligned_status,
     get_vivid_official_aligned_status,
+    get_vivid_official_status,
 )
 from baselines.methods.pc_bnn import PCBNNBaseline
 from baselines.methods.pde_opt import PDEOptBaseline
@@ -75,6 +79,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--experiment-mode", choices=["smoke", "debug", "paper"], default="debug")
     parser.add_argument("--num-sensors", type=int, default=500)
     parser.add_argument("--sensor-mode", choices=["random", "fixed", "grid", "time_varying"], default="random")
+    parser.add_argument("--sensor-budget-mode", choices=["per_time", "total"], default=None)
     parser.add_argument("--noise-level", type=float, default=0.0)
     parser.add_argument("--train-size", type=int, default=50000)
     parser.add_argument("--val-size", type=int, default=0)
@@ -185,6 +190,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = load_yaml(args.config)
     args.data_loading_mode = _resolve_data_loading_mode(args)
     args.physics_metric_mode = _resolve_physics_metric_mode(args, cfg)
+    args.sensor_budget_mode = _resolve_sensor_budget_mode(args, cfg)
     method_cfg = build_method_config(cfg, args)
     capability = resolve_capability(
         args.baseline,
@@ -334,7 +340,10 @@ def main(argv: list[str] | None = None) -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_prefix = _run_file_prefix(args)
-    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info)
+    normalization_stats_path = _write_normalization_stats(out_dir, run_prefix, model)
+    normalization_fields = _normalization_fields(model, normalization_stats_path)
+    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields)
+    config_hash = _file_sha1(config_snapshot)
     train_history_path = out_dir / f"{run_prefix}_train_history.json"
     train_history_path.write_text(json.dumps(_json_safe(train_history), indent=2), encoding="utf-8")
     checkpoint_path = ""
@@ -360,6 +369,8 @@ def main(argv: list[str] | None = None) -> None:
         test_dataset=test_dataset,
         split_info=split_info,
         method_budget_fields=method_budget_fields,
+        normalization_fields=normalization_fields,
+        config_hash=config_hash,
     )
     summary = _summarize_run(
         raw_rows,
@@ -373,12 +384,15 @@ def main(argv: list[str] | None = None) -> None:
         capability_info,
         split_info,
         method_budget_fields,
+        normalization_fields,
+        config_hash,
     )
     summary.update(
         {
             "train_time": train_time,
             "num_params": int(model.parameter_count() if hasattr(model, "parameter_count") else num_parameters(model)),
             "config_path": str(config_snapshot),
+            "config_hash": config_hash,
             "checkpoint_path": checkpoint_path,
             "train_history_path": str(train_history_path),
             "commit_hash": _commit_hash(),
@@ -426,6 +440,14 @@ def _resolve_data_loading_mode(args: argparse.Namespace) -> str:
     if args.data_loading_mode:
         return str(args.data_loading_mode)
     return "lazy" if args.experiment_mode == "paper" else "eager"
+
+
+def _resolve_sensor_budget_mode(args: argparse.Namespace, cfg: dict[str, Any]) -> str:
+    mode = args.sensor_budget_mode or cfg.get("sensor_budget_mode", "per_time")
+    mode = str(mode or "per_time")
+    if mode not in {"per_time", "total"}:
+        raise ValueError(f"sensor_budget_mode must be per_time or total, got {mode!r}")
+    return mode
 
 
 def _parse_override_value(value: str) -> Any:
@@ -578,6 +600,7 @@ def _make_split_dataset(
             args.task,
             num_sensors=args.num_sensors if use_sensors else None,
             sensor_mode=args.sensor_mode,
+            sensor_budget_mode=args.sensor_budget_mode,
             noise_level=args.noise_level,
             seed=args.seed,
             experiment_mode=args.experiment_mode,
@@ -594,6 +617,7 @@ def _make_split_dataset(
         val_from_train_offset=val_from_train_offset,
         num_sensors=args.num_sensors if use_sensors else None,
         sensor_mode=args.sensor_mode,
+        sensor_budget_mode=args.sensor_budget_mode,
         noise_level=args.noise_level,
         seed=args.seed,
         prefer_test=args.prefer_test and split == "test",
@@ -625,6 +649,8 @@ def _evaluate_full_test_loader(
     test_dataset: PDEBatchDataset,
     split_info: dict[str, Any],
     method_budget_fields: dict[str, Any],
+    normalization_fields: dict[str, Any],
+    config_hash: str,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     model.eval()
     rows: list[dict[str, Any]] = []
@@ -636,7 +662,7 @@ def _evaluate_full_test_loader(
         start = time.perf_counter()
         eval_batch = _to_device_batch_for_eval(batch, args.device)
         with torch.set_grad_enabled(grad_enabled):
-            pred = model.predict(eval_batch)
+            pred = model.predict_physical(eval_batch) if hasattr(model, "predict_physical") else model.predict(eval_batch)
         elapsed = time.perf_counter() - start
         _copy_eval_metadata(batch, eval_batch)
         pred_cpu = pred.detach().cpu()
@@ -686,6 +712,9 @@ def _evaluate_full_test_loader(
             "input_channel_names": json.dumps(batch.input_channel_names),
             "target_channel_names": json.dumps(batch.target_channel_names),
             "num_sensors": args.num_sensors if args.task.startswith("sparse") else 0,
+            "sensor_budget_mode": str(batch.metadata.get("sensor_budget_mode", args.sensor_budget_mode if args.task.startswith("sparse") else "none")),
+            "num_sensors_per_time": json.dumps(batch.metadata.get("num_sensors_per_time", [] if args.task.startswith("sparse") else [])),
+            "num_observations_total": int(batch.metadata.get("num_observations_total", 0) or 0),
             "requested_sensor_mode": args.sensor_mode if args.task.startswith("sparse") else "none",
             "effective_sensor_mode": str(batch.metadata.get("effective_sensor_mode", args.sensor_mode if args.task.startswith("sparse") else "none")),
             "sensor_mode": str(batch.metadata.get("effective_sensor_mode", args.sensor_mode if args.task.startswith("sparse") else "none")),
@@ -720,12 +749,16 @@ def _evaluate_full_test_loader(
             "assimilation_mode": str(batch.metadata.get("assimilation_mode", "")),
             "assimilation_mode_counts": json.dumps(_assimilation_mode_counts(batch), sort_keys=True),
             "inverse_observation_operator_used": bool(batch.metadata.get("inverse_observation_operator_used", False)),
+            "learned_state_injection_mode": str(batch.metadata.get("learned_state_injection_mode", "")),
+            "learned_state_shape": json.dumps(list(batch.metadata.get("learned_state_shape", ())) if batch.metadata.get("learned_state_shape") else []),
+            "optimized_state_shape": json.dumps(list(batch.metadata.get("optimized_state_shape", ())) if batch.metadata.get("optimized_state_shape") else []),
             "posterior_particles": int(batch.metadata.get("posterior_particles", 0) or 0),
             "train_time": train_time,
             "inference_time": elapsed,
             "inference_optimization_time": inf_opt,
             "num_params": int(model.parameter_count() if hasattr(model, "parameter_count") else num_parameters(model)),
             "config_path": config_snapshot,
+            "config_hash": config_hash,
             "checkpoint_path": checkpoint_path,
             "commit_hash": _commit_hash(),
             "dry_run": bool(args.dry_run),
@@ -736,6 +769,8 @@ def _evaluate_full_test_loader(
             "target_shape": json.dumps(list(batch.target_fields.shape)),
             "pred_shape": json.dumps(list(pred_cpu.shape)),
             "train_history": json.dumps(_json_safe(train_history)),
+            **_train_history_fields(train_history),
+            **normalization_fields,
         }
         for key in ("obs_mse", "obs_mse_clean", "obs_mse_noisy", "pde_residual", "bc_residual", "ic_residual", "physics_loss"):
             values_key = f"{key}_values"
@@ -838,6 +873,8 @@ def _summarize_run(
     capability_info: dict[str, Any],
     split_info: dict[str, Any],
     method_budget_fields: dict[str, Any],
+    normalization_fields: dict[str, Any],
+    config_hash: str,
 ) -> dict[str, Any]:
     metric_keys = [
         "relative_l2_solution",
@@ -888,6 +925,9 @@ def _summarize_run(
         "input_channel_names": json.dumps(test_dataset.batch.input_channel_names),
         "target_channel_names": json.dumps(test_dataset.batch.target_channel_names),
         "num_sensors": args.num_sensors if args.task.startswith("sparse") else 0,
+        "sensor_budget_mode": str(test_dataset.batch.metadata.get("sensor_budget_mode", args.sensor_budget_mode if args.task.startswith("sparse") else "none")),
+        "num_sensors_per_time": json.dumps(test_dataset.batch.metadata.get("num_sensors_per_time", [] if args.task.startswith("sparse") else [])),
+        "num_observations_total": int(test_dataset.batch.metadata.get("num_observations_total", 0) or 0),
         "requested_sensor_mode": args.sensor_mode if args.task.startswith("sparse") else "none",
         "effective_sensor_mode": str(test_dataset.batch.metadata.get("effective_sensor_mode", args.sensor_mode if args.task.startswith("sparse") else "none")),
         "sensor_mode": str(test_dataset.batch.metadata.get("effective_sensor_mode", args.sensor_mode if args.task.startswith("sparse") else "none")),
@@ -906,11 +946,15 @@ def _summarize_run(
         "residual_mode_counts": json.dumps(dict(_residual_mode_counter(rows)), sort_keys=True),
         "assimilation_mode_counts": json.dumps(dict(_assimilation_mode_counter(rows)), sort_keys=True),
         "inverse_observation_operator_used": any(bool(row.get("inverse_observation_operator_used", False)) for row in rows),
+        "learned_state_injection_mode_counts": json.dumps(dict(Counter(str(row.get("learned_state_injection_mode", "")) for row in rows if row.get("learned_state_injection_mode"))), sort_keys=True),
         "posterior_particles": max((int(row.get("posterior_particles", 0) or 0) for row in rows), default=0),
         "inference_time_total": eval_totals["inference_time_total"],
         "inference_time_per_sample": eval_totals["inference_time_total"] / max(len(test_dataset), 1),
         "inference_optimization_time_total": eval_totals["inference_optimization_time_total"],
         "inference_optimization_time_per_sample": eval_totals["inference_optimization_time_total"] / max(len(test_dataset), 1),
+        "config_hash": config_hash,
+        **_train_history_fields(rows[0].get("train_history", "{}") if rows else {}),
+        **normalization_fields,
     }
     for key in metric_keys:
         values = []
@@ -978,6 +1022,9 @@ def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
         "inverse_observation_operator_used",
         "posterior_particles",
         "official_alignment_level",
+        "learned_state_injection_mode",
+        "learned_state_shape",
+        "optimized_state_shape",
     ):
         if key in src.metadata:
             dst.metadata[key] = src.metadata[key]
@@ -1090,6 +1137,63 @@ def _tensor_float(value: Any) -> float:
     return float(value)
 
 
+def _train_history_fields(train_history: Any) -> dict[str, Any]:
+    if isinstance(train_history, str):
+        try:
+            train_history = json.loads(train_history)
+        except Exception:
+            train_history = {}
+    if not isinstance(train_history, dict):
+        train_history = {}
+    return {
+        "best_val_loss": train_history.get("best_val_loss"),
+        "best_epoch": train_history.get("best_epoch"),
+    }
+
+
+def _write_normalization_stats(out_dir: Path, run_prefix: str, model) -> str:
+    stats = getattr(model, "normalization_stats", None)
+    if stats is None:
+        return ""
+    path = out_dir / f"{run_prefix}_normalization_stats.json"
+    path.write_text(json.dumps(_json_safe(stats.json_summary()), indent=2, sort_keys=True), encoding="utf-8")
+    model.normalization_stats_path = str(path)
+    return str(path)
+
+
+def _normalization_fields(model, stats_path: str = "") -> dict[str, Any]:
+    stats = getattr(model, "normalization_stats", None)
+    uses = bool(getattr(model, "uses_normalization", False) and stats is not None)
+    fields: dict[str, Any] = {
+        "normalize": uses,
+        "uses_normalization": uses,
+        "normalization_stats_path": stats_path or str(getattr(model, "normalization_stats_path", "")),
+        "input_mean": "",
+        "input_std": "",
+        "target_mean": "",
+        "target_std": "",
+    }
+    if stats is None:
+        return fields
+    summary = stats.json_summary()
+    fields.update(
+        {
+            "input_mean": json.dumps(summary["input_mean"]),
+            "input_std": json.dumps(summary["input_std"]),
+            "target_mean": json.dumps(summary["target_mean"]),
+            "target_std": json.dumps(summary["target_std"]),
+        }
+    )
+    return fields
+
+
+def _file_sha1(path: Path) -> str:
+    try:
+        return hashlib.sha1(path.read_bytes()).hexdigest()[:16]
+    except Exception:
+        return ""
+
+
 def _uses_official_inverse_observation_operator(baseline: str, method_cfg: dict[str, Any]) -> bool:
     if baseline != "vivid":
         return bool(method_cfg.get("uses_official_inverse_observation_operator", False))
@@ -1114,15 +1218,45 @@ def _preflight_backend_availability(
         return None
     try:
         if args.baseline == "ifno" and capability.task_family in {"full_forward", "full_inverse"}:
-            get_ifno_official_aligned_status()
+            if mode == "official":
+                get_ifno_official_status()
+            elif mode == "official_aligned":
+                get_ifno_official_aligned_status()
+            else:
+                try:
+                    get_ifno_official_status()
+                except OfficialImportError:
+                    if not bool(getattr(capability, "official_aligned_allowed", False)):
+                        raise
+                    get_ifno_official_aligned_status()
             return None
         if args.baseline == "vivid" and capability.task_family == "time_varying_da":
-            get_vivid_official_aligned_status()
+            if mode == "official":
+                get_vivid_official_status()
+            elif mode == "official_aligned":
+                get_vivid_official_aligned_status()
+            else:
+                try:
+                    get_vivid_official_status()
+                except OfficialImportError:
+                    if not bool(getattr(capability, "official_aligned_allowed", False)):
+                        raise
+                    get_vivid_official_aligned_status()
             return None
         if args.baseline == "pc_bnn" and capability.task_family == "sparse_reconstruction":
             if args.pde.lower() != "shallow_water":
                 raise OfficialImportError("official-aligned PC-BNN is only enabled for 2D three-channel shallow-water fields")
-            get_pc_bnn_official_aligned_status()
+            if mode == "official":
+                get_pc_bnn_net_class()
+            elif mode == "official_aligned":
+                get_pc_bnn_official_aligned_status()
+            else:
+                try:
+                    get_pc_bnn_net_class()
+                except OfficialImportError:
+                    if not bool(getattr(capability, "official_aligned_allowed", False)):
+                        raise
+                    get_pc_bnn_official_aligned_status()
             return None
     except OfficialImportError as exc:
         reason = f"official backend unavailable before dataset loading: {exc}"
@@ -1325,6 +1459,7 @@ def _write_config_snapshot(
     backend_info: dict[str, Any],
     method_budget_fields: dict[str, Any],
     capability_info: dict[str, Any],
+    normalization_fields: dict[str, Any],
 ) -> Path:
     prefix = _run_file_prefix(args)
     path = out_dir / f"{prefix}_config.json"
@@ -1340,6 +1475,8 @@ def _write_config_snapshot(
         "scalar_params_used_as_input": _scalar_params_used_as_input_from_spec(data_spec),
         "data_loading_mode": args.data_loading_mode,
         "load_full_trajectory": bool(args.load_full_trajectory),
+        "sensor_budget_mode": args.sensor_budget_mode,
+        "normalization": normalization_fields,
         "run_id": args.run_id,
         "run_name": args.run_name,
         **_experiment_fields(args),

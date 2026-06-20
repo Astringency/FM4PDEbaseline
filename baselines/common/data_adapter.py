@@ -59,6 +59,9 @@ class LazySampleRef:
 
 
 LAZY_PDES = {
+    "darcy",
+    "poisson",
+    "helmholtz",
     "nsnonbounded",
     "reaction_diffusion",
     "shallow_water",
@@ -300,6 +303,7 @@ class PDEDataRegistry:
         task: str,
         num_sensors: int | None = None,
         sensor_mode: str = "random",
+        sensor_budget_mode: str = "per_time",
         noise_level: float = 0.0,
         seed: int = 0,
         experiment_mode: str = "debug",
@@ -362,6 +366,8 @@ class PDEDataRegistry:
                 mode=effective_sensor_mode,
                 seed=seed,
                 noise_level=noise_level,
+                sensor_budget_mode=sensor_budget_mode,
+                time_dim=0 if (effective_sensor_mode == "time_varying" and spec.name == "burger" and observation_source.ndim == 4) else None,
             )
             mask = obs["mask"]
             obs_values = obs["obs_values"]
@@ -375,6 +381,9 @@ class PDEDataRegistry:
                     "sensor_mode": effective_sensor_mode,
                     "time_varying_sensor_valid": bool(time_varying_valid),
                     "num_sensors": int(num_sensors or 500),
+                    "sensor_budget_mode": str(obs["sensor_budget_mode"]),
+                    "num_observations_total": int(obs["num_observations_total"]),
+                    "num_sensors_per_time": obs["num_sensors_per_time"],
                     "noise_level": float(noise_level),
                     "mask_id": obs["mask_id"],
                 }
@@ -431,6 +440,7 @@ class PDEDataRegistry:
         val_from_train_offset: int | None = None,
         num_sensors: int | None = None,
         sensor_mode: str = "random",
+        sensor_budget_mode: str = "per_time",
         noise_level: float = 0.0,
         seed: int = 0,
         prefer_test: bool = False,
@@ -459,6 +469,7 @@ class PDEDataRegistry:
                     val_from_train_offset=val_from_train_offset,
                     num_sensors=num_sensors,
                     sensor_mode=sensor_mode,
+                    sensor_budget_mode=sensor_budget_mode,
                     noise_level=noise_level,
                     seed=seed,
                     prefer_test=prefer_test,
@@ -491,6 +502,7 @@ class PDEDataRegistry:
             task,
             num_sensors=num_sensors,
             sensor_mode=sensor_mode,
+            sensor_budget_mode=sensor_budget_mode,
             noise_level=noise_level,
             seed=seed,
             experiment_mode=experiment_mode,
@@ -509,6 +521,7 @@ class PDEDataRegistry:
         val_from_train_offset: int | None = None,
         num_sensors: int | None = None,
         sensor_mode: str = "random",
+        sensor_budget_mode: str = "per_time",
         noise_level: float = 0.0,
         seed: int = 0,
         prefer_test: bool = False,
@@ -537,6 +550,7 @@ class PDEDataRegistry:
             file_paths=meta["file_paths"],
             num_sensors=num_sensors,
             sensor_mode=sensor_mode,
+            sensor_budget_mode=sensor_budget_mode,
             noise_level=noise_level,
             seed=seed,
             scalar_param_mode=scalar_param_mode,
@@ -870,6 +884,7 @@ class LazyPDEBatchDataset(Dataset):
         file_paths: list[str],
         num_sensors: int | None,
         sensor_mode: str,
+        sensor_budget_mode: str,
         noise_level: float,
         seed: int,
         scalar_param_mode: str,
@@ -887,6 +902,7 @@ class LazyPDEBatchDataset(Dataset):
         self.file_paths = file_paths
         self.num_sensors = num_sensors
         self.sensor_mode = sensor_mode
+        self.sensor_budget_mode = sensor_budget_mode
         self.noise_level = float(noise_level)
         self.seed = int(seed)
         self.scalar_param_mode = scalar_param_mode
@@ -939,6 +955,7 @@ class LazyPDEBatchDataset(Dataset):
             self.task,
             num_sensors=self.num_sensors,
             sensor_mode=self.sensor_mode,
+            sensor_budget_mode=self.sensor_budget_mode,
             noise_level=self.noise_level,
             seed=self.seed,
             experiment_mode=self.experiment_mode,
@@ -1156,6 +1173,7 @@ def _build_lazy_refs(
         active_split = "train"
         offset = int(val_from_train_offset)
         split_source = "deterministic_train_subset"
+    initial_offset = int(offset)
     files = _lazy_candidate_files(root, pde, active_split, train_shards)
     if not files:
         raise _missing_error(root, pde, active_split, _lazy_patterns(pde, active_split))
@@ -1200,7 +1218,7 @@ def _build_lazy_refs(
         "train_size_loaded_in_memory": 0,
     }
     if split_source == "deterministic_train_subset":
-        meta["val_from_train_offset"] = offset
+        meta["val_from_train_offset"] = initial_offset
     return refs, meta
 
 
@@ -1230,6 +1248,8 @@ def _lazy_patterns(pde: str, split: str) -> list[str]:
         return ["2d_swe_128_128_10_*.h5"]
     if pde in {"heat", "wave", "advection_diffusion", "steady_heat_conduction"}:
         return _future_patterns(pde, split)
+    if pde in {"darcy", "poisson", "helmholtz"}:
+        return _static_patterns(pde, split)
     raise NotImplementedError(f"Lazy loading is not implemented for {pde}")
 
 
@@ -1237,6 +1257,8 @@ def _lazy_candidate_files(root: Path, pde: str, active_split: str, train_shards:
     aliases: tuple[str, ...] = ()
     if pde == "nsnonbounded":
         aliases = ("navier_stokes", "ns")
+    if pde == "darcy":
+        aliases = ("darcy_flow",)
     files = _train_limited(_candidate_files(root, pde, active_split, _lazy_patterns(pde, active_split), aliases=aliases), active_split, train_shards)
     if pde == "nsnonbounded" and active_split == "test":
         files = _filter_nsnonbounded_test_files(files)
@@ -1251,11 +1273,23 @@ def _lazy_group_keys(path: Path, pde: str) -> list[str] | None:
 
 
 def _lazy_dense_count(path: Path, pde: str) -> int:
-    with h5py.File(path, "r") as f:
-        if pde == "nsnonbounded":
-            return int(f["w0"].shape[0])
-        if pde in {"heat", "wave", "advection_diffusion", "steady_heat_conduction"}:
-            return int(f["input_data"].shape[0])
+    try:
+        with h5py.File(path, "r") as f:
+            if pde == "nsnonbounded":
+                return int(f["w0"].shape[0])
+            if pde in {"heat", "wave", "advection_diffusion", "steady_heat_conduction"}:
+                return int(f["input_data"].shape[0])
+            if pde == "darcy":
+                return _dense_dataset_count(f["thresh_a_data"])
+            if pde in {"poisson", "helmholtz"}:
+                return _dense_dataset_count(f["f_data"])
+    except OSError:
+        if pde in {"poisson", "helmholtz", "darcy"}:
+            key = "thresh_a_data" if pde == "darcy" else "f_data"
+            for name, shape, _dtype in scipy.io.whosmat(path):
+                if name == key:
+                    return _dense_shape_count(tuple(shape))
+        raise
     raise NotImplementedError(f"Lazy dense count is not implemented for {pde}")
 
 
@@ -1276,6 +1310,8 @@ def _read_lazy_raw_sample(
         raw = _read_lazy_shallow_water_sample(ref, split, load_full_trajectory, file_paths)
     elif pde in {"heat", "wave", "advection_diffusion", "steady_heat_conduction"}:
         raw = _read_lazy_future_sample(ref, pde, split, scalar_param_mode, load_full_trajectory, file_paths)
+    elif pde in {"darcy", "poisson", "helmholtz"}:
+        raw = _read_lazy_static_sample(ref, pde, split, file_paths)
     else:
         raise NotImplementedError(f"Lazy loading is not implemented for {pde}")
     raw["metadata"].update({k: v for k, v in dataset_metadata.items() if k not in raw["metadata"]})
@@ -1285,6 +1321,8 @@ def _read_lazy_raw_sample(
             "load_full_trajectory": bool(load_full_trajectory),
             "lazy_sample_ref": f"{ref.path.name}:{ref.key if ref.key is not None else ref.local_index}",
             "loaded_count": 1,
+            "train_size_loaded_in_memory": 0,
+            "loaded_in_memory_samples": 0,
         }
     )
     return raw
@@ -1501,6 +1539,57 @@ def _read_lazy_future_sample(
     meta["loaded_full_trajectory"] = isinstance(meta.get("full_trajectory"), torch.Tensor)
     meta["load_full_trajectory"] = bool(load_full_trajectory)
     return _finalize_lazy_raw(full, channels, input_names, target_names, split, ref, file_paths, meta, pde_params)
+
+
+def _read_lazy_static_sample(ref: LazySampleRef, pde: str, split: str, file_paths: list[str]) -> dict[str, Any]:
+    if pde == "darcy":
+        keys = ("thresh_a_data", "thresh_p_data")
+        channels = ["a", "p"]
+        meta: dict[str, Any] = {"canonical_layout": "NCHW"}
+    elif pde == "poisson":
+        keys = ("f_data", "phi_data")
+        channels = ["f", "phi"]
+        meta = {"canonical_layout": "NCHW"}
+    elif pde == "helmholtz":
+        keys = ("f_data", "psi_data")
+        channels = ["f", "psi"]
+        meta = {"canonical_layout": "NCHW", "k": 1.0}
+    else:
+        raise ValueError(f"Unsupported lazy static PDE {pde!r}")
+    try:
+        with h5py.File(ref.path, "r") as f:
+            x = _as_float_tensor(_h5_sample_at(f[keys[0]], ref.local_index))
+            y = _as_float_tensor(_h5_sample_at(f[keys[1]], ref.local_index))
+    except OSError:
+        raw = scipy.io.loadmat(ref.path, variable_names=list(keys))
+        x = _as_float_tensor(_mat_sample_at(raw[keys[0]], ref.local_index))
+        y = _as_float_tensor(_mat_sample_at(raw[keys[1]], ref.local_index))
+    full = torch.stack((x, y), dim=1)
+    return _finalize_lazy_raw(full, channels, [channels[0]], [channels[1]], split, ref, file_paths, meta)
+
+
+def _dense_dataset_count(ds: h5py.Dataset) -> int:
+    return _dense_shape_count(tuple(ds.shape))
+
+
+def _dense_shape_count(shape: tuple[int, ...]) -> int:
+    if len(shape) >= 3 and shape[0] == shape[1]:
+        return int(shape[-1])
+    return int(shape[0])
+
+
+def _h5_sample_at(ds: h5py.Dataset, index: int) -> np.ndarray:
+    shape = tuple(ds.shape)
+    if len(shape) >= 3 and shape[0] == shape[1]:
+        return np.asarray(ds[..., index : index + 1]).squeeze(-1)[None]
+    return np.asarray(ds[index : index + 1])
+
+
+def _mat_sample_at(array: np.ndarray, index: int) -> np.ndarray:
+    array = np.asarray(array)
+    if array.ndim >= 3 and array.shape[0] == array.shape[1]:
+        return array[..., index : index + 1].squeeze(-1)[None]
+    return array[index : index + 1]
 
 
 def _load_darcy(

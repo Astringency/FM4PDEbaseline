@@ -474,9 +474,9 @@ def resolve_capability(
                     "official",
                     family,
                     "PC-BNN sparse/noisy flow reconstruction assumptions match the 2D three-channel shallow-water field setting",
-                    "Use the official Net/SVGD/physics-constrained objective as an official-aligned reimplementation.",
+                    "Use the direct official Net when importable, or the explicit official-aligned Net/SVGD/physics-constrained reimplementation.",
                     official_aligned_allowed=True,
-                    eligible_implementation_modes=("official_aligned",),
+                    eligible_implementation_modes=("official", "official_aligned"),
                 )
             return _cap(
                 baseline,

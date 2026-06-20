@@ -9,6 +9,7 @@ import torch
 
 
 SensorMode = Literal["random", "fixed", "grid", "time_varying"]
+SensorBudgetMode = Literal["per_time", "total"]
 
 
 def make_coordinate_grid(shape: tuple[int, ...], batch_size: int | None = None, device=None) -> torch.Tensor:
@@ -26,6 +27,7 @@ def make_sensor_mask(
     mode: SensorMode,
     seed: int,
     time_dim: int | None = None,
+    sensor_budget_mode: SensorBudgetMode = "per_time",
 ) -> torch.Tensor:
     """Create a reusable sensor mask.
 
@@ -65,14 +67,21 @@ def make_sensor_mask(
         per_t_shape = obs_shape[:time_dim] + obs_shape[time_dim + 1 :]
         per_t_total = int(math.prod(per_t_shape))
         t_count = obs_shape[time_dim]
-        per_t_num = min(num, per_t_total)
-        for t in range(t_count):
-            local = torch.zeros(per_t_shape, dtype=torch.float32)
-            perm = torch.randperm(per_t_total, generator=generator)[:per_t_num]
-            local.reshape(-1)[perm] = 1.0
-            sl = [slice(None)] * len(obs_shape)
-            sl[time_dim] = t
-            base[tuple(sl)] = local
+        if sensor_budget_mode == "per_time":
+            per_t_num = min(num, per_t_total)
+            for t in range(t_count):
+                local = torch.zeros(per_t_shape, dtype=torch.float32)
+                perm = torch.randperm(per_t_total, generator=generator)[:per_t_num]
+                local.reshape(-1)[perm] = 1.0
+                sl = [slice(None)] * len(obs_shape)
+                sl[time_dim] = t
+                base[tuple(sl)] = local
+        elif sensor_budget_mode == "total":
+            total_time_space = int(t_count * per_t_total)
+            perm = torch.randperm(total_time_space, generator=generator)[: min(num, total_time_space)]
+            base.reshape(-1)[perm] = 1.0
+        else:
+            raise ValueError(f"sensor_budget_mode must be per_time or total, got {sensor_budget_mode!r}")
     else:
         raise ValueError(f"Unknown sensor mode '{mode}'")
 
@@ -114,11 +123,21 @@ def build_observation_tensors(
     mode: SensorMode,
     seed: int,
     noise_level: float = 0.0,
+    sensor_budget_mode: SensorBudgetMode = "per_time",
+    time_dim: int | None = None,
 ) -> dict[str, torch.Tensor | str]:
     from .voronoi import voronoi_fill
 
-    time_dim = 0 if target_fields.ndim == 5 else None
-    mask = make_sensor_mask(tuple(target_fields.shape[1:]), num_sensors, mode, seed, time_dim=time_dim).to(target_fields.device)
+    if time_dim is None and target_fields.ndim == 5:
+        time_dim = 0
+    mask = make_sensor_mask(
+        tuple(target_fields.shape[1:]),
+        num_sensors,
+        mode,
+        seed,
+        time_dim=time_dim,
+        sensor_budget_mode=sensor_budget_mode,
+    ).to(target_fields.device)
     masked_grid = target_fields * mask.unsqueeze(0)
     obs_values, obs_coords = extract_observations(target_fields, mask)
     obs_values = add_noise(obs_values, noise_level, relative=True, seed=seed)
@@ -133,6 +152,15 @@ def build_observation_tensors(
         masked_grid = masked_flat.reshape_as(target_fields)
     voronoi_grid = voronoi_fill(masked_grid, mask)
     mask_id = hashlib.sha1(mask.detach().cpu().numpy().tobytes()).hexdigest()[:16]
+    num_observations_total = int(mask[0].sum().detach().cpu())
+    num_sensors_per_time: int | list[int]
+    if mode == "time_varying" and time_dim is not None:
+        spatial_mask = mask[0]
+        dims = tuple(i for i in range(spatial_mask.ndim) if i != time_dim)
+        counts = spatial_mask.sum(dim=dims).detach().cpu().to(torch.long).tolist()
+        num_sensors_per_time = [int(x) for x in counts]
+    else:
+        num_sensors_per_time = int(num_observations_total)
     return {
         "mask": mask,
         "obs_values": obs_values,
@@ -140,6 +168,9 @@ def build_observation_tensors(
         "masked_grid": masked_grid,
         "voronoi_grid": voronoi_grid,
         "mask_id": mask_id,
+        "num_observations_total": num_observations_total,
+        "num_sensors_per_time": num_sensors_per_time,
+        "sensor_budget_mode": sensor_budget_mode,
     }
 
 
@@ -151,4 +182,3 @@ def save_mask(mask: torch.Tensor, path: str | Path) -> None:
 
 def load_mask(path: str | Path, map_location=None) -> torch.Tensor:
     return torch.load(path, map_location=map_location)
-

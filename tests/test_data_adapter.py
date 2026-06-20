@@ -79,6 +79,37 @@ def test_train_val_test_are_distinct_splits(tiny_data_root):
     assert any("test" in p.rsplit("/", 1)[-1] for p in test.batch.file_paths)
 
 
+def test_sensor_budget_metadata_static_and_time_varying():
+    registry = build_default_registry()
+    raw_static = registry.synthetic_raw("poisson", n=1, resolution=8)
+    static = registry.make_task(raw_static, "poisson", "sparse_solution", num_sensors=5, sensor_mode="random", seed=1)
+    assert static.metadata["num_observations_total"] == 5
+    assert static.metadata["num_sensors_per_time"] == 5
+    assert static.metadata["sensor_budget_mode"] == "per_time"
+
+    raw_tv = registry.synthetic_raw("reaction_diffusion", n=1, resolution=8)
+    per_time = registry.make_task(
+        raw_tv,
+        "reaction_diffusion",
+        "sparse_solution",
+        num_sensors=4,
+        sensor_mode="time_varying",
+        sensor_budget_mode="per_time",
+        seed=1,
+    )
+    total = registry.make_task(
+        raw_tv,
+        "reaction_diffusion",
+        "sparse_solution",
+        num_sensors=4,
+        sensor_mode="time_varying",
+        sensor_budget_mode="total",
+        seed=1,
+    )
+    assert per_time.metadata["num_observations_total"] == 40
+    assert total.metadata["num_observations_total"] <= 4
+
+
 def test_missing_file_error_lists_pde_and_candidates(tmp_path):
     registry = build_default_registry()
     with pytest.raises(FileNotFoundError) as exc:

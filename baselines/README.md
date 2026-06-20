@@ -33,9 +33,9 @@ method:
   implementation_mode: official_or_skip
 ```
 
-This means an official-capability baseline must import official code/components or be skipped without stopping the full paper script. To run local debug implementations, use smoke/debug mode or explicitly set `implementation_mode: adapted`; those rows are marked supplement-only.
+This means an official-capability baseline must import official code/components or use an explicitly capability-approved official-aligned path, otherwise it is skipped without stopping the full paper script. To run local debug implementations, use smoke/debug mode or explicitly set `implementation_mode: adapted`; those rows are marked supplement-only.
 
-`implementation_mode: official` is strict: if official code/components cannot be imported, the run raises and the command fails. `implementation_mode: official_or_skip` is the paper-script default: predictable official dependency/import failures are written to `skipped_combinations.jsonl` with implementation and capability metadata, and the shell script continues to later combinations. `implementation_mode: adapted` permits local implementations only for smoke/debug or supplement rows; it never sets `paper_table_eligible=true`.
+`implementation_mode: official` is strict: direct official code/component import must succeed or the run raises and the command fails. It never silently downgrades to `official_aligned`. `implementation_mode: official_or_skip` is the paper-script default: direct official import is tried first; if that fails and the capability explicitly permits `official_aligned`, the aligned path may run; otherwise the failure is written to `skipped_combinations.jsonl`. `implementation_mode: official_aligned` and `implementation_mode: official_architecture` explicitly request disclosed reimplementations. `implementation_mode: adapted` permits local implementations only for smoke/debug or supplement rows; it never sets `paper_table_eligible=true`.
 
 Implementation modes are disclosed as follows:
 
@@ -45,7 +45,7 @@ Implementation modes are disclosed as follows:
 - `canonical_math`: canonical mathematical baseline with no single official code claim.
 - `adapted`: local/debug/supplement-only implementation, including target-change, endpoint surrogate, style imitation, or fallback rows.
 
-`implementation_mode: official_architecture` is reserved for methods whose capability explicitly permits architecture reimplementation, such as VoronoiCNN's disclosed PyTorch reimplementation of the published Keras Conv2D stack. `implementation_mode: official_aligned` is used for import-safe iFNO, VIVID, and conditional PC-BNN paths that follow the official method structure but do not claim direct official code execution.
+`implementation_mode: official_architecture` is reserved for methods whose capability explicitly permits architecture reimplementation, such as VoronoiCNN's disclosed PyTorch reimplementation of the published Keras Conv2D stack. `implementation_mode: official_aligned` is used for import-safe iFNO, VIVID, and conditional PC-BNN paths that follow the official method structure but do not claim direct official code execution. See [`OFFICIAL_ALIGNED_IMPLEMENTATION.md`](OFFICIAL_ALIGNED_IMPLEMENTATION.md).
 
 Legacy `official_backend` is still accepted for compatibility, but new paper configs should use `implementation_mode`.
 
@@ -84,6 +84,7 @@ The aggregator writes:
 - `summary_supplement.csv/json`: adapted, surrogate, local, style, fallback, or suspicious rows. Rows that claimed main eligibility but fail the recheck are downgraded with `aggregation_warning`.
 - `skipped_combinations.csv/json`: skipped paper combinations.
 - `baseline_capability_matrix.csv/json`: full registry dump.
+- `tuning_summary.csv/json`: best configuration by validation loss for tuning runs, including `config_hash` and `selected_config_path`.
 - `latex_table.csv/tex`: generated only from the main summary.
 
 ## Matrix Dump
@@ -114,7 +115,13 @@ Simplified local iFNO coupling blocks, compact/local FNO, VIVID-style refinement
 
 Each run records raw/native input shape, target shape, observation and predicted field names, scalar PDE parameter availability, whether scalar parameters are part of the model input, whether full trajectory data is loaded, and the effective sensor mode.
 
-Supervised full-operator scripts materialize future-PDE scalar parameters by default unless `SCALAR_PARAM_MODE` is explicitly set. Per-instance physics methods may read scalar parameters from metadata and record that fact.
+Paper configs now use `val_size: 1000` by default. If an independent validation file is unavailable, the runner reserves a deterministic train-tail split and records `val_split_source=deterministic_train_subset` and `val_from_train_offset`.
+
+Supervised/amortized baselines use train-set input/target normalization by default and record `normalize`, `normalization_stats_path`, `input_mean/std`, and `target_mean/std`. Metrics are computed after denormalizing predictions back to physical scale. Per-instance PDE-Opt/4D-Var/PINN/PC-BNN optimization remains in physical scale by default; VIVID uses normalization only for the learned inverse-observation operator and computes variational/physics losses in physical scale.
+
+Sparse runs record `sensor_budget_mode`, `num_sensors_per_time`, and `num_observations_total`. For `sensor_mode=time_varying`, `sensor_budget_mode=per_time` means `num_sensors` per time step; `sensor_budget_mode=total` means `num_sensors` across all time points. Paper configs and scripts explicitly default to `per_time`.
+
+Supervised full-operator scripts materialize future-PDE scalar parameters by default unless `SCALAR_PARAM_MODE` is explicitly set. Per-instance physics methods may read scalar parameters from metadata and record that fact. Paper data loading defaults to `lazy`; static Darcy/Poisson/Helmholtz and time-dependent/future PDE adapters avoid eager train-set materialization where lazy readers are available.
 
 ## Smoke Tests
 

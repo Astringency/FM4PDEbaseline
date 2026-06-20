@@ -5,6 +5,8 @@ from argparse import Namespace
 from pathlib import Path
 
 from baselines.capabilities import resolve_capability
+from baselines.methods.official import OfficialImportError
+import baselines.run as run_module
 from baselines.run import _preflight_backend_availability, main
 
 
@@ -48,3 +50,25 @@ def test_official_aligned_available_combinations_do_not_preflight_skip():
         uses_official_inverse_observation_operator=True,
     )
     assert _preflight_backend_availability(args, cap, {"implementation_mode": "official_aligned"}) is None
+
+
+def test_official_or_skip_uses_aligned_when_direct_official_missing():
+    args = Namespace(experiment_mode="paper", baseline="ifno", pde="darcy")
+    cap = resolve_capability("ifno", "darcy", "forward")
+    assert _preflight_backend_availability(args, cap, {"implementation_mode": "official_or_skip"}) is None
+
+
+def test_official_or_skip_skips_when_aligned_unavailable(monkeypatch):
+    def missing_direct():
+        raise OfficialImportError("missing direct")
+
+    def missing_aligned():
+        raise OfficialImportError("missing aligned")
+
+    monkeypatch.setattr(run_module, "get_ifno_official_status", missing_direct)
+    monkeypatch.setattr(run_module, "get_ifno_official_aligned_status", missing_aligned)
+    args = Namespace(experiment_mode="paper", baseline="ifno", pde="darcy")
+    cap = resolve_capability("ifno", "darcy", "forward")
+    skip = _preflight_backend_availability(args, cap, {"implementation_mode": "official_or_skip"})
+    assert skip is not None
+    assert "missing aligned" in skip["reason"]

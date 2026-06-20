@@ -8,7 +8,7 @@ DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
 OUT="${OUT:-outputs/baselines/paper/native_sparse_reconstruction}"
 DEVICE="${DEVICE:-cpu}"
 TRAIN_SIZE="${TRAIN_SIZE:-50000}"
-VAL_SIZE="${VAL_SIZE:-0}"
+VAL_SIZE="${VAL_SIZE:-1000}"
 TEST_SIZE="${TEST_SIZE:-1000}"
 TRAIN_SHARDS="${TRAIN_SHARDS:-5}"
 EPOCHS="${EPOCHS:-200}"
@@ -21,6 +21,7 @@ PDES="${PDES:-darcy poisson helmholtz nsnonbounded burger reaction_diffusion sha
 BASELINES="${BASELINES:-recfno senseiver voronoicnn pinn_sparse pc_bnn pde_opt}"
 SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
 DATA_LOADING_MODE="${DATA_LOADING_MODE:-lazy}"
+SENSOR_BUDGET_MODE="${SENSOR_BUDGET_MODE:-per_time}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
 PCBNN_IMPLEMENTATION_MODE="${PCBNN_IMPLEMENTATION_MODE:-official_aligned}"
 SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
@@ -48,6 +49,7 @@ for seed in $SEEDS; do
               --epochs "$EPOCHS" --seed "$seed" --device "$DEVICE" \
               --num-sensors "$sensors" --sensor-mode "$sensor_mode" --noise-level "$noise" \
               --data-loading-mode "$DATA_LOADING_MODE" \
+              --sensor-budget-mode "$SENSOR_BUDGET_MODE" \
               --scalar-param-mode "$SCALAR_PARAM_MODE" --output-dir "$OUT" \
               "${method_args[@]}"
           done

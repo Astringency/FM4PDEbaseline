@@ -8595,10 +8595,11 @@
     "baseline": "pc_bnn",
     "citation_key": "sunwang_pcbnn",
     "eligible_implementation_modes": [
+      "official",
       "official_aligned"
     ],
     "implementation_required": "official",
-    "notes_for_paper": "Use the official Net/SVGD/physics-constrained objective as an official-aligned reimplementation.",
+    "notes_for_paper": "Use the direct official Net when importable, or the explicit official-aligned Net/SVGD/physics-constrained reimplementation.",
     "official_aligned_allowed": true,
     "official_architecture_allowed": false,
     "paper_table_eligible": true,
@@ -8615,10 +8616,11 @@
     "baseline": "pc_bnn",
     "citation_key": "sunwang_pcbnn",
     "eligible_implementation_modes": [
+      "official",
       "official_aligned"
     ],
     "implementation_required": "official",
-    "notes_for_paper": "Use the official Net/SVGD/physics-constrained objective as an official-aligned reimplementation.",
+    "notes_for_paper": "Use the direct official Net when importable, or the explicit official-aligned Net/SVGD/physics-constrained reimplementation.",
     "official_aligned_allowed": true,
     "official_architecture_allowed": false,
     "paper_table_eligible": true,
@@ -8635,10 +8637,11 @@
     "baseline": "pc_bnn",
     "citation_key": "sunwang_pcbnn",
     "eligible_implementation_modes": [
+      "official",
       "official_aligned"
     ],
     "implementation_required": "official",
-    "notes_for_paper": "Use the official Net/SVGD/physics-constrained objective as an official-aligned reimplementation.",
+    "notes_for_paper": "Use the direct official Net when importable, or the explicit official-aligned Net/SVGD/physics-constrained reimplementation.",
     "official_aligned_allowed": true,
     "official_architecture_allowed": false,
     "paper_table_eligible": true,
@@ -8655,10 +8658,11 @@
     "baseline": "pc_bnn",
     "citation_key": "sunwang_pcbnn",
     "eligible_implementation_modes": [
+      "official",
       "official_aligned"
     ],
     "implementation_required": "official",
-    "notes_for_paper": "Use the official Net/SVGD/physics-constrained objective as an official-aligned reimplementation.",
+    "notes_for_paper": "Use the direct official Net when importable, or the explicit official-aligned Net/SVGD/physics-constrained reimplementation.",
     "official_aligned_allowed": true,
     "official_architecture_allowed": false,
     "paper_table_eligible": true,

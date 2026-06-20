@@ -3,6 +3,31 @@
 Date: 2026-06-17
 Environment: `conda run -n FM4PDEbaseline`
 
+## 2026-06-19 Baseline Reliability Fixes
+
+This update tightens method declarations and training/evaluation fairness for main-table baseline runs.
+
+Focused commands completed during implementation:
+
+```bash
+python -m py_compile baselines/run.py baselines/aggregate_results.py baselines/experiment_matrix.py baselines/capabilities.py baselines/common/*.py baselines/methods/*.py tests/test_*.py
+python -m pytest -q tests/test_sensors.py tests/test_data_adapter.py tests/test_lazy_dataset_memory_behavior.py tests/test_vivid_official_aligned.py tests/test_vivid_ns_trajectory_handling.py tests/test_normalization.py tests/test_validation_and_tuning.py tests/test_ifno_official_aligned.py tests/test_official_mode_no_fallback.py tests/test_preflight_backend_availability.py tests/test_paper_scripts_defaults.py
+bash -n scripts/baselines/*.sh
+python -m pytest -q
+python -m baselines.experiment_matrix --dump-matrix --output outputs/baselines/capability_matrix_test
+```
+
+Verified behavior:
+
+- VIVID `nsnonbounded` learned future-only trajectories are inserted into the optimized future segment and record `learned_state_injection_mode=future_trajectory_inserted`.
+- VIVID inverse-operator physics loss prepends the initial frame before NS full-trajectory residuals; training history records `physics_trajectory_mode`, `physics_trajectory_shape`, and `physics_loss_mode`.
+- `implementation_mode=official` is strict and no longer falls back to official-aligned for iFNO/VIVID/PC-BNN. `official_or_skip` may use official-aligned only when capability metadata permits it.
+- FNO, DeepONet, RecFNO, Senseiver, and VoronoiCNN official adapter construction failures are wrapped as official import/adapter failures so paper `official_or_skip` rows skip cleanly.
+- Supervised/amortized training can use train-set normalization and records stats paths and channel means/stds; metrics are computed on denormalized predictions.
+- Paper defaults now use `val_size: 1000`, deterministic train-tail validation fallback, explicit `sensor_budget_mode: per_time`, and lazy static Darcy/Poisson/Helmholtz loading.
+- Aggregation writes `tuning_summary.csv/json` with best validation config, `config_hash`, and `selected_config_path`.
+- Official-aligned implementation details are documented in `OFFICIAL_ALIGNED_IMPLEMENTATION.md`.
+
 ## 2026-06-19 Official-Aligned Baseline Reimplementation Verification
 
 This update adds main-table eligible official-aligned reimplementations where the vendored official repositories are script/checkpoint/data-pipeline oriented rather than safely importable as libraries.
@@ -77,7 +102,7 @@ python -m pytest
 bash scripts/baselines/smoke_all.sh
 ```
 
-Targeted fixes added after the original report: paper `VAL_SIZE=0`, strict `nsnonbounded` test-file filtering, per-instance spec-only train loading, sparse-task background preservation for residuals, per-sample physics metric values, pooled summary-only aggregation, explicit backend/fallback flags, and paper matrix compatibility skipping.
+Targeted fixes added after the original report included the earlier paper `VAL_SIZE=0` setting, strict `nsnonbounded` test-file filtering, per-instance spec-only train loading, sparse-task background preservation for residuals, per-sample physics metric values, pooled summary-only aggregation, explicit backend/fallback flags, and paper matrix compatibility skipping. Current paper configs now use `val_size: 1000`.
 
 ## Commands Run
 

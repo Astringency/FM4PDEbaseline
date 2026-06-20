@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from baselines.common.data_adapter import PDEBatch
+from baselines.common.normalization import estimate_normalization_stats, normalize_batch_input_target
 
 from .base import BaselineModel, _to_device_batch
 from .ifno_official_aligned import OfficialAlignedIFNO2d
@@ -60,17 +61,24 @@ class IFNOBaseline(BaselineModel):
         self.input_channels = int(data_spec["input_channels"])
         self.target_channels = int(data_spec["target_channels"])
         requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
-        self.official_aligned = not requested_local
-        if self.official_aligned and backend in {"auto", "ifno", "official"}:
+        if implementation_mode == "official" and not requested_local:
+            get_ifno_official_status()
+            raise OfficialImportError("direct official iFNO model adapter is not implemented after import status validation")
+        self.official_aligned = (
+            not requested_local
+            and implementation_mode in {"official_or_skip", "official_aligned", "official_architecture", "auto"}
+            and backend in {"auto", "ifno", "official"}
+        )
+        if self.official_aligned:
+            direct_import_success = False
             direct_import_warning = ""
-            try:
-                get_ifno_official_status()
-                direct_import_success = True
-            except OfficialImportError as exc:
-                direct_import_success = False
-                direct_import_warning = f"direct official iFNO import unavailable; using official-aligned reimplementation: {exc}"
-            if not direct_import_success:
-                get_ifno_official_aligned_status()
+            if implementation_mode in {"official_or_skip", "auto"}:
+                try:
+                    get_ifno_official_status()
+                    direct_import_success = True
+                except OfficialImportError as exc:
+                    direct_import_warning = f"direct official iFNO import unavailable; using official-aligned reimplementation: {exc}"
+            get_ifno_official_aligned_status()
             self.operator = OfficialAlignedIFNO2d(
                 self.input_channels,
                 self.target_channels,
@@ -89,8 +97,8 @@ class IFNOBaseline(BaselineModel):
                 warning=direct_import_warning,
                 implementation_mode_effective=effective,
                 implementation_source="ifno_official_aligned_reimplementation",
-                official_import_success=direct_import_success,
-                official_reimplementation_success=not direct_import_success,
+                official_import_success=False,
+                official_reimplementation_success=True,
                 official_alignment_level="architecture" if effective == "official_architecture" else "objective",
                 official_alignment_notes=(
                     "Reimplements vendored iFNO p1/p2 lift, q1/q2 pointwise projections, "
@@ -128,11 +136,29 @@ class IFNOBaseline(BaselineModel):
         epochs = int(self.config.get("epochs", 1))
         lr = float(self.config.get("lr", 1e-3))
         max_steps = self.config.get("max_steps")
+        max_val_steps = self.config.get("max_val_steps")
         cycle_weight = float(self.config.get("cycle_weight", 0.1))
+        normalize = bool(self.config.get("normalize", False))
+        if normalize and self.normalization_stats is None:
+            self.normalization_stats = estimate_normalization_stats(
+                train_loader,
+                max_batches=self.config.get("normalization_max_batches"),
+                eps=float(self.config.get("normalization_eps", 1e-6)),
+            )
+        self.uses_normalization = bool(normalize and self.normalization_stats is not None)
         self.to(device)
         opt = torch.optim.Adam(self.parameters(), lr=lr)
-        history = {"train_loss": []}
-        for _ in range(epochs):
+        history = {
+            "train_loss": [],
+            "val_loss": [],
+            "best_epoch": None,
+            "best_val_loss": None,
+            "normalize": self.uses_normalization,
+            "normalization_stats": self.normalization_stats.json_summary() if self.normalization_stats is not None else None,
+        }
+        best_val = None
+        best_state = None
+        for epoch in range(epochs):
             total = 0.0
             count = 0
             self.train()
@@ -140,20 +166,37 @@ class IFNOBaseline(BaselineModel):
                 if max_steps is not None and step >= int(max_steps):
                     break
                 batch = _to_device_batch(batch, device)
-                x, y = _physical_pair(batch)
+                if self.uses_normalization and self.normalization_stats is not None:
+                    batch = normalize_batch_input_target(batch, self.normalization_stats)
                 opt.zero_grad(set_to_none=True)
-                y_pred, recon_x = self._forward_map_with_aux(x)
-                x_pred, recon_y = self._inverse_map_with_aux(y)
-                cycle_x = self._inverse_map(y_pred)
-                cycle_y = self._forward_map(x_pred)
-                loss = F.mse_loss(y_pred, y) + F.mse_loss(x_pred, x)
-                loss = loss + cycle_weight * (F.mse_loss(cycle_x, x) + F.mse_loss(cycle_y, y))
-                loss = loss + float(self.config.get("reconstruction_weight", 0.1)) * (recon_x + recon_y)
+                loss = _ifno_training_loss(self, batch, cycle_weight)
                 loss.backward()
                 opt.step()
                 total += float(loss.detach().cpu())
                 count += 1
             history["train_loss"].append(total / max(count, 1))
+            if val_loader is not None:
+                self.eval()
+                val_total = 0.0
+                val_count = 0
+                with torch.no_grad():
+                    for step, batch in enumerate(val_loader):
+                        if max_val_steps is not None and step >= int(max_val_steps):
+                            break
+                        batch = _to_device_batch(batch, device)
+                        if self.uses_normalization and self.normalization_stats is not None:
+                            batch = normalize_batch_input_target(batch, self.normalization_stats)
+                        val_total += float(_ifno_training_loss(self, batch, cycle_weight).detach().cpu())
+                        val_count += 1
+                val_loss = val_total / max(val_count, 1)
+                history["val_loss"].append(val_loss)
+                if best_val is None or val_loss < best_val:
+                    best_val = val_loss
+                    history["best_epoch"] = epoch
+                    history["best_val_loss"] = val_loss
+                    best_state = {k: v.detach().cpu().clone() for k, v in self.state_dict().items()}
+        if best_state is not None:
+            self.load_state_dict(best_state)
         return history
 
     def predict(self, batch: PDEBatch):
@@ -197,3 +240,14 @@ def _physical_pair(batch: PDEBatch) -> tuple[torch.Tensor, torch.Tensor]:
     if batch.task in {"inverse", "sparse_inverse"}:
         return batch.target_fields, batch.input_fields
     return batch.input_fields, batch.target_fields
+
+
+def _ifno_training_loss(model: IFNOBaseline, batch: PDEBatch, cycle_weight: float) -> torch.Tensor:
+    x, y = _physical_pair(batch)
+    y_pred, recon_x = model._forward_map_with_aux(x)
+    x_pred, recon_y = model._inverse_map_with_aux(y)
+    cycle_x = model._inverse_map(y_pred)
+    cycle_y = model._forward_map(x_pred)
+    loss = F.mse_loss(y_pred, y) + F.mse_loss(x_pred, x)
+    loss = loss + cycle_weight * (F.mse_loss(cycle_x, x) + F.mse_loss(cycle_y, y))
+    return loss + float(model.config.get("reconstruction_weight", 0.1)) * (recon_x + recon_y)

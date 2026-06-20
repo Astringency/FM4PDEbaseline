@@ -1,6 +1,7 @@
 method:
   implementation_mode: official_or_skip
   official_backend: auto
+  normalize: true
   epochs: 200
   lr: 0.001
   width: 64

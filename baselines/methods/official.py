@@ -72,6 +72,16 @@ class OfficialImportError(ImportError):
     """Raised when a vendored official implementation is unavailable."""
 
 
+class OfficialAdapterError(OfficialImportError):
+    """Raised when an importable official component cannot be adapted safely."""
+
+
+def wrap_official_adapter_error(source: str, exc: Exception) -> OfficialImportError:
+    if isinstance(exc, OfficialImportError):
+        return exc
+    return OfficialAdapterError(f"{source} official adapter failed with {type(exc).__name__}: {exc}")
+
+
 def official_source_info(source: str) -> dict[str, str]:
     return dict(OFFICIAL_SOURCE_INFO.get(str(source), {}))
 

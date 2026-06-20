@@ -8,7 +8,7 @@ import torch.nn as nn
 from baselines.common.data_adapter import PDEBatch
 
 from .base import BaselineModel, run_supervised_fit
-from .official import OfficialImportError, get_recfno_unet_class, official_source_info, requested_implementation_mode
+from .official import OfficialImportError, get_recfno_unet_class, official_source_info, requested_implementation_mode, wrap_official_adapter_error
 from .shared import ConvReconNet, grid_channels
 
 
@@ -58,13 +58,16 @@ class VoronoiCNNBaseline(BaselineModel):
                     **official_source_info("recfno"),
                 )
                 return self
-            except OfficialImportError as exc:
+            except Exception as exc:
+                exc = wrap_official_adapter_error("RecFNO UNet", exc)
                 fallback_reason = f"recfno_unet unavailable: {exc}"
                 warnings.warn(f"RecFNO UNet adaptation unavailable, using local CNN fallback: {exc}", RuntimeWarning, stacklevel=2)
         elif implementation_mode != "adapted" and backend == "recfno" and min_res < 16:
             fallback_reason = f"target resolution {min_res} is too small for official RecFNO UNet"
         elif implementation_mode != "adapted" and backend in {"auto", "official"}:
             fallback_reason = "official Voronoi-CNN Keras scripts are not importable; set implementation_mode=official_architecture for the disclosed PyTorch architecture reimplementation"
+        if implementation_mode == "official" and fallback_reason:
+            raise OfficialImportError(fallback_reason)
         self.net = ConvReconNet(adapted_in_channels, target_channels, width=int(self.config.get("width", 48)))
         requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
         self.set_backend(

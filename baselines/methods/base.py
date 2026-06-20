@@ -8,6 +8,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from baselines.common.data_adapter import PDEBatch
+from baselines.common.normalization import (
+    NormalizationStats,
+    denormalize_prediction,
+    estimate_normalization_stats,
+    normalize_batch_input_target,
+)
 
 
 class BaselineModel(nn.Module):
@@ -32,6 +38,9 @@ class BaselineModel(nn.Module):
         self.official_alignment_level: str = "local"
         self.official_alignment_notes: str = ""
         self.adapter_status: str = "local_adapted"
+        self.normalization_stats: NormalizationStats | None = None
+        self.uses_normalization: bool = False
+        self.normalization_stats_path: str = ""
 
     def build(self, config, data_spec):
         self.config = dict(config or {})
@@ -95,6 +104,13 @@ class BaselineModel(nn.Module):
     def predict(self, batch: PDEBatch):
         raise NotImplementedError
 
+    def predict_physical(self, batch: PDEBatch):
+        if self.uses_normalization and self.normalization_stats is not None:
+            norm_batch = normalize_batch_input_target(batch, self.normalization_stats)
+            pred = self.predict(norm_batch)
+            return denormalize_prediction(pred, self.normalization_stats)
+        return self.predict(batch)
+
     def save(self, path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +120,8 @@ class BaselineModel(nn.Module):
                 "config": self.config,
                 "data_spec": self.data_spec,
                 "backend": self.backend_metadata(),
+                "uses_normalization": self.uses_normalization,
+                "normalization_stats": self.normalization_stats.state_dict() if self.normalization_stats is not None else None,
             },
             path,
         )
@@ -117,6 +135,8 @@ class BaselineModel(nn.Module):
         for key, value in backend.items():
             if hasattr(self, key):
                 setattr(self, key, value)
+        self.uses_normalization = bool(payload.get("uses_normalization", False))
+        self.normalization_stats = NormalizationStats.from_state_dict(payload.get("normalization_stats"))
         return self
 
     def parameter_count(self) -> int:
@@ -139,6 +159,8 @@ class BaselineModel(nn.Module):
             "official_alignment_level": self.official_alignment_level,
             "official_alignment_notes": self.official_alignment_notes,
             "adapter_status": self.adapter_status,
+            "uses_normalization": self.uses_normalization,
+            "normalization_stats_path": self.normalization_stats_path,
         }
 
 
@@ -200,10 +222,25 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
     lr = float(model.config.get("lr", 1e-3))
     max_steps = model.config.get("max_steps")
     max_val_steps = model.config.get("max_val_steps")
+    normalize = bool(model.config.get("normalize", False))
+    if normalize and model.normalization_stats is None:
+        model.normalization_stats = estimate_normalization_stats(
+            train_loader,
+            max_batches=model.config.get("normalization_max_batches"),
+            eps=float(model.config.get("normalization_eps", 1e-6)),
+        )
+    model.uses_normalization = bool(normalize and model.normalization_stats is not None)
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
-    history = {"train_loss": [], "val_loss": [], "best_epoch": None, "best_val_loss": None}
+    history = {
+        "train_loss": [],
+        "val_loss": [],
+        "best_epoch": None,
+        "best_val_loss": None,
+        "normalize": model.uses_normalization,
+        "normalization_stats": model.normalization_stats.json_summary() if model.normalization_stats is not None else None,
+    }
     best_state = None
     best_val = None
     for epoch in range(epochs):
@@ -213,9 +250,12 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         for step, batch in enumerate(train_loader):
             if max_steps is not None and step >= int(max_steps):
                 break
-            target = batch.target_fields.to(device)
+            batch = _to_device_batch(batch, device)
+            if model.uses_normalization and model.normalization_stats is not None:
+                batch = normalize_batch_input_target(batch, model.normalization_stats)
+            target = batch.target_fields
             opt.zero_grad(set_to_none=True)
-            pred = model.predict(_to_device_batch(batch, device))
+            pred = model.predict(batch)
             loss = loss_fn(pred, target)
             loss.backward()
             opt.step()
@@ -231,6 +271,8 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
                     if max_val_steps is not None and step >= int(max_val_steps):
                         break
                     batch = _to_device_batch(batch, device)
+                    if model.uses_normalization and model.normalization_stats is not None:
+                        batch = normalize_batch_input_target(batch, model.normalization_stats)
                     pred = model.predict(batch)
                     val_total += float(F.mse_loss(pred, batch.target_fields).detach().cpu())
                     val_count += 1

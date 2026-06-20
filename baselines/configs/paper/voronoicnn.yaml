@@ -1,6 +1,7 @@
 method:
   implementation_mode: official_architecture
   official_backend: voronoicnn
+  normalize: true
   epochs: 200
   lr: 0.001
   width: 64

@@ -10,7 +10,14 @@ from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel
-from .official import OfficialImportError, get_pc_bnn_net_class, official_source_info, requested_implementation_mode
+from .official import (
+    OfficialImportError,
+    get_pc_bnn_net_class,
+    get_pc_bnn_official_aligned_status,
+    official_source_info,
+    requested_implementation_mode,
+    wrap_official_adapter_error,
+)
 from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, _single_meta, observation_loss_from_batch
 from .shared import NeuralField
 
@@ -31,12 +38,51 @@ class PCBNNBaseline(BaselineModel):
         implementation_mode = requested_implementation_mode(self.config)
         fallback_reason = ""
         matched_official_setting = _pc_bnn_official_setting(data_spec)
-        if matched_official_setting and implementation_mode != "adapted" and backend in {"auto", "pc_bnn", "official"}:
+        if implementation_mode == "official" and backend not in {"local", "none"}:
+            if not matched_official_setting:
+                raise OfficialImportError("strict official PC-BNN requires 2D three-channel shallow-water sparse reconstruction")
             try:
                 self.official_net_cls = get_pc_bnn_net_class()
-            except OfficialImportError as exc:
-                fallback_reason = f"pc_bnn unavailable: {exc}"
-                self.official_net_cls = OfficialAlignedPCBNNNet
+            except Exception as exc:
+                raise wrap_official_adapter_error("PC-BNN Net", exc) from exc
+            self.set_backend(
+                "pc_bnn",
+                "pc_bnn",
+                fallback_used=False,
+                implementation_mode_effective="official",
+                implementation_source="pc_bnn_official_net_svgd_adapter",
+                official_import_success=True,
+                official_reimplementation_success=False,
+                official_alignment_level="exact_code",
+                official_alignment_notes="Uses the vendored official PC-BNN Net class with the local SVGD/physics adapter.",
+                adapter_status="official_code_adapter",
+                **official_source_info("pc_bnn"),
+            )
+        elif matched_official_setting and implementation_mode in {"official_aligned", "official_or_skip", "auto"} and backend in {"auto", "pc_bnn", "official"}:
+            try:
+                if implementation_mode in {"official_or_skip", "auto"}:
+                    try:
+                        self.official_net_cls = get_pc_bnn_net_class()
+                        self.set_backend(
+                            "pc_bnn",
+                            "pc_bnn",
+                            fallback_used=False,
+                            implementation_mode_effective="official",
+                            implementation_source="pc_bnn_official_net_svgd_adapter",
+                            official_import_success=True,
+                            official_reimplementation_success=False,
+                            official_alignment_level="exact_code",
+                            official_alignment_notes="Uses the vendored official PC-BNN Net class with the local SVGD/physics adapter.",
+                            adapter_status="official_code_adapter",
+                            **official_source_info("pc_bnn"),
+                        )
+                        return self
+                    except Exception as exc:
+                        fallback_reason = f"direct official PC-BNN Net unavailable; using official-aligned reimplementation: {wrap_official_adapter_error('PC-BNN Net', exc)}"
+                get_pc_bnn_official_aligned_status()
+            except Exception as exc:
+                raise wrap_official_adapter_error("PC-BNN official-aligned", exc) from exc
+            self.official_net_cls = OfficialAlignedPCBNNNet
             self.official_aligned = True
             self.set_backend(
                 "pc_bnn_official_aligned",

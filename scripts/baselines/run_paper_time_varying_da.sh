@@ -8,7 +8,7 @@ DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
 OUT="${OUT:-outputs/baselines/paper/time_varying_da}"
 DEVICE="${DEVICE:-cpu}"
 TRAIN_SIZE="${TRAIN_SIZE:-50000}"
-VAL_SIZE="${VAL_SIZE:-0}"
+VAL_SIZE="${VAL_SIZE:-1000}"
 TEST_SIZE="${TEST_SIZE:-1000}"
 TRAIN_SHARDS="${TRAIN_SHARDS:-5}"
 EPOCHS="${EPOCHS:-200}"
@@ -20,6 +20,7 @@ PDES="${PDES:-nsnonbounded burger reaction_diffusion shallow_water}"
 BASELINES="${BASELINES:-senseiver var4d vivid}"
 SCALAR_PARAM_MODE="${SCALAR_PARAM_MODE:-metadata}"
 DATA_LOADING_MODE="${DATA_LOADING_MODE:-lazy}"
+SENSOR_BUDGET_MODE="${SENSOR_BUDGET_MODE:-per_time}"
 CONFIG="${CONFIG:-baselines/configs/paper.yaml}"
 VIVID_IMPLEMENTATION_MODE="${VIVID_IMPLEMENTATION_MODE:-official_aligned}"
 SKIPPED="${SKIPPED:-$OUT/skipped_combinations.jsonl}"
@@ -49,6 +50,7 @@ for seed in $SEEDS; do
             --num-sensors "$sensors" --sensor-mode time_varying --noise-level "$noise" \
             --task-group time_varying --load-full-trajectory \
             --data-loading-mode "$DATA_LOADING_MODE" \
+            --sensor-budget-mode "$SENSOR_BUDGET_MODE" \
             --scalar-param-mode "$SCALAR_PARAM_MODE" --output-dir "$OUT" \
             "${method_args[@]}"
         done

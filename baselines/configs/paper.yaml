@@ -19,10 +19,11 @@ batch_size: 16
 epochs: 200
 learning_rate: 0.001
 train_size: 50000
-val_size: 0
+val_size: 1000
 test_size: 1000
 train_shards: 5
 scalar_param_mode: metadata
+sensor_budget_mode: per_time
 seeds: [1, 2, 3]
 sensor_counts: [50, 100, 250, 500, 1000]
 sensor_modes: [random, grid, fixed]
@@ -31,6 +32,7 @@ noise_levels: [0.0, 0.01, 0.05, 0.10]
 method:
   implementation_mode: official_or_skip
   official_backend: auto
+  normalize: true
   width: 48
   modes1: 16
   modes2: 16
@@ -77,12 +79,14 @@ method_by_baseline:
     official_backend: voronoicnn
     width: 64
   pinn_sparse:
+    normalize: false
     hidden: 128
     depth: 5
     steps: 1000
     lr: 0.001
     optimizer: adam
   pc_bnn:
+    normalize: false
     implementation_mode: official_aligned
     official_backend: pc_bnn
     hidden: 128
@@ -91,15 +95,18 @@ method_by_baseline:
     steps: 500
     lr: 0.001
   pde_opt:
+    normalize: false
     steps: 500
     lr: 0.01
     lambda_reg: 0.00001
   var4d:
+    normalize: false
     steps: 500
     lr: 0.01
     lambda_background: 0.1
     lambda_obs: 1.0
   vivid:
+    normalize: true
     implementation_mode: official_aligned
     official_backend: vivid
     train_inverse_operator: true
