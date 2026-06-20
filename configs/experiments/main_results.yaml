@@ -1,5 +1,6 @@
 name: main_results
 experiment_kind: main
+main_table_only: true
 config: baselines/configs/paper.yaml
 pdes:
   - darcy

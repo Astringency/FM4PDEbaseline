@@ -12,59 +12,43 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 OFFICIAL_ROOT = ROOT / "offical"
+OFFICIAL_METADATA_NOTE = (
+    "official_commit_or_version is unknown for vendored snapshots unless a human records the upstream tag/commit "
+    "used to populate offical/<source>; compare that snapshot against the recorded upstream revision to determine "
+    "official_local_modifications."
+)
+
+
+def _source(repo: str, path: Path | str) -> dict[str, str]:
+    text_path = str(path)
+    return {
+        "official_repo": repo,
+        "official_commit_or_version": "unknown",
+        "official_import_path": text_path,
+        "official_vendored_path": text_path,
+        "official_local_modifications": "unknown",
+        "official_metadata_note": OFFICIAL_METADATA_NOTE,
+    }
 
 
 OFFICIAL_SOURCE_INFO: dict[str, dict[str, str]] = {
-    "neuraloperator": {
-        "official_repo": "https://github.com/neuraloperator/neuraloperator",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "neuraloperator" / "neuralop" / "models"),
-    },
-    "deepxde": {
-        "official_repo": "https://github.com/lululxvi/deepxde",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "deepxde" / "deepxde"),
-    },
-    "recfno": {
-        "official_repo": "https://github.com/zhaoxiaoyu1995/recfno",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "RecFNO" / "model"),
-    },
-    "senseiver": {
-        "official_repo": "https://github.com/OrchardLANL/Senseiver",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "Senseiver" / "model.py"),
-    },
-    "pc_bnn": {
-        "official_repo": "https://github.com/Jianxun-Wang/Physics-constrained-Bayesian-deep-learning",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "PC-BNN" / "code"),
-    },
-    "ifno": {
-        "official_repo": "https://github.com/BayesianAIGroup/iFNO",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "iFNO"),
-    },
-    "vivid": {
-        "official_repo": "https://github.com/DL-WG/VIVID",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "VIVID"),
-    },
-    "invobs": {
-        "official_repo": "https://github.com/googleinterns/invobs-data-assimilation",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "invobs-data-assimilation"),
-    },
+    "neuraloperator": _source("https://github.com/neuraloperator/neuraloperator", OFFICIAL_ROOT / "neuraloperator"),
+    "deepxde": _source("https://github.com/lululxvi/deepxde", OFFICIAL_ROOT / "deepxde"),
+    "recfno": _source("https://github.com/zhaoxiaoyu1995/recfno", OFFICIAL_ROOT / "RecFNO"),
+    "senseiver": _source("https://github.com/OrchardLANL/Senseiver", OFFICIAL_ROOT / "Senseiver"),
+    "pc_bnn": _source("https://github.com/Jianxun-Wang/Physics-constrained-Bayesian-deep-learning", OFFICIAL_ROOT / "PC-BNN"),
+    "ifno": _source("https://github.com/BayesianAIGroup/iFNO", OFFICIAL_ROOT / "iFNO"),
+    "vivid": _source("https://github.com/DL-WG/VIVID", OFFICIAL_ROOT / "VIVID"),
+    "invobs": _source("https://github.com/googleinterns/invobs-data-assimilation", OFFICIAL_ROOT / "invobs-data-assimilation"),
     "vivid_invobs": {
         "official_repo": "https://github.com/DL-WG/VIVID; https://github.com/googleinterns/invobs-data-assimilation",
-        "official_commit_or_version": "vendored",
+        "official_commit_or_version": "unknown",
         "official_import_path": f"{OFFICIAL_ROOT / 'VIVID'}; {OFFICIAL_ROOT / 'invobs-data-assimilation'}",
+        "official_vendored_path": f"{OFFICIAL_ROOT / 'VIVID'}; {OFFICIAL_ROOT / 'invobs-data-assimilation'}",
+        "official_local_modifications": "unknown",
+        "official_metadata_note": OFFICIAL_METADATA_NOTE,
     },
-    "voronoi_cnn": {
-        "official_repo": "https://github.com/kfukami/Voronoi-CNN",
-        "official_commit_or_version": "vendored",
-        "official_import_path": str(OFFICIAL_ROOT / "Voronoi-CNN"),
-    },
+    "voronoi_cnn": _source("https://github.com/kfukami/Voronoi-CNN", OFFICIAL_ROOT / "Voronoi-CNN"),
 }
 
 

@@ -1,5 +1,6 @@
 name: sanity_main
 experiment_kind: main
+main_table_only: true
 config: baselines/configs/paper.yaml
 pdes: [darcy, poisson, nsnonbounded, reaction_diffusion, shallow_water, heat]
 seeds: [1]

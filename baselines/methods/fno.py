@@ -29,6 +29,8 @@ class FNOBaseline(BaselineModel):
         backend = str(self.config.get("official_backend", "auto")).lower()
         implementation_mode = requested_implementation_mode(self.config)
         fallback_reasons: list[str] = []
+        if implementation_mode == "official" and backend == "recfno":
+            raise OfficialImportError("RecFNO VoronoiFNO2d is not an official vanilla FNO backend; use neuraloperator or a recorded vendored zongyi-li FNO")
 
         if implementation_mode != "adapted" and backend in {"auto", "neuraloperator", "official"}:
             try:
@@ -58,7 +60,10 @@ class FNOBaseline(BaselineModel):
                 if backend in {"neuraloperator", "official"}:
                     warnings.warn(f"neuraloperator FNO unavailable, using fallback: {exc}", RuntimeWarning, stacklevel=2)
 
-        if implementation_mode != "adapted" and backend in {"auto", "recfno", "official"}:
+        if implementation_mode == "official" and fallback_reasons:
+            raise OfficialImportError("; ".join(fallback_reasons))
+
+        if implementation_mode != "official" and implementation_mode != "adapted" and backend == "recfno":
             try:
                 self.net = OfficialRecFNOVoronoiFNO2dNet(
                     in_channels=in_channels,
@@ -68,24 +73,28 @@ class FNOBaseline(BaselineModel):
                     modes2=modes2,
                 )
                 self.set_backend(
-                    "recfno",
-                    "recfno",
-                    fallback_used=False,
-                    implementation_mode_effective="official",
-                    implementation_source="recfno",
+                    "recfno_component",
+                    "recfno_component",
+                    fallback_used=True,
+                    warning="RecFNO VoronoiFNO2d is an adapted component for FNO and is supplement-only",
+                    implementation_mode_effective="adapted",
+                    implementation_source="recfno_voronoifno_component_adapted_for_fno",
                     official_import_success=True,
-                    adapter_status="official_code_adapter",
+                    official_reimplementation_success=False,
+                    official_alignment_level="adapted_component",
+                    official_alignment_notes=(
+                        "Uses the RecFNO VoronoiFNO2d component as an adapted FNO-style network; "
+                        "this is not vanilla FNO official code and is not paper main-table eligible."
+                    ),
+                    adapter_status="adapted_recfno_component_supplement_only",
                     **official_source_info("recfno"),
                 )
                 return self
             except Exception as exc:
                 exc = wrap_official_adapter_error("RecFNO VoronoiFNO2d", exc)
                 fallback_reasons.append(f"recfno unavailable: {exc}")
-                if backend in {"recfno", "official"}:
+                if backend == "recfno":
                     warnings.warn(f"RecFNO official FNO unavailable, using local fallback: {exc}", RuntimeWarning, stacklevel=2)
-
-        if implementation_mode == "official" and fallback_reasons:
-            raise OfficialImportError("; ".join(fallback_reasons))
 
         self.net = FNO2dNet(
             in_channels=in_channels,

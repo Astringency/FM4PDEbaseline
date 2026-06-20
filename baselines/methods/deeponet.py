@@ -22,8 +22,6 @@ class DeepONetBaseline(BaselineModel):
         branch_in = int(data_spec.get("branch_numel", data_spec["input_numel"]))
         coord_dim = len(self.out_shape[1:])
         out_channels = int(data_spec["target_channels"])
-        self.branch = MLP(branch_in, basis * out_channels, hidden=hidden, depth=3)
-        self.trunk = MLP(coord_dim, basis * out_channels, hidden=hidden, depth=3)
         self.basis = basis
         self.out_channels = out_channels
         self.branch_in = branch_in
@@ -72,6 +70,8 @@ class DeepONetBaseline(BaselineModel):
                 official_import_success=False,
                 adapter_status="local_adapted" if requested_local else "fallback_adapted",
             )
+            self.branch = MLP(branch_in, basis * out_channels, hidden=hidden, depth=3)
+            self.trunk = MLP(coord_dim, basis * out_channels, hidden=hidden, depth=3)
         return self
 
     def fit(self, train_loader, val_loader=None):

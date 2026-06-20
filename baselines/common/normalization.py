@@ -131,17 +131,28 @@ def normalize_batch_input_target(batch: PDEBatch, stats: NormalizationStats) -> 
     input_fields = _normalize_channels(batch.input_fields, stats.input_mean, stats.input_std)
     target_fields = _normalize_channels(batch.target_fields, stats.target_mean.to(batch.target_fields.device), stats.target_std.to(batch.target_fields.device))
     metadata = dict(batch.metadata)
+    normalized_sources: dict[str, str] = {}
     for key in ("masked_grid", "voronoi_grid", "original_input_fields", "observed_solution_fields", "observation_source_fields"):
         value = metadata.get(key)
         if isinstance(value, torch.Tensor):
-            if tuple(value.shape) == tuple(batch.input_fields.shape):
+            source = _metadata_normalization_source(batch, key, value, stats)
+            if source == "input":
                 metadata[key] = _normalize_channels(value, stats.input_mean.to(value.device), stats.input_std.to(value.device))
-            elif value.ndim >= 2 and value.shape[1] == stats.target_mean.numel():
+                normalized_sources[key] = "input"
+            elif source == "target":
                 metadata[key] = _normalize_channels(value, stats.target_mean.to(value.device), stats.target_std.to(value.device))
+                normalized_sources[key] = "target"
     obs_values = batch.obs_values
     if isinstance(obs_values, torch.Tensor):
-        obs_values = _normalize_last_channel(obs_values, stats.target_mean.to(obs_values.device), stats.target_std.to(obs_values.device))
+        obs_source = _obs_value_normalization_source(batch)
+        if obs_source == "input":
+            obs_values = _normalize_last_channel(obs_values, stats.input_mean.to(obs_values.device), stats.input_std.to(obs_values.device))
+        else:
+            obs_values = _normalize_last_channel(obs_values, stats.target_mean.to(obs_values.device), stats.target_std.to(obs_values.device))
+        normalized_sources["obs_values"] = obs_source
     metadata["normalization_applied"] = True
+    metadata["normalization_scale"] = "mean_std"
+    metadata["normalization_metadata_sources"] = normalized_sources
     return PDEBatch(
         pde_name=batch.pde_name,
         task=batch.task,
@@ -195,3 +206,19 @@ def _normalize_last_channel(x: torch.Tensor, mean: torch.Tensor, std: torch.Tens
 
 def _channel_view(values: torch.Tensor, ndim: int) -> torch.Tensor:
     return values.reshape(1, -1, *([1] * (ndim - 2)))
+
+
+def _obs_value_normalization_source(batch: PDEBatch) -> str:
+    return "input" if batch.task == "sparse_inverse" else "target"
+
+
+def _metadata_normalization_source(batch: PDEBatch, key: str, value: torch.Tensor, stats: NormalizationStats) -> str:
+    if key in {"masked_grid", "voronoi_grid", "observed_solution_fields", "observation_source_fields"}:
+        return "input" if batch.task == "sparse_inverse" else "target"
+    if key == "original_input_fields":
+        return "input"
+    if tuple(value.shape) == tuple(batch.input_fields.shape):
+        return "input"
+    if value.ndim >= 2 and value.shape[1] == stats.target_mean.numel():
+        return "target"
+    return "input"

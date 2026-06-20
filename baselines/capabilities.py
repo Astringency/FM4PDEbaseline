@@ -197,7 +197,7 @@ def resolve_capability(
                 "official",
                 family,
                 "vanilla FNO is a full-grid supervised forward operator baseline",
-                "Use neuraloperator or vendored official FNO; local compact FNO is smoke/adapted only.",
+                "Use neuraloperator or a recorded vendored zongyi-li/fourier_neural_operator FNO for paper mode; RecFNO components and local compact FNO are adapted supplement only.",
             )
         if family == "full_inverse":
             return _cap(

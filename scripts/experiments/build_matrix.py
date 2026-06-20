@@ -26,6 +26,7 @@ from baselines.experiment_matrix import (
     TIME_VARYING_SENSOR_BASELINES,
     capability_skip_row,
     compatibility_reason,
+    main_table_skip_reason,
     resolve_capability,
 )
 
@@ -153,6 +154,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-root", default=os.environ.get("OUT_ROOT", "outputs/baselines_large"))
     parser.add_argument("--matrix-name", default="")
     parser.add_argument("--include-skipped", action="store_true", help="Also include unsupported rows in the matrix with skip_reason set.")
+    parser.add_argument("--main-table-only", action="store_true", help="Skip adapted/supplement-only capabilities at matrix generation time.")
+    parser.add_argument("--paper-mode", action="store_true", help="Alias for --main-table-only.")
     return parser.parse_args(argv)
 
 
@@ -166,10 +169,13 @@ def build_matrix(
     output_root: str | Path,
     matrix_name: str,
     include_skipped: bool = False,
+    main_table_only: bool | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     output_root = Path(output_root)
     experiment_kind = _experiment_kind(cfg)
     ablation_factor = _ablation_factor(cfg, experiment_kind)
+    if main_table_only is None:
+        main_table_only = bool(cfg.get("main_table_only", False))
     allow_multi = _as_bool(cfg.get("allow_multi_factor_grid", False))
     task_groups = list(cfg.get("task_groups", []))
     if not task_groups:
@@ -239,8 +245,11 @@ def build_matrix(
                         task_group,
                         load_full_trajectory=_matrix_load_full_trajectory(group_cfg, global_defaults, baseline),
                         train_inverse_operator=_matrix_train_inverse_operator(cfg, group_cfg, baseline),
+                        uses_official_inverse_observation_operator=_matrix_uses_official_inverse_observation_operator(cfg, group_cfg, baseline),
                     )
                     reason = capability.reason if capability.support_status == "unsupported" else ""
+                    if not reason and main_table_only and not capability.paper_table_eligible:
+                        reason = main_table_skip_reason(capability)
                     if reason:
                         skipped_row = capability_skip_row(
                             capability,
@@ -249,6 +258,8 @@ def build_matrix(
                                 "matrix_name": matrix_name,
                                 "experiment_kind": experiment_kind,
                                 "ablation_factor": ablation_factor,
+                                "reason": reason,
+                                "unsupported_reason": reason if capability.support_status == "unsupported" else "",
                                 "would_have_expanded": (
                                     len(seeds)
                                     * len(expansion["sensor_counts"])
@@ -371,6 +382,32 @@ def _matrix_train_inverse_operator(cfg: dict[str, Any], group_cfg: dict[str, Any
     group_resources = dict(group_cfg.get("resources", {}) or {})
     group_baseline_resources = dict(group_resources.get(baseline, {}) or {})
     return bool(group_cfg.get("train_inverse_operator", group_baseline_resources.get("train_inverse_operator", baseline_resources.get("train_inverse_operator", False))))
+
+
+def _matrix_uses_official_inverse_observation_operator(cfg: dict[str, Any], group_cfg: dict[str, Any], baseline: str) -> bool:
+    resources = dict(cfg.get("resources", {}) or {})
+    baseline_resources = dict(resources.get(baseline, {}) or {})
+    group_resources = dict(group_cfg.get("resources", {}) or {})
+    group_baseline_resources = dict(group_resources.get(baseline, {}) or {})
+    if baseline == "vivid":
+        return bool(
+            group_cfg.get(
+                "uses_official_inverse_observation_operator",
+                group_baseline_resources.get(
+                    "uses_official_inverse_observation_operator",
+                    baseline_resources.get("uses_official_inverse_observation_operator", True),
+                ),
+            )
+        )
+    return bool(
+        group_cfg.get(
+            "uses_official_inverse_observation_operator",
+            group_baseline_resources.get(
+                "uses_official_inverse_observation_operator",
+                baseline_resources.get("uses_official_inverse_observation_operator", False),
+            ),
+        )
+    )
 
 
 def _resolve_pdes(cfg: dict[str, Any], group_cfg: dict[str, Any], experiment_kind: str, ablation_factor: str) -> list[str]:
@@ -947,7 +984,13 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     cfg = load_config(args.config)
     matrix_name = args.matrix_name or str(cfg.get("name") or Path(args.config).stem)
-    rows, skipped, summary = build_matrix(cfg, args.output_root, matrix_name, include_skipped=args.include_skipped)
+    rows, skipped, summary = build_matrix(
+        cfg,
+        args.output_root,
+        matrix_name,
+        include_skipped=args.include_skipped,
+        main_table_only=bool(args.main_table_only or args.paper_mode or cfg.get("main_table_only", False)),
+    )
     write_outputs(rows, skipped, summary, args.output_root, matrix_name)
     print(json.dumps(summary, indent=2, sort_keys=True))
 

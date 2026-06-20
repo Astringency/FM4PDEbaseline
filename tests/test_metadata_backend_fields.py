@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from baselines.methods.official import official_source_info
+
 
 def test_result_rows_include_capability_and_backend_fields(tmp_path: Path):
     out = tmp_path / "run"
@@ -49,6 +51,9 @@ def test_result_rows_include_capability_and_backend_fields(tmp_path: Path):
         "official_repo",
         "official_commit_or_version",
         "official_import_path",
+        "official_vendored_path",
+        "official_local_modifications",
+        "official_metadata_note",
         "official_import_success",
         "official_reimplementation_success",
         "official_alignment_level",
@@ -63,3 +68,13 @@ def test_result_rows_include_capability_and_backend_fields(tmp_path: Path):
         "predicted_field_name",
     ):
         assert field in row
+
+
+def test_official_source_info_records_unknown_commit_and_vendored_path():
+    info = official_source_info("deepxde")
+    assert info["official_repo"].startswith("https://github.com/")
+    assert info["official_commit_or_version"] == "unknown"
+    assert info["official_commit_or_version"] != "vendored"
+    assert "offical/deepxde" in info["official_vendored_path"]
+    assert info["official_local_modifications"] == "unknown"
+    assert "record" in info["official_metadata_note"]

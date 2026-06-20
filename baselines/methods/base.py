@@ -33,6 +33,9 @@ class BaselineModel(nn.Module):
         self.official_repo: str = ""
         self.official_commit_or_version: str = ""
         self.official_import_path: str = ""
+        self.official_vendored_path: str = ""
+        self.official_local_modifications: str = ""
+        self.official_metadata_note: str = ""
         self.official_import_success: bool = False
         self.official_reimplementation_success: bool = False
         self.official_alignment_level: str = "local"
@@ -59,6 +62,9 @@ class BaselineModel(nn.Module):
         official_repo: str = "",
         official_commit_or_version: str = "",
         official_import_path: str = "",
+        official_vendored_path: str = "",
+        official_local_modifications: str = "",
+        official_metadata_note: str = "",
         official_import_success: bool | None = None,
         official_reimplementation_success: bool | None = None,
         official_alignment_level: str | None = None,
@@ -75,6 +81,9 @@ class BaselineModel(nn.Module):
         self.official_repo = str(official_repo or "")
         self.official_commit_or_version = str(official_commit_or_version or "")
         self.official_import_path = str(official_import_path or "")
+        self.official_vendored_path = str(official_vendored_path or official_import_path or "")
+        self.official_local_modifications = str(official_local_modifications or "")
+        self.official_metadata_note = str(official_metadata_note or "")
         if official_import_success is None:
             official_import_success = self.implementation_mode_effective == "official" and not self.fallback_used
         self.official_import_success = bool(official_import_success)
@@ -154,6 +163,9 @@ class BaselineModel(nn.Module):
             "official_repo": self.official_repo,
             "official_commit_or_version": self.official_commit_or_version,
             "official_import_path": self.official_import_path,
+            "official_vendored_path": self.official_vendored_path,
+            "official_local_modifications": self.official_local_modifications,
+            "official_metadata_note": self.official_metadata_note,
             "official_import_success": self.official_import_success,
             "official_reimplementation_success": self.official_reimplementation_success,
             "official_alignment_level": self.official_alignment_level,
