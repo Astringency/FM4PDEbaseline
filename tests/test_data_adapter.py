@@ -74,6 +74,9 @@ def test_reaction_diffusion_grf_shard_name_supported_in_lazy_mode(tmp_path):
     path = rd / "reaction_diffusion_grf_50000-128-128-T1-steps10_shard000.h5"
     rng = np.random.default_rng(123)
     with h5py.File(path, "w") as f:
+        f["t"] = np.linspace(0.0, 1.0, 10).astype("float32")
+        meta = f.create_group("metadata")
+        meta.attrs["source"] = "unit-test"
         for i in range(2):
             g = f.create_group(str(i))
             g["data"] = rng.normal(size=(10, 8, 8, 2)).astype("float32")

@@ -1285,7 +1285,19 @@ def _lazy_group_keys(path: Path, pde: str) -> list[str] | None:
     if pde not in {"reaction_diffusion", "shallow_water"}:
         return None
     with h5py.File(path, "r") as f:
-        return sorted([str(k) for k in f.keys()], key=lambda x: int(x) if x.isdigit() else x)
+        return _hdf5_sample_group_keys(f)
+
+
+def _hdf5_sample_group_keys(f: h5py.File) -> list[str]:
+    numeric_keys = [str(key) for key in f.keys() if str(key).isdigit()]
+    if numeric_keys:
+        return sorted(numeric_keys, key=_natural_hdf5_key)
+    keys = [str(key) for key in f.keys() if isinstance(f[key], h5py.Group) and "data" in f[key]]
+    return sorted(keys, key=_natural_hdf5_key)
+
+
+def _natural_hdf5_key(value: str) -> tuple[int, int, str]:
+    return (0, int(value), "") if value.isdigit() else (1, 0, value)
 
 
 def _lazy_dense_count(path: Path, pde: str) -> int:
@@ -1990,7 +2002,7 @@ def _load_reaction_diffusion(
     seen = 0
     for path in files:
         with h5py.File(path, "r") as f:
-            keys = list(f.keys())
+            keys = _hdf5_sample_group_keys(f)
             for key in keys:
                 if skip > 0:
                     skip -= 1
