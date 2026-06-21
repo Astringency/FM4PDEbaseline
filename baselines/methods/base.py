@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import warnings
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -228,6 +231,52 @@ def _default_alignment_level(effective_mode: str) -> str:
     return "local"
 
 
+def snapshot_state_dict(model: nn.Module) -> OrderedDict[str, Any]:
+    """Take a CPU snapshot of a possibly non-standard state_dict."""
+    snapshot: OrderedDict[str, Any] = OrderedDict()
+    for key, value in model.state_dict().items():
+        if isinstance(value, torch.Tensor):
+            snapshot[key] = value.detach().cpu().clone()
+            continue
+        try:
+            snapshot[key] = copy.deepcopy(value)
+        except Exception as exc:
+            warnings.warn(
+                f"Skipping non-tensor state_dict key {key!r} during best-state snapshot because deepcopy failed: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    return snapshot
+
+
+def restore_state_dict(model: nn.Module, state_dict: OrderedDict[str, Any] | dict[str, Any]) -> None:
+    """Restore a snapshot, falling back only for state_dicts with non-tensor entries."""
+    try:
+        model.load_state_dict(state_dict)
+        return
+    except Exception as exc:
+        non_tensor_keys = [key for key, value in state_dict.items() if not isinstance(value, torch.Tensor)]
+        if not non_tensor_keys:
+            raise
+        tensor_state: OrderedDict[str, torch.Tensor] = OrderedDict(
+            (key, value) for key, value in state_dict.items() if isinstance(value, torch.Tensor)
+        )
+        warnings.warn(
+            "Strict best-state restore failed for a state_dict containing non-tensor entries; "
+            f"retrying with tensor-only strict=False restore. Non-tensor keys skipped: {non_tensor_keys}. "
+            f"Original error: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        result = model.load_state_dict(tensor_state, strict=False)
+        missing_keys = list(getattr(result, "missing_keys", []))
+        if missing_keys:
+            raise RuntimeError(
+                "Tensor-only best-state restore left real model parameters or buffers missing: "
+                f"{missing_keys}. Original strict restore error: {exc}"
+            ) from exc
+
+
 def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
     device = torch.device(model.config.get("device", "cpu"))
     epochs = int(model.config.get("epochs", 1))
@@ -294,9 +343,9 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
                 best_val = val_loss
                 history["best_epoch"] = epoch
                 history["best_val_loss"] = val_loss
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_state = snapshot_state_dict(model)
     if best_state is not None:
-        model.load_state_dict(best_state)
+        restore_state_dict(model, best_state)
     return history
 
 

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.normalization import estimate_normalization_stats, normalize_batch_input_target
 
-from .base import BaselineModel, _to_device_batch
+from .base import BaselineModel, _to_device_batch, restore_state_dict, snapshot_state_dict
 from .ifno_official_aligned import OfficialAlignedIFNO2d
 from .official import (
     OfficialImportError,
@@ -194,9 +194,9 @@ class IFNOBaseline(BaselineModel):
                     best_val = val_loss
                     history["best_epoch"] = epoch
                     history["best_val_loss"] = val_loss
-                    best_state = {k: v.detach().cpu().clone() for k, v in self.state_dict().items()}
+                    best_state = snapshot_state_dict(self)
         if best_state is not None:
-            self.load_state_dict(best_state)
+            restore_state_dict(self, best_state)
         return history
 
     def predict(self, batch: PDEBatch):

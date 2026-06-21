@@ -14,7 +14,7 @@ from baselines.common.normalization import (
     normalize_batch_input_target,
 )
 
-from .base import BaselineModel
+from .base import BaselineModel, restore_state_dict, snapshot_state_dict
 from .official import (
     OfficialImportError,
     get_vivid_official_aligned_status,
@@ -273,9 +273,9 @@ class VIVIDBaseline(BaselineModel):
                     best_val = val_loss
                     history["best_epoch"] = epoch
                     history["best_val_loss"] = val_loss
-                    best_state = {k: v.detach().cpu().clone() for k, v in self.inverse_operator.state_dict().items()}
+                    best_state = snapshot_state_dict(self.inverse_operator)
         if best_state is not None:
-            self.inverse_operator.load_state_dict(best_state)
+            restore_state_dict(self.inverse_operator, best_state)
         self.inverse_operator_trained = True
         return history
 
