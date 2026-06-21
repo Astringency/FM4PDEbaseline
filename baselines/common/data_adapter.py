@@ -1235,11 +1235,7 @@ def _lazy_patterns(pde: str, split: str) -> list[str]:
             return ["nsnonbounded_val_*-128-128-10_*.mat", "nsnonbounded_*-128-128-10_val*.mat"]
         return ["nsnonbounded_10000-128-128-10_*_new.mat"]
     if pde == "reaction_diffusion":
-        if split == "test":
-            return ["reaction_diffusion_test_*-128-128-*.h5"]
-        if split == "val":
-            return ["reaction_diffusion_val_*-128-128-*.h5", "reaction_diffusion-128-128-*_val*.h5"]
-        return ["reaction_diffusion-128-128-*_*.h5", "2D_diff-react_NA_NA.h5"]
+        return _reaction_diffusion_patterns(split)
     if pde == "shallow_water":
         if split == "test":
             return ["swe_test_*-128-128-*.h5", "2d_swe_test*.h5"]
@@ -1263,6 +1259,26 @@ def _lazy_candidate_files(root: Path, pde: str, active_split: str, train_shards:
     if pde == "nsnonbounded" and active_split == "test":
         files = _filter_nsnonbounded_test_files(files)
     return files
+
+
+def _reaction_diffusion_patterns(split: str) -> list[str]:
+    if split == "test":
+        return [
+            "reaction_diffusion_test_*-128-128-*.h5",
+            "reaction_diffusion_test_grf_*-128-128-*.h5",
+        ]
+    if split == "val":
+        return [
+            "reaction_diffusion_val_*-128-128-*.h5",
+            "reaction_diffusion_val_grf_*-128-128-*.h5",
+            "reaction_diffusion-128-128-*_val*.h5",
+            "reaction_diffusion_grf_*-128-128-*val*.h5",
+        ]
+    return [
+        "reaction_diffusion_grf_*-128-128-*.h5",
+        "reaction_diffusion-128-128-*_*.h5",
+        "2D_diff-react_NA_NA.h5",
+    ]
 
 
 def _lazy_group_keys(path: Path, pde: str) -> list[str] | None:
@@ -1962,12 +1978,7 @@ def _load_reaction_diffusion(
 ) -> dict[str, Any]:
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
-    if active_split == "test":
-        patterns = ["reaction_diffusion_test_*-128-128-*.h5"]
-    elif active_split == "val":
-        patterns = ["reaction_diffusion_val_*-128-128-*.h5", "reaction_diffusion-128-128-*_val*.h5"]
-    else:
-        patterns = ["reaction_diffusion-128-128-*_*.h5", "2D_diff-react_NA_NA.h5"]
+    patterns = _reaction_diffusion_patterns(active_split)
     files = _train_limited(_candidate_files(root, "reaction_diffusion", active_split, patterns), active_split, train_shards)
     if not files:
         raise _missing_error(root, "reaction_diffusion", active_split, patterns)

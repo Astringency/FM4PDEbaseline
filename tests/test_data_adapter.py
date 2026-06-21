@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import h5py
+import numpy as np
 import pytest
 import torch
 
@@ -64,6 +66,47 @@ def test_future_hdf5_materialize_scalar_params_only_when_requested(tiny_data_roo
     assert batch.target_fields.shape[1] == 2
     assert batch.input_channel_names == ["u0", "alpha"]
     assert torch.allclose(batch.input_fields[:, 1], batch.pde_params["alpha"].reshape(-1, 1, 1).expand_as(batch.input_fields[:, 1]))
+
+
+def test_reaction_diffusion_grf_shard_name_supported_in_lazy_mode(tmp_path):
+    rd = tmp_path / "reaction_diffusion"
+    rd.mkdir()
+    path = rd / "reaction_diffusion_grf_50000-128-128-T1-steps10_shard000.h5"
+    rng = np.random.default_rng(123)
+    with h5py.File(path, "w") as f:
+        for i in range(2):
+            g = f.create_group(str(i))
+            g["data"] = rng.normal(size=(10, 8, 8, 2)).astype("float32")
+
+    registry = build_default_registry()
+    raw = registry.load_raw(
+        "reaction_diffusion",
+        tmp_path,
+        split="train",
+        max_samples=1,
+        train_shards=1,
+        load_full_trajectory=False,
+    )
+    assert raw["file_paths"] == [str(path)]
+    assert raw["full_tensor"].shape == (1, 4, 8, 8)
+
+    dataset = registry.make_dataset(
+        "reaction_diffusion",
+        tmp_path,
+        "sparse_solution",
+        split="train",
+        max_samples=2,
+        train_shards=1,
+        data_loading_mode="lazy",
+        load_full_trajectory=False,
+        num_sensors=4,
+        seed=5,
+    )
+
+    assert len(dataset) == 2
+    assert dataset.file_paths == [str(path)]
+    assert dataset.batch.metadata["data_loading_mode"] == "lazy"
+    assert dataset.batch.full_tensor.shape == (1, 4, 8, 8)
 
 
 def test_train_val_test_are_distinct_splits(tiny_data_root):

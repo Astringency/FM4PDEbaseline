@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,14 @@ from baselines.experiment_matrix import (
     main_table_skip_reason,
     resolve_capability,
 )
+
+
+def timestamp() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+
+def progress(message: str) -> None:
+    print(f"[{timestamp()}] {message}", file=sys.stderr, flush=True)
 
 
 GROUP_TO_TASK = {
@@ -172,6 +181,7 @@ def build_matrix(
     matrix_name: str,
     include_skipped: bool = False,
     main_table_only: bool | None = None,
+    emit_progress: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     output_root = Path(output_root)
     experiment_kind = _experiment_kind(cfg)
@@ -208,6 +218,13 @@ def build_matrix(
         candidate_baselines = list(baselines)
         seeds = _env_list("SEEDS", group_cfg.get("seeds", global_defaults["seeds"]), int)
         expansion = _group_expansion(cfg, group_cfg, global_defaults, task_group, task)
+        if emit_progress:
+            progress(
+                f"[matrix group] task_group={task_group} task={task} pdes={len(pdes)} "
+                f"baselines={_short_list(baselines)} sensor_modes={_short_list(expansion['sensor_modes'])} "
+                f"sensor_counts={_short_list(expansion['sensor_counts'])} noise_levels={_short_list(expansion['noise_levels'])} "
+                f"seeds={_short_list(seeds)} train_sizes={_short_list(expansion['train_sizes'])}"
+            )
 
         for pde in pdes:
             for baseline in extra_skip_baselines:
@@ -982,19 +999,57 @@ def _safe_float(value: Any) -> str:
     return _safe_name(f"{float(value):g}")
 
 
+def _short_list(values: list[Any], max_items: int = 12) -> str:
+    text_values = [str(value) for value in values]
+    if len(text_values) <= max_items:
+        return ",".join(text_values)
+    shown = ",".join(text_values[:max_items])
+    return f"{shown},...({len(text_values)} total)"
+
+
+def _output_paths(output_root: str | Path, matrix_name: str) -> dict[str, Path]:
+    output_root = Path(output_root)
+    matrix_dir = output_root / "matrices"
+    return {
+        "jsonl": matrix_dir / f"{matrix_name}.jsonl",
+        "tsv": matrix_dir / f"{matrix_name}.tsv",
+        "summary": matrix_dir / f"{matrix_name}_summary.json",
+        "skipped": matrix_dir / f"{matrix_name}_skipped.jsonl",
+        "skipped_global": output_root / "skipped_combinations.jsonl",
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     cfg = load_config(args.config)
     matrix_name = args.matrix_name or str(cfg.get("name") or Path(args.config).stem)
+    main_table_only = bool(args.main_table_only or args.paper_mode or cfg.get("main_table_only", False))
+    task_groups = list(cfg.get("task_groups", []))
+    progress(
+        f"[matrix start] config={args.config} matrix_name={matrix_name} output_root={args.output_root} "
+        f"experiment_kind={cfg.get('experiment_kind', '')} main_table_only={main_table_only} "
+        f"task_groups={_short_list(task_groups)}"
+    )
     rows, skipped, summary = build_matrix(
         cfg,
         args.output_root,
         matrix_name,
         include_skipped=args.include_skipped,
-        main_table_only=bool(args.main_table_only or args.paper_mode or cfg.get("main_table_only", False)),
+        main_table_only=main_table_only,
+        emit_progress=True,
     )
     write_outputs(rows, skipped, summary, args.output_root, matrix_name)
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    output_paths = _output_paths(args.output_root, matrix_name)
+    progress(
+        f"[matrix complete] rows={len(rows)} active_rows={summary['run_count']} skipped_combo_count={len(skipped)} "
+        f"skipped_expanded_count={summary.get('skipped_expanded_count', 0)} "
+        f"by_task_group={json.dumps(summary.get('by_task_group', {}), sort_keys=True)}"
+    )
+    progress(
+        f"[matrix outputs] jsonl={output_paths['jsonl']} tsv={output_paths['tsv']} summary={output_paths['summary']} "
+        f"skipped={output_paths['skipped']} skipped_global={output_paths['skipped_global']}"
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -48,8 +49,11 @@ def main(argv: list[str] | None = None) -> None:
     details = []
     counts = Counter()
     grouped = Counter()
+    now = time.time()
     for row in rows:
         status = _row_status(row)
+        output_dir = Path(str(row.get("output_dir", "")))
+        status_detail = _status_detail(row, status, now)
         counts[status] += 1
         key = (row.get("task_group", ""), row.get("pde", ""), row.get("baseline", ""), status)
         grouped[key] += 1
@@ -61,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
                 "run_id": row.get("run_id", ""),
                 "status": status,
                 "output_dir": row.get("output_dir", ""),
+                **status_detail,
             }
         )
 
@@ -76,7 +81,10 @@ def main(argv: list[str] | None = None) -> None:
     _write_grouped_csv(status_csv, grouped, skipped_rows)
     if latest_status_csv != status_csv:
         _write_grouped_csv(latest_status_csv, grouped, skipped_rows)
-    markdown = _status_markdown(args.scope, matrix_paths, counts, grouped, skipped_rows)
+    latest_update = _latest_update(details)
+    failed_examples = [detail for detail in details if detail["status"] == "failed"][:5]
+    running_examples = [detail for detail in details if detail["status"] == "running"][:5]
+    markdown = _status_markdown(args.scope, matrix_paths, counts, grouped, skipped_rows, latest_update, failed_examples, running_examples)
     status_md.write_text(markdown, encoding="utf-8")
     if latest_status_md != status_md:
         latest_status_md.write_text(markdown, encoding="utf-8")
@@ -89,11 +97,15 @@ def main(argv: list[str] | None = None) -> None:
                 "status_md": str(status_md),
                 "latest_status_csv": str(latest_status_csv),
                 "latest_status_md": str(latest_status_md),
+                "latest_update": latest_update,
+                "failed_examples": failed_examples,
+                "running_examples": running_examples,
                 **dict(counts),
             },
             indent=2,
             sort_keys=True,
-        )
+        ),
+        flush=True,
     )
 
 
@@ -155,6 +167,42 @@ def _row_status(row: dict[str, Any]) -> str:
     return "pending"
 
 
+def _status_detail(row: dict[str, Any], status: str, now: float) -> dict[str, Any]:
+    output_dir = Path(str(row.get("output_dir", "")))
+    status_file = output_dir / "run.status.json"
+    detail: dict[str, Any] = {
+        "updated_at": _updated_at(status_file, output_dir, status),
+    }
+    if status == "failed":
+        detail["stderr_log"] = str(output_dir / "stderr.log")
+        detail["stdout_log"] = str(output_dir / "stdout.log")
+    if status == "running":
+        running = output_dir / "run.running"
+        detail["running_lock"] = str(running)
+        if running.exists():
+            detail["running_seconds"] = max(0, int(now - running.stat().st_mtime))
+    return detail
+
+
+def _updated_at(status_file: Path, output_dir: Path, status: str) -> str:
+    if status_file.exists():
+        try:
+            value = json.loads(status_file.read_text(encoding="utf-8")).get("updated_at", "")
+            if value:
+                return str(value)
+        except Exception:
+            pass
+    marker = output_dir / f"run.{status}"
+    if marker.exists():
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(marker.stat().st_mtime))
+    return ""
+
+
+def _latest_update(details: list[dict[str, Any]]) -> str:
+    updates = [str(detail.get("updated_at", "")) for detail in details if detail.get("updated_at")]
+    return max(updates) if updates else ""
+
+
 def _write_grouped_csv(path: Path, grouped: Counter, skipped_rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
@@ -176,7 +224,18 @@ def _write_grouped_csv(path: Path, grouped: Counter, skipped_rows: list[dict[str
         writer.writerows(rows)
 
 
-def _status_markdown(scope: str, matrix_paths: list[Path], counts: Counter, grouped: Counter, skipped_rows: list[dict[str, Any]]) -> str:
+def _status_markdown(
+    scope: str,
+    matrix_paths: list[Path],
+    counts: Counter,
+    grouped: Counter,
+    skipped_rows: list[dict[str, Any]],
+    latest_update: str = "",
+    failed_examples: list[dict[str, Any]] | None = None,
+    running_examples: list[dict[str, Any]] | None = None,
+) -> str:
+    failed_examples = failed_examples or []
+    running_examples = running_examples or []
     lines = ["# Large Baseline Status", f"Scope: {scope}", ""]
     lines.append("Matrices:")
     for path in matrix_paths:
@@ -192,6 +251,16 @@ def _status_markdown(scope: str, matrix_paths: list[Path], counts: Counter, grou
         by_group[(row.get("task_group", ""), "skipped")] += int(row.get("would_have_expanded", 1) or 1)
     for (group, status), count in sorted(by_group.items()):
         lines.append(f"| {group} | {status} | {count} |")
+    if latest_update:
+        lines.extend(["", "## Latest Update", "", latest_update])
+    if running_examples:
+        lines.extend(["", "## Running Examples", "", "| run_id | running_seconds | output_dir |", "|---|---:|---|"])
+        for row in running_examples:
+            lines.append(f"| {row.get('run_id', '')} | {row.get('running_seconds', '')} | {row.get('output_dir', '')} |")
+    if failed_examples:
+        lines.extend(["", "## Failed Examples", "", "| run_id | stderr_log |", "|---|---|"])
+        for row in failed_examples:
+            lines.append(f"| {row.get('run_id', '')} | {row.get('stderr_log', '')} |")
     lines.append("")
     return "\n".join(lines)
 

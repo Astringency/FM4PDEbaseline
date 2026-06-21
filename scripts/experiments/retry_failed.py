@@ -35,7 +35,7 @@ def main() -> None:
     with output.open("w", encoding="utf-8") as f:
         for row in retry_rows:
             f.write(json.dumps(row, sort_keys=True) + "\n")
-    print(json.dumps({"matrix": str(matrix), "retry_matrix": str(output), "retry_rows": len(retry_rows)}, indent=2, sort_keys=True))
+    print(json.dumps({"matrix": str(matrix), "retry_matrix": str(output), "retry_rows": len(retry_rows)}, indent=2, sort_keys=True), flush=True)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

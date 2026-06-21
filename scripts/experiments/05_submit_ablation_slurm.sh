@@ -4,15 +4,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
+}
+
 ABLATION="${ABLATION:-}"
+log "script=$(basename "$0") start_time=$(date '+%Y-%m-%d %H:%M:%S')"
+log "ROOT=$ROOT"
+log "ABLATION=${ABLATION:-<unset>}"
 case "$ABLATION" in
   sensor_count_ablation|noise_ablation|sensor_mode_ablation|time_varying_sensor_ablation|runtime_budget_ablation|train_size_ablation) ;;
   "")
-    echo "Set ABLATION to one of: sensor_count_ablation noise_ablation sensor_mode_ablation time_varying_sensor_ablation runtime_budget_ablation train_size_ablation" >&2
+    log "Set ABLATION to one of: sensor_count_ablation noise_ablation sensor_mode_ablation time_varying_sensor_ablation runtime_budget_ablation train_size_ablation"
     exit 2
     ;;
   *)
-    echo "Unknown ABLATION=$ABLATION" >&2
+    log "Unknown ABLATION=$ABLATION"
     exit 2
     ;;
 esac
@@ -26,24 +33,38 @@ CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 MEM="${MEM:-64G}"
 GRES="${GRES:-gpu:1}"
 JOB_NAME="${JOB_NAME:-fm4pde_${ABLATION}}"
-DATA_ROOT="${DATA_ROOT:-/home/tat512/C01Python/PDEdata}"
+DATA_ROOT="${DATA_ROOT:-$ROOT/../PDEdata}"
 DEVICE="${DEVICE:-cuda}"
+N_JOBS="${N_JOBS:-}"
+TASK_GROUPS="${TASK_GROUPS:-}"
+
+log "DATA_ROOT=$DATA_ROOT"
+log "OUT_ROOT=$OUT_ROOT"
+log "DEVICE=$DEVICE"
+log "MATRIX=$MATRIX"
+log "SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID:-<unset>} MAX_ARRAY_CONCURRENT=$MAX_ARRAY_CONCURRENT N_JOBS=${N_JOBS:-<unset>}"
+log "TASK_GROUPS=${TASK_GROUPS:-<unset>} ABLATION=$ABLATION PARTITION=$PARTITION TIME=$TIME CPUS_PER_TASK=$CPUS_PER_TASK MEM=$MEM GRES=$GRES JOB_NAME=$JOB_NAME"
 
 if [ ! -f "$MATRIX" ]; then
+  log "matrix not found; building $ABLATION matrix at $MATRIX"
   python scripts/experiments/build_matrix.py --config "configs/experiments/${ABLATION}.yaml" --output-root "$OUT_ROOT" --matrix-name "$ABLATION"
 fi
 if [ ! -d "$DATA_ROOT" ]; then
-  echo "DATA_ROOT does not exist: $DATA_ROOT" >&2
+  log "DATA_ROOT does not exist: $DATA_ROOT"
   exit 2
 fi
 
 total="$(python - "$MATRIX" <<'PY'
 import sys
-print(sum(1 for line in open(sys.argv[1], encoding="utf-8") if line.strip()))
+print(sum(1 for line in open(sys.argv[1], encoding="utf-8") if line.strip()), flush=True)
 PY
 )"
+log "matrix path=$MATRIX"
+log "matrix total rows=$total"
+log "selected rows after filters=$total"
+log "Slurm array=0-$((total - 1))%$MAX_ARRAY_CONCURRENT"
 if [ "$total" -eq 0 ]; then
-  echo "No rows in $MATRIX"
+  log "No runs selected"
   exit 0
 fi
 
@@ -63,17 +84,29 @@ cat > "$SBATCH_FILE" <<EOF
 
 set -euo pipefail
 cd "$ROOT"
+log() {
+  printf '[%s] %s\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$*" >&2
+}
 export DATA_ROOT="$DATA_ROOT"
 export OUT_ROOT="$OUT_ROOT"
 export MATRIX="$MATRIX"
 export DEVICE="$DEVICE"
 export TASK_INDEX="\${SLURM_ARRAY_TASK_ID}"
+log "script=\$(basename "\$0") start_time=\$(date '+%Y-%m-%d %H:%M:%S')"
+log "ROOT=$ROOT"
+log "DATA_ROOT=\$DATA_ROOT"
+log "OUT_ROOT=\$OUT_ROOT"
+log "DEVICE=\$DEVICE"
+log "MATRIX=\$MATRIX"
+log "SLURM_ARRAY_TASK_ID=\${SLURM_ARRAY_TASK_ID:-<unset>} TASK_INDEX=\$TASK_INDEX ABLATION=$ABLATION"
+log "hostname=\$(hostname) pid=\$\$ timestamp=\$(date '+%Y-%m-%d %H:%M:%S')"
 bash scripts/experiments/05_run_one.sh "\$MATRIX" "\$TASK_INDEX"
 EOF
 
-echo "Wrote $SBATCH_FILE"
+log "Wrote $SBATCH_FILE"
 if command -v sbatch >/dev/null 2>&1; then
+  log "submitting $SBATCH_FILE"
   sbatch "$SBATCH_FILE"
 else
-  echo "sbatch not found; submit manually with: sbatch $SBATCH_FILE"
+  log "sbatch not found; submit manually with: sbatch $SBATCH_FILE"
 fi
