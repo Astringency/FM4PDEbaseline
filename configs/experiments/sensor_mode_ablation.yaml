@@ -13,7 +13,7 @@ baselines: [recfno, senseiver, voronoicnn, pde_opt]
 seeds: [1, 2, 3]
 train_size: 50000
 val_size: 0
-test_size: 1000
+test_size: 10000
 train_shards: 5
 num_sensors: 500
 sensor_modes: [random, fixed, grid]

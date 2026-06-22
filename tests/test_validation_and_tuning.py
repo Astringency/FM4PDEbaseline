@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from baselines.aggregate_results import main as aggregate_main
 from baselines.common.data_adapter import PDEBatchDataset, build_default_registry
 
@@ -30,6 +32,24 @@ def test_deterministic_train_tail_validation_is_not_test(tiny_data_root):
     assert isinstance(val, PDEBatchDataset)
     assert val.batch.metadata["split_source"] == "deterministic_train_subset"
     assert "test" not in val.batch.global_sample_ids[0].lower()
+    assert "test" in test.batch.file_paths[0].lower()
+
+
+def test_test_split_uses_available_samples_when_request_exceeds_file(tiny_data_root):
+    registry = build_default_registry()
+    with pytest.warns(RuntimeWarning, match="Requested 10000 samples but only loaded 3"):
+        test = registry.make_dataset(
+            "poisson",
+            tiny_data_root,
+            "forward",
+            split="test",
+            max_samples=10000,
+            data_loading_mode="eager",
+            strict_size=True,
+        )
+
+    assert len(test) == 3
+    assert test.batch.split == "test"
     assert "test" in test.batch.file_paths[0].lower()
 
 

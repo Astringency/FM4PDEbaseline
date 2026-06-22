@@ -11,7 +11,7 @@ baselines: [var4d, vivid, senseiver]
 seeds: [1, 2, 3]
 train_size: 50000
 val_size: 0
-test_size: 1000
+test_size: 10000
 train_shards: 5
 load_full_trajectory: true
 sensor_counts: [50, 100, 250, 500]

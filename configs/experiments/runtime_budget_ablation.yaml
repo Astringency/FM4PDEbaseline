@@ -11,7 +11,7 @@ baselines: [pinn_sparse, pc_bnn, pde_opt, var4d, vivid]
 seeds: [1, 2, 3]
 train_size: 50000
 val_size: 0
-test_size: 1000
+test_size: 10000
 train_shards: 5
 num_sensors: 500
 sensor_mode: random

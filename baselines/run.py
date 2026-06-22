@@ -84,7 +84,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--noise-level", type=float, default=0.0)
     parser.add_argument("--train-size", type=int, default=50000)
     parser.add_argument("--val-size", type=int, default=0)
-    parser.add_argument("--test-size", type=int, default=1000)
+    parser.add_argument("--test-size", type=int, default=10000)
     parser.add_argument("--train-shards", type=int, default=5)
     parser.add_argument("--test-split", choices=["test"], default="test")
     parser.add_argument("--batch-size", type=int, default=16)
@@ -794,7 +794,11 @@ def _make_split_dataset(
         data_loading_mode=args.data_loading_mode,
         load_full_trajectory=_split_load_full_trajectory(args, split),
         experiment_mode=args.experiment_mode,
-        strict_size=args.strict_size if strict_size_override is None else bool(strict_size_override),
+        strict_size=(
+            False
+            if split == "test"
+            else (args.strict_size if strict_size_override is None else bool(strict_size_override))
+        ),
     )
 
 

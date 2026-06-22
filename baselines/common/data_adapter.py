@@ -123,6 +123,7 @@ def _finalize_loaded_raw(raw: dict[str, Any], max_samples: int | None, strict_si
     raw.setdefault("metadata", {})
     raw.setdefault("pde_params", raw["metadata"].get("pde_params", {}))
     raw.setdefault("split", raw["metadata"].get("split", ""))
+    split = str(raw.get("split", raw["metadata"].get("split", "")))
     raw.setdefault("file_paths", raw["metadata"].get("files", []))
     raw.setdefault("sample_indices", raw["metadata"].get("sample_indices", torch.arange(n, dtype=torch.long)))
     raw.setdefault("global_sample_ids", raw["metadata"].get("global_sample_ids", []))
@@ -137,8 +138,8 @@ def _finalize_loaded_raw(raw: dict[str, Any], max_samples: int | None, strict_si
         bool(raw["full_tensor"].ndim == 5 or isinstance(raw["metadata"].get("full_trajectory"), torch.Tensor)),
     )
     if max_samples is not None and n < int(max_samples):
-        message = f"Requested {max_samples} samples but only loaded {n} from split={raw.get('split', raw['metadata'].get('split', 'unknown'))}."
-        if strict_size:
+        message = f"Requested {max_samples} samples but only loaded {n} from split={split or 'unknown'}."
+        if strict_size and split != "test":
             raise ValueError(message)
         warnings.warn(message, RuntimeWarning, stacklevel=2)
     return raw
