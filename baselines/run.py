@@ -7,6 +7,7 @@ import json
 import math
 import shutil
 import subprocess
+import sys
 import time
 import warnings
 from collections import Counter
@@ -110,6 +111,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--persistent-workers", dest="persistent_workers", action="store_true", default=None)
     parser.add_argument("--no-persistent-workers", dest="persistent_workers", action="store_false")
     parser.add_argument("--prefetch-factor", type=int, default=None)
+    parser.add_argument("--max-loaded-dataset-gb", type=float, default=None)
     parser.add_argument("--load-full-trajectory", action="store_true", help="Load full time trajectories when available instead of endpoint-only task tensors.")
     parser.add_argument("--physics-metric-mode", choices=["per_sample", "per_batch"], default=None)
     parser.add_argument("--strict-size", action="store_true", help="Fail if requested split size exceeds available samples.")
@@ -291,6 +293,11 @@ def main(argv: list[str] | None = None) -> None:
         use_sensors,
         synthetic_seed=args.seed * 1000 + 23,
     )
+    print_dataset_memory_summary("train", train_dataset_for_fit)
+    print_dataset_memory_summary("val", val_dataset)
+    print_dataset_memory_summary("test", test_dataset)
+    memory_fields = dataset_memory_result_fields(train_dataset_for_fit, val_dataset, test_dataset)
+    _check_loaded_dataset_memory_limit(args, memory_fields)
 
     train_loader = build_pde_dataloader(train_dataset_for_fit, args, shuffle=not is_per_instance)
     val_loader = build_pde_dataloader(val_dataset, args, shuffle=False) if val_dataset is not None else None
@@ -350,7 +357,7 @@ def main(argv: list[str] | None = None) -> None:
 
     normalization_stats_path = _write_normalization_stats(out_dir, run_prefix, model)
     normalization_fields = _normalization_fields(model, normalization_stats_path)
-    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields)
+    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields, memory_fields)
     config_hash = _file_sha1(config_snapshot)
     train_history_path = out_dir / f"{run_prefix}_train_history.json"
     train_history_payload = _json_safe(train_history)
@@ -381,6 +388,7 @@ def main(argv: list[str] | None = None) -> None:
         split_info=split_info,
         method_budget_fields=method_budget_fields,
         normalization_fields=normalization_fields,
+        memory_fields=memory_fields,
         config_hash=config_hash,
     )
     summary = _summarize_run(
@@ -396,6 +404,7 @@ def main(argv: list[str] | None = None) -> None:
         split_info,
         method_budget_fields,
         normalization_fields,
+        memory_fields,
         config_hash,
     )
     summary.update(
@@ -414,6 +423,7 @@ def main(argv: list[str] | None = None) -> None:
             "run_name": args.run_name,
             "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
             **_dataloader_fields(args),
+            **memory_fields,
             "epoch_log_path": str(out_dir / f"{run_prefix}_train_history.jsonl"),
             "train_history_jsonl_path": str(out_dir / f"{run_prefix}_train_history.jsonl"),
             "train_history": json.dumps(_json_safe(train_history)),
@@ -483,6 +493,10 @@ def _resolve_dataloader_args(args: argparse.Namespace, cfg: dict[str, Any]) -> N
         raise ValueError("--prefetch-factor must be > 0 when set")
     if args.num_workers == 0:
         args.persistent_workers = False
+    if args.max_loaded_dataset_gb is None and cfg.get("max_loaded_dataset_gb", None) is not None:
+        args.max_loaded_dataset_gb = float(cfg["max_loaded_dataset_gb"])
+    if args.max_loaded_dataset_gb is not None and float(args.max_loaded_dataset_gb) < 0:
+        raise ValueError("--max-loaded-dataset-gb must be >= 0 when set")
 
 
 def build_pde_dataloader(
@@ -519,6 +533,79 @@ def _dataloader_fields(args: argparse.Namespace) -> dict[str, Any]:
         "dataloader_persistent_workers": bool(getattr(args, "persistent_workers", False) and num_workers > 0),
         "dataloader_prefetch_factor": int(args.prefetch_factor) if num_workers > 0 and getattr(args, "prefetch_factor", None) is not None else 0,
     }
+
+
+def tensor_nbytes(tensor: Any) -> int:
+    if not isinstance(tensor, torch.Tensor):
+        return 0
+    return int(tensor.numel() * tensor.element_size())
+
+
+def dataset_tensor_memory_summary(dataset: PDEBatchDataset | None) -> dict[str, Any]:
+    if dataset is None:
+        return {
+            "samples": 0,
+            "full_tensor_gb": 0.0,
+            "input_fields_gb": 0.0,
+            "target_fields_gb": 0.0,
+            "tensor_memory_gb": 0.0,
+            "loaded_full_trajectory": False,
+            "data_loading_mode": "",
+        }
+    batch = dataset.batch
+    full_gb = tensor_nbytes(batch.full_tensor) / 1e9
+    input_gb = tensor_nbytes(batch.input_fields) / 1e9
+    target_gb = tensor_nbytes(batch.target_fields) / 1e9
+    return {
+        "samples": len(dataset),
+        "full_tensor_gb": full_gb,
+        "input_fields_gb": input_gb,
+        "target_fields_gb": target_gb,
+        "tensor_memory_gb": full_gb + input_gb + target_gb,
+        "loaded_full_trajectory": bool(getattr(dataset, "loaded_full_trajectory", _batch_loaded_full_trajectory(batch))),
+        "data_loading_mode": str(getattr(dataset, "data_loading_mode", batch.metadata.get("data_loading_mode", ""))),
+    }
+
+
+def print_dataset_memory_summary(name: str, dataset: PDEBatchDataset | None) -> None:
+    summary = dataset_tensor_memory_summary(dataset)
+    print(
+        f"[dataset memory] split={name} samples={summary['samples']} "
+        f"full_tensor={summary['full_tensor_gb']:.6g}GB "
+        f"input_fields={summary['input_fields_gb']:.6g}GB "
+        f"target_fields={summary['target_fields_gb']:.6g}GB "
+        f"loaded_full_trajectory={summary['loaded_full_trajectory']} "
+        f"data_loading_mode={summary['data_loading_mode']}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def dataset_memory_result_fields(
+    train_dataset: PDEBatchDataset,
+    val_dataset: PDEBatchDataset | None,
+    test_dataset: PDEBatchDataset,
+) -> dict[str, float]:
+    train = dataset_tensor_memory_summary(train_dataset)
+    val = dataset_tensor_memory_summary(val_dataset)
+    test = dataset_tensor_memory_summary(test_dataset)
+    return {
+        "train_tensor_memory_gb": float(train["tensor_memory_gb"]),
+        "val_tensor_memory_gb": float(val["tensor_memory_gb"]),
+        "test_tensor_memory_gb": float(test["tensor_memory_gb"]),
+        "train_full_tensor_memory_gb": float(train["full_tensor_gb"]),
+        "train_input_tensor_memory_gb": float(train["input_fields_gb"]),
+        "train_target_tensor_memory_gb": float(train["target_fields_gb"]),
+    }
+
+
+def _check_loaded_dataset_memory_limit(args: argparse.Namespace, fields: dict[str, float]) -> None:
+    total_gb = float(fields["train_tensor_memory_gb"] + fields["val_tensor_memory_gb"] + fields["test_tensor_memory_gb"])
+    limit = getattr(args, "max_loaded_dataset_gb", None)
+    if limit is not None and total_gb > float(limit):
+        raise RuntimeError(f"Loaded dataset tensor memory {total_gb:.6g}GB exceeds max_loaded_dataset_gb={float(limit):.6g}GB")
+    if limit is None:
+        print(f"[dataset memory] total_tensor_memory={total_gb:.6g}GB max_loaded_dataset_gb=None warning=limit_disabled", file=sys.stderr, flush=True)
 
 
 def _resolve_sensor_budget_mode(args: argparse.Namespace, cfg: dict[str, Any]) -> str:
@@ -729,6 +816,7 @@ def _evaluate_full_test_loader(
     split_info: dict[str, Any],
     method_budget_fields: dict[str, Any],
     normalization_fields: dict[str, Any],
+    memory_fields: dict[str, float],
     config_hash: str,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     model.eval()
@@ -779,6 +867,7 @@ def _evaluate_full_test_loader(
             "data_loading_mode": args.data_loading_mode,
             "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
             **_dataloader_fields(args),
+            **memory_fields,
             "load_full_trajectory": bool(args.load_full_trajectory),
             "loaded_full_trajectory": bool(_batch_loaded_full_trajectory(batch)),
             "train_size_requested": int(split_info["train_size_requested"]),
@@ -955,6 +1044,7 @@ def _summarize_run(
     split_info: dict[str, Any],
     method_budget_fields: dict[str, Any],
     normalization_fields: dict[str, Any],
+    memory_fields: dict[str, float],
     config_hash: str,
 ) -> dict[str, Any]:
     metric_keys = [
@@ -994,6 +1084,7 @@ def _summarize_run(
             "data_loading_mode": args.data_loading_mode,
             "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
             **_dataloader_fields(args),
+            **memory_fields,
             "load_full_trajectory": bool(args.load_full_trajectory),
         "loaded_full_trajectory": bool(getattr(test_dataset, "loaded_full_trajectory", _batch_loaded_full_trajectory(test_dataset.batch))),
         "train_size_requested": int(split_info["train_size_requested"]),
@@ -1552,6 +1643,7 @@ def _write_config_snapshot(
     method_budget_fields: dict[str, Any],
     capability_info: dict[str, Any],
     normalization_fields: dict[str, Any],
+    memory_fields: dict[str, float],
 ) -> Path:
     prefix = _run_file_prefix(args)
     path = out_dir / f"{prefix}_config.json"
@@ -1568,6 +1660,7 @@ def _write_config_snapshot(
         "data_loading_mode": args.data_loading_mode,
         "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
         **_dataloader_fields(args),
+        **memory_fields,
         "load_full_trajectory": bool(args.load_full_trajectory),
         "sensor_budget_mode": args.sensor_budget_mode,
         "normalization": normalization_fields,

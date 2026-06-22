@@ -1011,11 +1011,18 @@ def _natural_hdf5_key(value: str) -> tuple[int, int, str]:
 _REACTION_DIFFUSION_METADATA_KEYS = (
     "T",
     "final_time",
+    "total_time",
     "D_u",
+    "Du",
     "D_v",
+    "Dv",
     "k",
     "dx",
     "dy",
+    "x_left",
+    "x_right",
+    "y_bottom",
+    "y_top",
     "x_min",
     "x_max",
     "y_min",
@@ -1024,14 +1031,57 @@ _REACTION_DIFFUSION_METADATA_KEYS = (
     "y_range",
     "init_mode",
     "boundary_condition",
+    "boundary_condition_kind",
+    "bc",
     "sample_seed",
+    "seed",
 )
+
+
+_REACTION_DIFFUSION_ALIASES = {
+    "T": ("T", "total_time", "final_time"),
+    "D_u": ("D_u", "Du"),
+    "D_v": ("D_v", "Dv"),
+    "k": ("k",),
+    "dx": ("dx",),
+    "dy": ("dy",),
+    "x_left": ("x_left", "x_min"),
+    "x_right": ("x_right", "x_max"),
+    "y_bottom": ("y_bottom", "y_min"),
+    "y_top": ("y_top", "y_max"),
+    "init_mode": ("init_mode",),
+    "boundary_condition": ("boundary_condition", "boundary_condition_kind", "bc"),
+    "sample_seed": ("sample_seed", "seed"),
+}
 
 
 def _reaction_diffusion_sample_metadata(group: h5py.Group, file_attrs: dict[str, Any]) -> dict[str, Any]:
     attrs = dict(file_attrs)
     attrs.update(_h5_attrs_to_python(group))
-    return {key: attrs[key] for key in _REACTION_DIFFUSION_METADATA_KEYS if key in attrs}
+    return _reaction_diffusion_normalize_metadata(attrs)
+
+
+def _reaction_diffusion_normalize_metadata(attrs: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    filtered = {key: attrs[key] for key in _REACTION_DIFFUSION_METADATA_KEYS if key in attrs}
+    for canonical, aliases in _REACTION_DIFFUSION_ALIASES.items():
+        for alias in aliases:
+            if alias in filtered:
+                normalized[canonical] = _python_scalar(filtered[alias])
+                break
+    if "x_range" in filtered:
+        x_range = _python_scalar(filtered["x_range"])
+        if isinstance(x_range, (list, tuple)) and len(x_range) >= 2:
+            normalized.setdefault("x_left", x_range[0])
+            normalized.setdefault("x_right", x_range[1])
+    if "y_range" in filtered:
+        y_range = _python_scalar(filtered["y_range"])
+        if isinstance(y_range, (list, tuple)) and len(y_range) >= 2:
+            normalized.setdefault("y_bottom", y_range[0])
+            normalized.setdefault("y_top", y_range[1])
+    if "boundary_condition" in normalized:
+        normalized["bc"] = normalized["boundary_condition"]
+    return normalized
 
 
 def _sample_metadata_field(values: list[Any]) -> Any:

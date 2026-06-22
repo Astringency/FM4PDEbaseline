@@ -44,6 +44,15 @@ def test_main_results_config_covers_expected_pdes_and_resources():
     assert resources["vivid"]["refine_steps"] == 300
 
 
+def test_paper_baseline_config_uses_eager_multi_worker_loading():
+    cfg = yaml.safe_load((ROOT / "baselines" / "configs" / "paper.yaml").read_text(encoding="utf-8"))
+    assert cfg["data_loading_mode"] == "eager"
+    assert cfg["num_workers"] == 4
+    assert cfg["pin_memory"] is True
+    assert cfg["persistent_workers"] is True
+    assert cfg["prefetch_factor"] == 2
+
+
 def test_aggregate_script_finds_results_files(tmp_path: Path):
     out_root = tmp_path / "large"
     result_dir = out_root / "runs" / "main_results" / "task_group=full_forward_main" / "dummy"

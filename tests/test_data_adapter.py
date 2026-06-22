@@ -84,25 +84,29 @@ def test_reaction_diffusion_eager_uses_initial_endpoint_and_sample_specific_para
     path = rd / "reaction_diffusion-128-128-10_0.h5"
     rng = np.random.default_rng(9)
     with h5py.File(path, "w") as f:
-        f.attrs["D_u"] = 1e-3
-        f.attrs["D_v"] = 5e-3
+        f.attrs["Du"] = 0.10
+        f.attrs["Dv"] = 0.20
         f.attrs["k"] = 5e-3
-        f.attrs["T"] = 5.0
+        f.attrs["total_time"] = 7.0
         f.attrs["dx"] = 0.125
         f.attrs["dy"] = 0.125
-        f.attrs["x_range"] = np.asarray([-1.0, 1.0], dtype="float32")
-        f.attrs["y_range"] = np.asarray([-1.0, 1.0], dtype="float32")
         f.attrs["init_mode"] = "grf"
-        f.attrs["boundary_condition"] = "neumann"
+        f.attrs["bc"] = "periodic"
+        meta = f.create_group("metadata")
+        meta.attrs["x_range"] = np.asarray([-1.0, 1.0], dtype="float32")
+        meta.attrs["y_range"] = np.asarray([-2.0, 2.0], dtype="float32")
+        meta.attrs["boundary_condition_kind"] = "neumann"
         for i in range(3):
             data = rng.normal(size=(10, 8, 8, 2)).astype("float32")
             data[0, :, :, :] = float(i + 1)
             data[-1, :, :, :] = float(i + 11)
             g = f.create_group(str(i))
-            g.attrs["D_u"] = 0.01 + i
-            g.attrs["D_v"] = 0.02 + i
-            g.attrs["k"] = 0.03 + i
-            g.attrs["sample_seed"] = 100 + i
+            if i in {0, 2}:
+                g.attrs["D_u"] = 0.01 + i
+            if i in {1, 2}:
+                g.attrs["D_v"] = 0.02 + i
+                g.attrs["k"] = 0.03 + i
+            g.attrs["seed"] = 100 + i
             g["data"] = data
 
     registry = build_default_registry()
@@ -111,12 +115,20 @@ def test_reaction_diffusion_eager_uses_initial_endpoint_and_sample_specific_para
     assert raw["metadata"]["input_time_index"] == 0
     assert torch.allclose(raw["full_tensor"][:, 0], torch.tensor([1.0, 2.0, 3.0]).reshape(3, 1, 1).expand(3, 8, 8))
     assert torch.allclose(raw["full_tensor"][:, 2], torch.tensor([11.0, 12.0, 13.0]).reshape(3, 1, 1).expand(3, 8, 8))
-    assert torch.allclose(raw["pde_params"]["D_u"], torch.tensor([0.01, 1.01, 2.01], dtype=torch.float32))
-    assert torch.allclose(raw["pde_params"]["D_v"], torch.tensor([0.02, 1.02, 2.02], dtype=torch.float32))
-    assert torch.allclose(raw["pde_params"]["k"], torch.tensor([0.03, 1.03, 2.03], dtype=torch.float32))
-    assert torch.allclose(raw["metadata"]["sample_seed"], torch.tensor([100.0, 101.0, 102.0]))
-    assert raw["metadata"]["x_range"] == [-1.0, 1.0]
+    assert torch.allclose(raw["pde_params"]["D_u"], torch.tensor([0.01, 0.10, 2.01], dtype=torch.float32))
+    assert torch.allclose(raw["pde_params"]["D_v"], torch.tensor([0.20, 1.02, 2.02], dtype=torch.float32))
+    assert torch.allclose(raw["pde_params"]["k"], torch.tensor([0.005, 1.03, 2.03], dtype=torch.float32))
+    assert raw["pde_params"]["D_u"].dtype == torch.float32
+    assert raw["pde_params"]["D_u"].shape == (3,)
+    assert raw["metadata"]["T"] == pytest.approx(7.0)
+    assert raw["metadata"]["final_time"] == pytest.approx(7.0)
     assert raw["metadata"]["boundary_condition"] == "neumann"
+    assert raw["metadata"]["bc"] == "neumann"
+    assert raw["metadata"]["x_left"] == pytest.approx(-1.0)
+    assert raw["metadata"]["x_right"] == pytest.approx(1.0)
+    assert raw["metadata"]["y_bottom"] == pytest.approx(-2.0)
+    assert raw["metadata"]["y_top"] == pytest.approx(2.0)
+    assert torch.allclose(raw["metadata"]["sample_seed"], torch.tensor([100.0, 101.0, 102.0]))
 
     full = registry.load_raw("reaction_diffusion", tmp_path, split="train", max_samples=1, load_full_trajectory=True)
     batch = registry.make_task(full, "reaction_diffusion", "forward")
