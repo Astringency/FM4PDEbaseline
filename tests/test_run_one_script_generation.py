@@ -79,3 +79,17 @@ def test_run_one_generates_load_full_trajectory_for_time_varying(tmp_path: Path)
     )
     assert "--load-full-trajectory" in result.stdout
     assert "--sensor-mode time_varying" in result.stdout
+
+
+def test_2gpu_parallel_launcher_uses_row_override_and_existing_runner():
+    text = (ROOT / "scripts/experiments/08_run_matrix_2gpu_parallel.sh").read_text(encoding="utf-8")
+    for token in [
+        "CUDA_VISIBLE_DEVICES",
+        "ALLOW_ROW_OVERRIDE=1",
+        "NUM_WORKERS",
+        "PREFETCH_FACTOR",
+        "05_run_one.sh",
+        "xargs",
+        "JOBS_PER_GPU",
+    ]:
+        assert token in text
