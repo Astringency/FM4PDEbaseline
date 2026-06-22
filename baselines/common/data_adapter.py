@@ -1055,10 +1055,17 @@ _REACTION_DIFFUSION_ALIASES = {
 }
 
 
-def _reaction_diffusion_sample_metadata(group: h5py.Group, file_attrs: dict[str, Any]) -> dict[str, Any]:
-    attrs = dict(file_attrs)
-    attrs.update(_h5_attrs_to_python(group))
-    return _reaction_diffusion_normalize_metadata(attrs)
+def _reaction_diffusion_file_metadata(f: h5py.File) -> dict[str, Any]:
+    metadata = _reaction_diffusion_normalize_metadata(_h5_attrs_to_python(f))
+    if "metadata" in f and isinstance(f["metadata"], h5py.Group):
+        metadata.update(_reaction_diffusion_normalize_metadata(_h5_attrs_to_python(f["metadata"])))
+    return metadata
+
+
+def _reaction_diffusion_sample_metadata(group: h5py.Group, file_metadata: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(file_metadata)
+    metadata.update(_reaction_diffusion_normalize_metadata(_h5_attrs_to_python(group)))
+    return metadata
 
 
 def _reaction_diffusion_normalize_metadata(attrs: dict[str, Any]) -> dict[str, Any]:
@@ -1492,12 +1499,8 @@ def _load_reaction_diffusion(
     sample_meta_values: dict[str, list[Any]] = {}
     for path in files:
         with h5py.File(path, "r") as f:
-            file_attrs = _h5_attrs_to_python(f)
-            meta_extra.update({k: v for k, v in file_attrs.items() if k not in meta_extra})
-            if "metadata" in f and isinstance(f["metadata"], h5py.Group):
-                metadata_attrs = _h5_attrs_to_python(f["metadata"])
-                file_attrs.update(metadata_attrs)
-                meta_extra.update({k: v for k, v in metadata_attrs.items() if k not in meta_extra})
+            file_metadata = _reaction_diffusion_file_metadata(f)
+            meta_extra.update({k: v for k, v in file_metadata.items() if k not in meta_extra})
             if "t" in f:
                 meta_extra.setdefault("time_values", np.asarray(f["t"][:], dtype=np.float32).tolist())
             keys = _hdf5_sample_group_keys(f)
@@ -1508,7 +1511,7 @@ def _load_reaction_diffusion(
                     continue
                 group = f[key]
                 data = np.asarray(group["data"][:])
-                sample_meta = _reaction_diffusion_sample_metadata(group, file_attrs)
+                sample_meta = _reaction_diffusion_sample_metadata(group, file_metadata)
                 for meta_key, value in sample_meta.items():
                     sample_meta_values.setdefault(meta_key, []).append(value)
                 # raw [T,H,W,2] -> canonical [2,T,H,W]

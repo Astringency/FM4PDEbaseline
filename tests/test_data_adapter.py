@@ -90,6 +90,10 @@ def test_reaction_diffusion_eager_uses_initial_endpoint_and_sample_specific_para
         f.attrs["total_time"] = 7.0
         f.attrs["dx"] = 0.125
         f.attrs["dy"] = 0.125
+        f.attrs["x_min"] = -9.0
+        f.attrs["x_max"] = 9.0
+        f.attrs["y_min"] = -8.0
+        f.attrs["y_max"] = 8.0
         f.attrs["init_mode"] = "grf"
         f.attrs["bc"] = "periodic"
         meta = f.create_group("metadata")
