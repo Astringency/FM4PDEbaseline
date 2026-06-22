@@ -51,6 +51,14 @@ def tiny_data_root(tmp_path: Path) -> Path:
 
     rd = mkdir("reaction_diffusion")
     with h5py.File(rd / "reaction_diffusion-128-128-10_0.h5", "w") as f:
+        f.attrs["init_mode"] = "grf"
+        f.attrs["boundary_condition"] = "periodic"
+        f.attrs["dx"] = 1.0 / s
+        f.attrs["dy"] = 1.0 / s
+        f.attrs["D_u"] = 1e-3
+        f.attrs["D_v"] = 5e-3
+        f.attrs["k"] = 5e-3
+        f.attrs["T"] = 5.0
         for i in range(n):
             g = f.create_group(str(i))
             g["data"] = rng.normal(size=(10, s, s, 2)).astype("float32")

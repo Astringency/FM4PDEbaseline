@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from baselines.aggregate_results import main as aggregate_main
-from baselines.common.data_adapter import LazyPDEBatchDataset, build_default_registry
+from baselines.common.data_adapter import PDEBatchDataset, build_default_registry
 
 
 def test_deterministic_train_tail_validation_is_not_test(tiny_data_root):
@@ -16,7 +16,7 @@ def test_deterministic_train_tail_validation_is_not_test(tiny_data_root):
         split="val",
         max_samples=1,
         val_from_train_offset=2,
-        data_loading_mode="lazy",
+        data_loading_mode="eager",
         strict_size=True,
     )
     test = registry.make_dataset(
@@ -25,9 +25,9 @@ def test_deterministic_train_tail_validation_is_not_test(tiny_data_root):
         "forward",
         split="test",
         max_samples=1,
-        data_loading_mode="lazy",
+        data_loading_mode="eager",
     )
-    assert isinstance(val, LazyPDEBatchDataset)
+    assert isinstance(val, PDEBatchDataset)
     assert val.batch.metadata["split_source"] == "deterministic_train_subset"
     assert "test" not in val.batch.global_sample_ids[0].lower()
     assert "test" in test.batch.file_paths[0].lower()

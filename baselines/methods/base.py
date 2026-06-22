@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import json
+import sys
+import time
 import warnings
 from collections import OrderedDict
 from pathlib import Path
@@ -283,12 +286,31 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
     lr = float(model.config.get("lr", 1e-3))
     max_steps = model.config.get("max_steps")
     max_val_steps = model.config.get("max_val_steps")
+    log_interval = int(model.config.get("log_interval") or 0)
     normalize = bool(model.config.get("normalize", False))
     if normalize and model.normalization_stats is None:
+        max_norm_batches = model.config.get("normalization_max_batches")
+        scope = "entire train_loader" if max_norm_batches is None else f"max_batches={max_norm_batches}"
+        print(
+            f"[normalization] baseline={model.name} pde={model.data_spec.get('pde', '')} "
+            f"task={model.data_spec.get('task', '')} start scope={scope}",
+            file=sys.stderr,
+            flush=True,
+        )
         model.normalization_stats = estimate_normalization_stats(
             train_loader,
-            max_batches=model.config.get("normalization_max_batches"),
+            max_batches=max_norm_batches,
             eps=float(model.config.get("normalization_eps", 1e-6)),
+        )
+        stats = model.normalization_stats.json_summary()
+        print(
+            f"[normalization] baseline={model.name} pde={model.data_spec.get('pde', '')} "
+            f"task={model.data_spec.get('task', '')} done num_batches={stats['num_batches']} "
+            f"num_samples={stats['num_samples']} input_mean={_compact_float_list(stats['input_mean'])} "
+            f"input_std={_compact_float_list(stats['input_std'])} target_mean={_compact_float_list(stats['target_mean'])} "
+            f"target_std={_compact_float_list(stats['target_std'])}",
+            file=sys.stderr,
+            flush=True,
         )
     model.uses_normalization = bool(normalize and model.normalization_stats is not None)
     model.to(device)
@@ -304,14 +326,18 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
     }
     best_state = None
     best_val = None
+    cumulative_train_time = 0.0
     for epoch in range(epochs):
+        epoch_start = time.perf_counter()
         model.train()
         total = 0.0
         count = 0
+        train_samples = 0
         for step, batch in enumerate(train_loader):
             if max_steps is not None and step >= int(max_steps):
                 break
             batch = _to_device_batch(batch, device)
+            train_samples += int(batch.input_fields.shape[0])
             if model.uses_normalization and model.normalization_stats is not None:
                 batch = normalize_batch_input_target(batch, model.normalization_stats)
             target = batch.target_fields
@@ -322,11 +348,22 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
             opt.step()
             total += float(loss.detach().cpu())
             count += 1
+            if log_interval > 0 and (step + 1) % log_interval == 0:
+                running = total / max(count, 1)
+                print(
+                    f"[fit step] baseline={model.name} pde={model.data_spec.get('pde', '')} "
+                    f"task={model.data_spec.get('task', '')} epoch={epoch + 1}/{epochs} "
+                    f"step={step + 1}/{_safe_len(train_loader)} batch_loss={float(loss.detach().cpu()):.6g} "
+                    f"running_train_loss={running:.6g} device={device}{_cuda_mem_text(device)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         history["train_loss"].append(total / max(count, 1))
+        val_loss = None
+        val_count = 0
         if val_loader is not None:
             model.eval()
             val_total = 0.0
-            val_count = 0
             with torch.no_grad():
                 for step, batch in enumerate(val_loader):
                     if max_val_steps is not None and step >= int(max_val_steps):
@@ -341,12 +378,78 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
             history["val_loss"].append(val_loss)
             if best_val is None or val_loss < best_val:
                 best_val = val_loss
-                history["best_epoch"] = epoch
+                history["best_epoch"] = epoch + 1
                 history["best_val_loss"] = val_loss
                 best_state = snapshot_state_dict(model)
+        epoch_time = time.perf_counter() - epoch_start
+        cumulative_train_time += epoch_time
+        samples_per_sec = train_samples / max(epoch_time, 1e-12)
+        _write_incremental_history(model.config, history, epoch + 1)
+        print(
+            f"[fit epoch] baseline={model.name} pde={model.data_spec.get('pde', '')} "
+            f"task={model.data_spec.get('task', '')} epoch={epoch + 1}/{epochs} "
+            f"train_loss={history['train_loss'][-1]:.6g} val_loss={_fmt_optional(val_loss)} "
+            f"best_val_loss={_fmt_optional(history['best_val_loss'])} best_epoch={history['best_epoch']} "
+            f"epoch_time_sec={epoch_time:.3f} cumulative_train_time_sec={cumulative_train_time:.3f} "
+            f"train_steps={count} val_steps={val_count} samples_per_sec={samples_per_sec:.3f} "
+            f"lr={opt.param_groups[0]['lr']:.3e} device={device}{_cuda_mem_text(device)}",
+            file=sys.stderr,
+            flush=True,
+        )
     if best_state is not None:
         restore_state_dict(model, best_state)
     return history
+
+
+def _write_incremental_history(config: dict[str, Any], history: dict[str, Any], epoch: int) -> None:
+    json_path = config.get("train_history_json_path")
+    jsonl_path = config.get("train_history_jsonl_path")
+    payload = _history_json_safe(history)
+    payload["completed_epochs"] = epoch
+    if json_path:
+        path = Path(str(json_path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if jsonl_path:
+        path = Path(str(jsonl_path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"epoch": epoch, **payload}) + "\n")
+
+
+def _history_json_safe(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, dict):
+        return {str(k): _history_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_history_json_safe(v) for v in value]
+    return value
+
+
+def _fmt_optional(value: Any) -> str:
+    return "nan" if value is None else f"{float(value):.6g}"
+
+
+def _safe_len(loader) -> int | str:
+    try:
+        return len(loader)
+    except TypeError:
+        return "?"
+
+
+def _cuda_mem_text(device: torch.device) -> str:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return ""
+    idx = device.index if device.index is not None else torch.cuda.current_device()
+    alloc = torch.cuda.memory_allocated(idx) / (1024**3)
+    reserved = torch.cuda.memory_reserved(idx) / (1024**3)
+    return f" cuda_mem_alloc={alloc:.3f}GB cuda_mem_reserved={reserved:.3f}GB"
+
+
+def _compact_float_list(values: list[float], limit: int = 4) -> str:
+    shown = ",".join(f"{float(v):.4g}" for v in values[:limit])
+    return f"[{shown}{',...' if len(values) > limit else ''}]"
 
 
 def _to_device_batch(batch: PDEBatch, device: torch.device) -> PDEBatch:

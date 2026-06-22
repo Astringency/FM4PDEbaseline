@@ -106,6 +106,10 @@ HASH_FIELDS = [
     "particles",
     "scalar_param_mode",
     "data_loading_mode",
+    "num_workers",
+    "pin_memory",
+    "persistent_workers",
+    "prefetch_factor",
     "load_full_trajectory",
 ]
 
@@ -381,7 +385,11 @@ def _global_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
         "sensor_modes": _env_list("SENSOR_MODES", _first_present(cfg, ["sensor_modes", "sensor_mode"], ["random"]), str),
         "noise_levels": _env_list("NOISE_LEVELS", _first_present(cfg, ["noise_levels", "noise_level"], [0.0]), float),
         "train_sizes": _env_list("TRAIN_SIZES", cfg.get("train_sizes", [train_size]), int),
-        "data_loading_mode": os.environ.get("DATA_LOADING_MODE", str(cfg.get("data_loading_mode", "lazy"))),
+        "data_loading_mode": str(cfg.get("data_loading_mode", "eager")),
+        "num_workers": _env_int("NUM_WORKERS", int(cfg.get("num_workers", 4))),
+        "pin_memory": _env_bool("PIN_MEMORY", bool(cfg.get("pin_memory", True))),
+        "persistent_workers": _env_bool("PERSISTENT_WORKERS", bool(cfg.get("persistent_workers", True))),
+        "prefetch_factor": _env_int("PREFETCH_FACTOR", int(cfg.get("prefetch_factor", 2))),
         "device": os.environ.get("DEVICE", str(cfg.get("device", "cuda"))),
         "config": str(cfg.get("config", "baselines/configs/paper.yaml")),
         "scalar_param_mode": os.environ.get("SCALAR_PARAM_MODE", ""),
@@ -651,6 +659,10 @@ def _make_run_row(
         "noise_level": float(noise_level),
         "scalar_param_mode": scalar_param_mode,
         "data_loading_mode": defaults["data_loading_mode"],
+        "num_workers": int(defaults["num_workers"]),
+        "pin_memory": bool(defaults["pin_memory"]),
+        "persistent_workers": bool(defaults["persistent_workers"]),
+        "prefetch_factor": int(defaults["prefetch_factor"]),
         "load_full_trajectory": load_full_trajectory,
         "batch_size": batch_size,
         "epochs": epochs,
@@ -821,6 +833,10 @@ def _skipped_matrix_row(skip: dict[str, Any], defaults: dict[str, Any], output_r
             "noise_level": 0.0,
             "scalar_param_mode": "metadata",
             "data_loading_mode": defaults["data_loading_mode"],
+            "num_workers": int(defaults["num_workers"]),
+            "pin_memory": bool(defaults["pin_memory"]),
+            "persistent_workers": bool(defaults["persistent_workers"]),
+            "prefetch_factor": int(defaults["prefetch_factor"]),
             "load_full_trajectory": False,
             "batch_size": 0,
             "epochs": 0,
@@ -969,6 +985,13 @@ def _as_list(value: Any) -> list[Any]:
 def _env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     return int(value) if value not in {None, ""} else int(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value in {None, ""}:
+        return bool(default)
+    return str(value).lower() in {"1", "true", "yes", "on"}
 
 
 def _env_list(name: str, default: Any, caster) -> list[Any]:

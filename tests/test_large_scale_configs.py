@@ -27,6 +27,11 @@ ALL_PDES = {
 def test_main_results_config_covers_expected_pdes_and_resources():
     cfg = yaml.safe_load((ROOT / "configs" / "experiments" / "main_results.yaml").read_text(encoding="utf-8"))
     assert set(cfg["pdes"]) == ALL_PDES
+    assert cfg["data_loading_mode"] == "eager"
+    assert cfg["num_workers"] == 4
+    assert cfg["pin_memory"] is True
+    assert cfg["persistent_workers"] is True
+    assert cfg["prefetch_factor"] == 2
     assert "DiffusionPDE" not in cfg["pdes"]
     assert "fm4pde" not in json.dumps(cfg).lower()
     resources = cfg["resources"]

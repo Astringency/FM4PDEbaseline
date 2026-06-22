@@ -19,7 +19,11 @@ train_shards: 5
 sensor_counts: [25, 50, 100, 250, 500, 1000]
 sensor_mode: random
 noise_level: 0.0
-data_loading_mode: lazy
+data_loading_mode: eager
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
 device: cuda
 task_groups: [sensor_count_ablation]
 resources:

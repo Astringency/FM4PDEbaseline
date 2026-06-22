@@ -8,7 +8,11 @@ train_size: 128
 val_size: 0
 test_size: 16
 train_shards: 5
-data_loading_mode: lazy
+data_loading_mode: eager
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
 device: cuda
 task_groups:
   - full_forward_main

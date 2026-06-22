@@ -29,6 +29,11 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
     run_ids = [row["run_id"] for row in rows]
     assert len(run_ids) == len(set(run_ids))
     assert {row["val_size"] for row in rows} == {1000}
+    assert {row["data_loading_mode"] for row in rows} == {"eager"}
+    assert {row["num_workers"] for row in rows} == {4}
+    assert {row["pin_memory"] for row in rows} == {True}
+    assert {row["persistent_workers"] for row in rows} == {True}
+    assert {row["prefetch_factor"] for row in rows} == {2}
     assert set(summary["by_task_group"]) == {
         "full_forward_main",
         "full_inverse_main",

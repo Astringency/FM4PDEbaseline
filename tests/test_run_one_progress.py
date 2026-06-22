@@ -25,7 +25,7 @@ def _row(tmp_path: Path, run_id: str = "progress_run") -> dict:
         "sensor_mode": "random",
         "noise_level": 0.0,
         "scalar_param_mode": "metadata",
-        "data_loading_mode": "lazy",
+        "data_loading_mode": "eager",
         "load_full_trajectory": False,
         "batch_size": 1,
         "epochs": 1,

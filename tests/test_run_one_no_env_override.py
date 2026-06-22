@@ -32,7 +32,7 @@ def _row(tmp_path: Path) -> dict:
         "sensor_mode": "random",
         "noise_level": 0.05,
         "scalar_param_mode": "metadata",
-        "data_loading_mode": "lazy",
+        "data_loading_mode": "eager",
         "load_full_trajectory": False,
         "batch_size": 1,
         "epochs": 1,
@@ -77,10 +77,11 @@ def _printed_args(tmp_path: Path, env_updates: dict[str, str]):
 
 
 def test_run_one_uses_matrix_row_by_default_even_when_env_has_design_values(tmp_path: Path):
-    args = _printed_args(tmp_path, {"ALLOW_ROW_OVERRIDE": ""})
+    args = _printed_args(tmp_path, {"ALLOW_ROW_OVERRIDE": "", "DATA_LOADING_MODE": "lazy"})
     assert args.train_size == 500
     assert args.noise_level == 0.05
     assert args.steps == 50
+    assert args.data_loading_mode == "eager"
     assert args.experiment_kind == "ablation"
     assert args.ablation_factor == "runtime_budget"
     assert args.task_group == "runtime_budget_ablation"

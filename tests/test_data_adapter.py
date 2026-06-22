@@ -68,7 +68,17 @@ def test_future_hdf5_materialize_scalar_params_only_when_requested(tiny_data_roo
     assert torch.allclose(batch.input_fields[:, 1], batch.pde_params["alpha"].reshape(-1, 1, 1).expand_as(batch.input_fields[:, 1]))
 
 
-def test_reaction_diffusion_grf_shard_name_supported_in_lazy_mode(tmp_path):
+def test_reaction_diffusion_eager_preserves_physical_metadata(tiny_data_root):
+    registry = build_default_registry()
+    raw = registry.load_raw("reaction_diffusion", tiny_data_root, split="train", max_samples=2)
+    batch = registry.make_task(raw, "reaction_diffusion", "forward")
+    for key in ("init_mode", "boundary_condition", "dx", "dy", "D_u", "D_v", "k", "T"):
+        assert key in batch.metadata
+    assert batch.metadata["bc"] == "periodic"
+    assert set(batch.pde_params) == {"D_u", "D_v", "k"}
+
+
+def test_reaction_diffusion_grf_shard_name_supported_in_eager_mode(tmp_path):
     rd = tmp_path / "reaction_diffusion"
     rd.mkdir()
     path = rd / "reaction_diffusion_grf_50000-128-128-T1-steps10_shard000.h5"
@@ -100,16 +110,16 @@ def test_reaction_diffusion_grf_shard_name_supported_in_lazy_mode(tmp_path):
         split="train",
         max_samples=2,
         train_shards=1,
-        data_loading_mode="lazy",
+        data_loading_mode="eager",
         load_full_trajectory=False,
         num_sensors=4,
         seed=5,
     )
 
     assert len(dataset) == 2
-    assert dataset.file_paths == [str(path)]
-    assert dataset.batch.metadata["data_loading_mode"] == "lazy"
-    assert dataset.batch.full_tensor.shape == (1, 4, 8, 8)
+    assert dataset.batch.file_paths == [str(path)]
+    assert dataset.batch.metadata["data_loading_mode"] == "eager"
+    assert dataset.batch.full_tensor.shape == (2, 4, 8, 8)
 
 
 def test_train_val_test_are_distinct_splits(tiny_data_root):

@@ -17,7 +17,35 @@ def test_run_supervised_fit_handles_non_tensor_state_dict_entries():
     with pytest.warns(RuntimeWarning, match="Non-tensor keys skipped"):
         history = run_supervised_fit(model, loader, loader)
 
-    assert history["best_epoch"] == 0
+    assert history["best_epoch"] == 1
+    assert history["best_val_loss"] is not None
+
+
+def test_run_supervised_fit_logs_epochs_and_incremental_history(tmp_path, capsys):
+    history_json = tmp_path / "run_train_history.json"
+    history_jsonl = tmp_path / "run_train_history.jsonl"
+    model = _StrictRecordingModel().build(
+        {
+            "epochs": 2,
+            "lr": 0.01,
+            "train_history_json_path": str(history_json),
+            "train_history_jsonl_path": str(history_jsonl),
+        },
+        {"pde": "poisson", "task": "forward"},
+    )
+    loader = _loader()
+
+    history = run_supervised_fit(model, loader, loader)
+    captured = capsys.readouterr()
+
+    assert "[fit epoch]" in captured.err
+    assert "epoch=1/2" in captured.err
+    assert "epoch=2/2" in captured.err
+    assert "train_loss=" in captured.err
+    assert "val_loss=" in captured.err
+    assert history_json.exists()
+    assert history_jsonl.exists()
+    assert len(history_jsonl.read_text(encoding="utf-8").strip().splitlines()) == 2
     assert history["best_val_loss"] is not None
 
 

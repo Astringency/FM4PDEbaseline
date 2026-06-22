@@ -108,6 +108,10 @@ def build_command(row: dict[str, Any]) -> list[str]:
         os.environ.get("DEVICE", str(row["device"])),
         "--data-loading-mode",
         str(values["data_loading_mode"]),
+        "--num-workers",
+        str(values["num_workers"]),
+        "--prefetch-factor",
+        str(values["prefetch_factor"]),
         "--scalar-param-mode",
         str(values["scalar_param_mode"]),
         "--output-dir",
@@ -136,6 +140,8 @@ def build_command(row: dict[str, Any]) -> list[str]:
         )
     if _as_bool(row.get("load_full_trajectory", False)):
         cmd.append("--load-full-trajectory")
+    cmd.append("--pin-memory" if _as_bool(values["pin_memory"]) else "--no-pin-memory")
+    cmd.append("--persistent-workers" if _as_bool(values["persistent_workers"]) else "--no-persistent-workers")
 
     steps = int(values["steps"])
     refine_steps = int(values["refine_steps"])
@@ -165,6 +171,10 @@ def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
         "epochs": row_value(row, "epochs", "EPOCHS", allow_override),
         "scalar_param_mode": row_value(row, "scalar_param_mode", "SCALAR_PARAM_MODE", allow_override),
         "data_loading_mode": row_value(row, "data_loading_mode", "DATA_LOADING_MODE", allow_override),
+        "num_workers": row_value_default(row, "num_workers", 4, "NUM_WORKERS", allow_override),
+        "pin_memory": row_value_default(row, "pin_memory", True, "PIN_MEMORY", allow_override),
+        "persistent_workers": row_value_default(row, "persistent_workers", True, "PERSISTENT_WORKERS", allow_override),
+        "prefetch_factor": row_value_default(row, "prefetch_factor", 2, "PREFETCH_FACTOR", allow_override),
         "num_sensors": row_value(row, "num_sensors", "NUM_SENSORS", allow_override),
         "sensor_mode": row_value(row, "sensor_mode", "SENSOR_MODE", allow_override),
         "noise_level": row_value(row, "noise_level", "NOISE_LEVEL", allow_override),
@@ -407,6 +417,12 @@ def row_value(row: dict[str, Any], key: str, env_name: str | None = None, allow_
     if allow_override and env_name and os.environ.get(env_name) not in {None, ""}:
         return os.environ[env_name]
     return row[key]
+
+
+def row_value_default(row: dict[str, Any], key: str, default: Any, env_name: str | None = None, allow_override: bool = False) -> Any:
+    if allow_override and env_name and os.environ.get(env_name) not in {None, ""}:
+        return os.environ[env_name]
+    return row.get(key, default)
 
 
 def _method_steps(row: dict[str, Any], allow_override: bool) -> int:

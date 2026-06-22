@@ -50,28 +50,6 @@ class PDESpec:
     notes: str = ""
 
 
-@dataclass(frozen=True)
-class LazySampleRef:
-    path: Path
-    local_index: int
-    global_index: int
-    key: str | None = None
-
-
-LAZY_PDES = {
-    "darcy",
-    "poisson",
-    "helmholtz",
-    "nsnonbounded",
-    "reaction_diffusion",
-    "shallow_water",
-    "heat",
-    "wave",
-    "advection_diffusion",
-    "steady_heat_conduction",
-}
-
-
 def _as_float_tensor(array: np.ndarray) -> torch.Tensor:
     return torch.as_tensor(np.asarray(array), dtype=torch.float32)
 
@@ -455,31 +433,14 @@ class PDEDataRegistry:
     ) -> Dataset:
         if data_loading_mode not in {"eager", "lazy"}:
             raise ValueError(f"data_loading_mode must be eager or lazy, got {data_loading_mode!r}")
-        spec = self.get(pde_name)
-        if data_loading_mode == "lazy" and spec.name in LAZY_PDES:
-            try:
-                return self.make_lazy_dataset(
-                    pde_name,
-                    data_root,
-                    task,
-                    split=split,
-                    max_samples=max_samples,
-                    train_shards=train_shards,
-                    sample_offset=sample_offset,
-                    val_from_train_offset=val_from_train_offset,
-                    num_sensors=num_sensors,
-                    sensor_mode=sensor_mode,
-                    sensor_budget_mode=sensor_budget_mode,
-                    noise_level=noise_level,
-                    seed=seed,
-                    prefer_test=prefer_test,
-                    scalar_param_mode=scalar_param_mode,
-                    load_full_trajectory=load_full_trajectory,
-                    experiment_mode=experiment_mode,
-                    strict_size=strict_size,
-                )
-            except NotImplementedError:
-                pass
+        if data_loading_mode == "lazy":
+            message = (
+                "data_loading_mode='lazy' is disabled because per-sample file reads make paper baselines "
+                "I/O-bound. Regenerate experiment matrices with data_loading_mode='eager'."
+            )
+            if experiment_mode == "paper":
+                raise ValueError(message)
+            warnings.warn(message + " Forcing eager loading for this non-paper run.", RuntimeWarning, stacklevel=2)
         raw = self.load_raw(
             pde_name,
             data_root,
@@ -508,56 +469,6 @@ class PDEDataRegistry:
             experiment_mode=experiment_mode,
         )
         return PDEBatchDataset(batch)
-
-    def make_lazy_dataset(
-        self,
-        pde_name: str,
-        data_root: str | Path,
-        task: str,
-        split: str = "train",
-        max_samples: int | None = None,
-        train_shards: int = 5,
-        sample_offset: int = 0,
-        val_from_train_offset: int | None = None,
-        num_sensors: int | None = None,
-        sensor_mode: str = "random",
-        sensor_budget_mode: str = "per_time",
-        noise_level: float = 0.0,
-        seed: int = 0,
-        prefer_test: bool = False,
-        scalar_param_mode: str = "metadata",
-        load_full_trajectory: bool = False,
-        experiment_mode: str = "debug",
-        strict_size: bool = False,
-    ) -> "LazyPDEBatchDataset":
-        refs, meta = _build_lazy_refs(
-            self.get(pde_name).name,
-            Path(data_root),
-            split=split,
-            max_samples=max_samples,
-            train_shards=train_shards,
-            sample_offset=sample_offset,
-            val_from_train_offset=val_from_train_offset,
-            prefer_test=prefer_test,
-            strict_size=strict_size,
-        )
-        return LazyPDEBatchDataset(
-            registry=self,
-            pde_name=self.get(pde_name).name,
-            task=task,
-            refs=refs,
-            split=_validate_split(split),
-            file_paths=meta["file_paths"],
-            num_sensors=num_sensors,
-            sensor_mode=sensor_mode,
-            sensor_budget_mode=sensor_budget_mode,
-            noise_level=noise_level,
-            seed=seed,
-            scalar_param_mode=scalar_param_mode,
-            load_full_trajectory=load_full_trajectory,
-            experiment_mode=experiment_mode,
-            metadata=meta,
-        )
 
     def synthetic_raw(
         self,
@@ -873,95 +784,6 @@ class PDEBatchDataset(Dataset):
         return slice_pde_batch(self.batch, index)
 
 
-class LazyPDEBatchDataset(Dataset):
-    def __init__(
-        self,
-        registry: PDEDataRegistry,
-        pde_name: str,
-        task: str,
-        refs: list[LazySampleRef],
-        split: str,
-        file_paths: list[str],
-        num_sensors: int | None,
-        sensor_mode: str,
-        sensor_budget_mode: str,
-        noise_level: float,
-        seed: int,
-        scalar_param_mode: str,
-        load_full_trajectory: bool,
-        experiment_mode: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        if not refs:
-            raise ValueError(f"Lazy dataset for {pde_name}/{split} has no samples")
-        self.registry = registry
-        self.pde_name = pde_name
-        self.task = task
-        self.refs = refs
-        self.split = split
-        self.file_paths = file_paths
-        self.num_sensors = num_sensors
-        self.sensor_mode = sensor_mode
-        self.sensor_budget_mode = sensor_budget_mode
-        self.noise_level = float(noise_level)
-        self.seed = int(seed)
-        self.scalar_param_mode = scalar_param_mode
-        self.load_full_trajectory = bool(load_full_trajectory)
-        self.experiment_mode = experiment_mode
-        self.metadata = dict(metadata or {})
-        self.data_loading_mode = "lazy"
-        self.loaded_in_memory_samples = 0
-        self.loaded_full_trajectory = bool(load_full_trajectory)
-        self.samples_read = 0
-        self._prototype: PDEBatch | None = None
-
-    def __len__(self) -> int:
-        return len(self.refs)
-
-    @property
-    def batch(self) -> PDEBatch:
-        if self._prototype is None:
-            self._prototype = self[0]
-            self._prototype.file_paths = list(self.file_paths)
-            self._prototype.metadata.update(
-                {
-                    "lazy_dataset_total_samples": len(self.refs),
-                    "files": list(self.file_paths),
-                    "data_loading_mode": "lazy",
-                    "train_size_loaded_in_memory": 0,
-                }
-            )
-        return self._prototype
-
-    def __getitem__(self, index: int) -> PDEBatch:
-        if index < 0:
-            index += len(self.refs)
-        if index < 0 or index >= len(self.refs):
-            raise IndexError(index)
-        ref = self.refs[index]
-        raw = _read_lazy_raw_sample(
-            self.pde_name,
-            ref,
-            split=self.split,
-            scalar_param_mode=self.scalar_param_mode,
-            load_full_trajectory=self.load_full_trajectory,
-            file_paths=self.file_paths,
-            dataset_metadata=self.metadata,
-        )
-        self.samples_read += 1
-        return self.registry.make_task(
-            raw,
-            self.pde_name,
-            self.task,
-            num_sensors=self.num_sensors,
-            sensor_mode=self.sensor_mode,
-            sensor_budget_mode=self.sensor_budget_mode,
-            noise_level=self.noise_level,
-            seed=self.seed,
-            experiment_mode=self.experiment_mode,
-        )
-
-
 def slice_pde_batch(batch: PDEBatch, index: int) -> PDEBatch:
     sl = slice(index, index + 1)
     metadata = _slice_metadata(batch.metadata, sl, batch.full_tensor.shape[0])
@@ -1154,113 +976,6 @@ def _filter_nsnonbounded_test_files(files: list[Path]) -> list[Path]:
     return legal
 
 
-def _build_lazy_refs(
-    pde: str,
-    root: Path,
-    split: str,
-    max_samples: int | None,
-    train_shards: int,
-    sample_offset: int,
-    val_from_train_offset: int | None,
-    prefer_test: bool,
-    strict_size: bool,
-) -> tuple[list[LazySampleRef], dict[str, Any]]:
-    split = _validate_split(split)
-    active_split = "test" if prefer_test else split
-    offset = max(int(sample_offset), 0)
-    split_source = "independent_val" if split == "val" else split
-    if split == "val" and val_from_train_offset is not None:
-        active_split = "train"
-        offset = int(val_from_train_offset)
-        split_source = "deterministic_train_subset"
-    initial_offset = int(offset)
-    files = _lazy_candidate_files(root, pde, active_split, train_shards)
-    if not files:
-        raise _missing_error(root, pde, active_split, _lazy_patterns(pde, active_split))
-    refs: list[LazySampleRef] = []
-    skip = offset
-    remaining = max_samples
-    seen = 0
-    for path in files:
-        sample_keys = _lazy_group_keys(path, pde)
-        n_total = len(sample_keys) if sample_keys is not None else _lazy_dense_count(path, pde)
-        if skip >= n_total:
-            skip -= n_total
-            seen += n_total
-            continue
-        local_start = skip
-        n = n_total - local_start if remaining is None else min(int(remaining), n_total - local_start)
-        for j in range(n):
-            local = local_start + j
-            refs.append(LazySampleRef(path=path, local_index=local, global_index=seen + local, key=sample_keys[local] if sample_keys else None))
-        skip = 0
-        seen += n_total
-        if remaining is not None:
-            remaining -= n
-            if remaining <= 0:
-                break
-    if max_samples is not None and len(refs) < int(max_samples):
-        message = f"Requested {max_samples} samples but indexed {len(refs)} lazily from split={split}."
-        if strict_size:
-            raise ValueError(message)
-        warnings.warn(message, RuntimeWarning, stacklevel=2)
-    if not refs:
-        raise FileNotFoundError(f"No lazy samples indexed for PDE '{pde}' from files: {[str(p) for p in files]}")
-    meta = {
-        "files": [str(p) for p in files],
-        "file_paths": [str(p) for p in files],
-        "split": split,
-        "active_split": active_split,
-        "split_source": split_source,
-        "available_count": len(refs),
-        "loaded_count": len(refs),
-        "data_loading_mode": "lazy",
-        "train_size_loaded_in_memory": 0,
-    }
-    if split_source == "deterministic_train_subset":
-        meta["val_from_train_offset"] = initial_offset
-    return refs, meta
-
-
-def _lazy_patterns(pde: str, split: str) -> list[str]:
-    if pde == "nsnonbounded":
-        if split == "test":
-            return [
-                "nsnonbounded_test_*-128-128-10*.mat",
-                "nsnonbounded_1000-128-128-10*.mat",
-                "nsnonbounded_10000-128-128-10_test*.mat",
-                "nsnonbounded_*_test*.mat",
-            ]
-        if split == "val":
-            return ["nsnonbounded_val_*-128-128-10_*.mat", "nsnonbounded_*-128-128-10_val*.mat"]
-        return ["nsnonbounded_10000-128-128-10_*_new.mat"]
-    if pde == "reaction_diffusion":
-        return _reaction_diffusion_patterns(split)
-    if pde == "shallow_water":
-        if split == "test":
-            return ["swe_test_*-128-128-*.h5", "2d_swe_test*.h5"]
-        if split == "val":
-            return ["swe_val_*-128-128-*.h5", "2d_swe_val*.h5"]
-        return ["2d_swe_128_128_10_*.h5"]
-    if pde in {"heat", "wave", "advection_diffusion", "steady_heat_conduction"}:
-        return _future_patterns(pde, split)
-    if pde in {"darcy", "poisson", "helmholtz"}:
-        return _static_patterns(pde, split)
-    raise NotImplementedError(f"Lazy loading is not implemented for {pde}")
-
-
-def _lazy_candidate_files(root: Path, pde: str, active_split: str, train_shards: int) -> list[Path]:
-    aliases: tuple[str, ...] = ()
-    if pde == "nsnonbounded":
-        aliases = ("navier_stokes", "ns")
-    if pde == "darcy":
-        aliases = ("darcy_flow",)
-    files = _train_limited(_candidate_files(root, pde, active_split, _lazy_patterns(pde, active_split), aliases=aliases), active_split, train_shards)
-    if pde == "nsnonbounded" and active_split == "test":
-        files = _filter_nsnonbounded_test_files(files)
-    return files
-
-
 def _reaction_diffusion_patterns(split: str) -> list[str]:
     if split == "test":
         return [
@@ -1281,13 +996,6 @@ def _reaction_diffusion_patterns(split: str) -> list[str]:
     ]
 
 
-def _lazy_group_keys(path: Path, pde: str) -> list[str] | None:
-    if pde not in {"reaction_diffusion", "shallow_water"}:
-        return None
-    with h5py.File(path, "r") as f:
-        return _hdf5_sample_group_keys(f)
-
-
 def _hdf5_sample_group_keys(f: h5py.File) -> list[str]:
     numeric_keys = [str(key) for key in f.keys() if str(key).isdigit()]
     if numeric_keys:
@@ -1298,326 +1006,6 @@ def _hdf5_sample_group_keys(f: h5py.File) -> list[str]:
 
 def _natural_hdf5_key(value: str) -> tuple[int, int, str]:
     return (0, int(value), "") if value.isdigit() else (1, 0, value)
-
-
-def _lazy_dense_count(path: Path, pde: str) -> int:
-    try:
-        with h5py.File(path, "r") as f:
-            if pde == "nsnonbounded":
-                return int(f["w0"].shape[0])
-            if pde in {"heat", "wave", "advection_diffusion", "steady_heat_conduction"}:
-                return int(f["input_data"].shape[0])
-            if pde == "darcy":
-                return _dense_dataset_count(f["thresh_a_data"])
-            if pde in {"poisson", "helmholtz"}:
-                return _dense_dataset_count(f["f_data"])
-    except OSError:
-        if pde in {"poisson", "helmholtz", "darcy"}:
-            key = "thresh_a_data" if pde == "darcy" else "f_data"
-            for name, shape, _dtype in scipy.io.whosmat(path):
-                if name == key:
-                    return _dense_shape_count(tuple(shape))
-        raise
-    raise NotImplementedError(f"Lazy dense count is not implemented for {pde}")
-
-
-def _read_lazy_raw_sample(
-    pde: str,
-    ref: LazySampleRef,
-    split: str,
-    scalar_param_mode: str,
-    load_full_trajectory: bool,
-    file_paths: list[str],
-    dataset_metadata: dict[str, Any],
-) -> dict[str, Any]:
-    if pde == "nsnonbounded":
-        raw = _read_lazy_ns_sample(ref, split, load_full_trajectory, file_paths)
-    elif pde == "reaction_diffusion":
-        raw = _read_lazy_reaction_diffusion_sample(ref, split, load_full_trajectory, file_paths)
-    elif pde == "shallow_water":
-        raw = _read_lazy_shallow_water_sample(ref, split, load_full_trajectory, file_paths)
-    elif pde in {"heat", "wave", "advection_diffusion", "steady_heat_conduction"}:
-        raw = _read_lazy_future_sample(ref, pde, split, scalar_param_mode, load_full_trajectory, file_paths)
-    elif pde in {"darcy", "poisson", "helmholtz"}:
-        raw = _read_lazy_static_sample(ref, pde, split, file_paths)
-    else:
-        raise NotImplementedError(f"Lazy loading is not implemented for {pde}")
-    raw["metadata"].update({k: v for k, v in dataset_metadata.items() if k not in raw["metadata"]})
-    raw["metadata"].update(
-        {
-            "data_loading_mode": "lazy",
-            "load_full_trajectory": bool(load_full_trajectory),
-            "lazy_sample_ref": f"{ref.path.name}:{ref.key if ref.key is not None else ref.local_index}",
-            "loaded_count": 1,
-            "train_size_loaded_in_memory": 0,
-            "loaded_in_memory_samples": 0,
-        }
-    )
-    return raw
-
-
-def _finalize_lazy_raw(
-    full: torch.Tensor,
-    channel_names: list[str],
-    input_names: list[str],
-    target_names: list[str],
-    split: str,
-    ref: LazySampleRef,
-    file_paths: list[str],
-    metadata: dict[str, Any],
-    pde_params: dict[str, torch.Tensor] | None = None,
-) -> dict[str, Any]:
-    pde_params = pde_params or {}
-    metadata = dict(metadata)
-    metadata.update(
-        {
-            "files": list(file_paths),
-            "split": split,
-            "sample_indices": torch.tensor([ref.global_index], dtype=torch.long),
-            "global_sample_ids": [f"{ref.path.name}:{ref.key if ref.key is not None else ref.local_index}"],
-            "pde_params": pde_params,
-            "pde_params_available": sorted(pde_params),
-        }
-    )
-    return _finalize_loaded_raw(
-        {
-            "full_tensor": full.float(),
-            "channel_names": channel_names,
-            "input_channel_names": input_names,
-            "target_channel_names": target_names,
-            "metadata": metadata,
-            "pde_params": pde_params,
-            "split": split,
-            "file_paths": list(file_paths),
-            "sample_indices": metadata["sample_indices"],
-            "global_sample_ids": metadata["global_sample_ids"],
-        },
-        max_samples=1,
-        strict_size=True,
-    )
-
-
-def _read_lazy_ns_sample(ref: LazySampleRef, split: str, load_full_trajectory: bool, file_paths: list[str]) -> dict[str, Any]:
-    with h5py.File(ref.path, "r") as f:
-        w0 = f["w0"][ref.local_index : ref.local_index + 1]
-        if load_full_trajectory:
-            w = f["w"][ref.local_index : ref.local_index + 1]
-            traj = np.concatenate([w0[:, None, :, :], np.moveaxis(w, -1, 1)], axis=1)
-            full = _as_float_tensor(traj).unsqueeze(1)
-            channels = ["w"]
-            target_names = [f"w_t{i}" for i in range(1, full.shape[2])]
-            meta = {"canonical_layout": "NCTHW", "time_values": [i / max(full.shape[2] - 1, 1) for i in range(full.shape[2])]}
-        else:
-            wT = f["w"][ref.local_index : ref.local_index + 1, :, :, -1]
-            full = torch.stack((_as_float_tensor(w0), _as_float_tensor(wT)), dim=1)
-            channels = ["w0", "wT"]
-            target_names = ["wT"]
-            meta = {"canonical_layout": "NCHW", "input_indices": [0], "target_indices": [1], "time_values": [0.0, 1.0]}
-    meta.update({"final_time": 1.0, "nu": 1e-3, "loaded_full_trajectory": bool(load_full_trajectory)})
-    return _finalize_lazy_raw(full, channels, ["w0"], target_names, split, ref, file_paths, meta)
-
-
-def _read_lazy_reaction_diffusion_sample(ref: LazySampleRef, split: str, load_full_trajectory: bool, file_paths: list[str]) -> dict[str, Any]:
-    with h5py.File(ref.path, "r") as f:
-        if ref.key is None:
-            raise KeyError(f"Lazy reaction_diffusion sample {ref} is missing an HDF5 group key")
-        data = np.asarray(f[ref.key]["data"][:])
-    input_idx = 50 if data.shape[0] > 50 else 0
-    if load_full_trajectory:
-        full = _as_float_tensor(np.moveaxis(data, -1, 0)).unsqueeze(0)
-        channels = ["u", "v"]
-        meta = {"canonical_layout": "NCTHW", "input_time_index": input_idx}
-    else:
-        endpoints = np.concatenate([data[input_idx], data[-1]], axis=-1)
-        full = _as_float_tensor(np.moveaxis(endpoints, -1, 0)).unsqueeze(0)
-        channels = ["u0", "v0", "uT", "vT"]
-        meta = {"canonical_layout": "NCHW", "input_indices": [0, 1], "target_indices": [2, 3], "input_time_index": 0}
-    is_test = _validate_split(split) == "test"
-    meta.update(
-        {
-            "final_time": 5.0,
-            "D_u": 2e-3 if is_test else 1e-3,
-            "D_v": 4e-3 if is_test else 5e-3,
-            "k": 3e-3 if is_test else 5e-3,
-            "loaded_full_trajectory": bool(load_full_trajectory),
-        }
-    )
-    return _finalize_lazy_raw(full, channels, ["u0", "v0"], ["uT", "vT"], split, ref, file_paths, meta)
-
-
-def _read_lazy_shallow_water_sample(ref: LazySampleRef, split: str, load_full_trajectory: bool, file_paths: list[str]) -> dict[str, Any]:
-    with h5py.File(ref.path, "r") as f:
-        if ref.key is None:
-            raise KeyError(f"Lazy shallow_water sample {ref} is missing an HDF5 group key")
-        group = f[ref.key]["data"]
-        arrays = []
-        for field in ("h", "hu", "hv"):
-            arr = np.asarray(group[field][:])
-            if arr.ndim == 4 and arr.shape[-1] == 1:
-                arr = arr[..., 0]
-            arrays.append(arr)
-    if load_full_trajectory:
-        full = _as_float_tensor(np.stack(arrays, axis=0)).unsqueeze(0)
-        channels = ["h", "hu", "hv"]
-        meta = {"canonical_layout": "NCTHW"}
-    else:
-        endpoints = [arr[0] for arr in arrays] + [arr[-1] for arr in arrays]
-        full = _as_float_tensor(np.stack(endpoints, axis=0)).unsqueeze(0)
-        channels = ["h0", "hu0", "hv0", "hT", "huT", "hvT"]
-        meta = {"canonical_layout": "NCHW", "input_indices": [0, 1, 2], "target_indices": [3, 4, 5]}
-    meta.update({"final_time": 1.0, "g": 1.0, "domain_length": 5.0, "loaded_full_trajectory": bool(load_full_trajectory)})
-    return _finalize_lazy_raw(full, channels, ["h0", "hu0", "hv0"], ["hT", "huT", "hvT"], split, ref, file_paths, meta)
-
-
-def _read_lazy_future_sample(
-    ref: LazySampleRef,
-    pde: str,
-    split: str,
-    scalar_param_mode: str,
-    load_full_trajectory: bool,
-    file_paths: list[str],
-) -> dict[str, Any]:
-    with h5py.File(ref.path, "r") as f:
-        inp = _as_float_tensor(f["input_data"][ref.local_index : ref.local_index + 1])
-        out = _as_float_tensor(f["output_data"][ref.local_index : ref.local_index + 1])
-        attrs = _h5_attrs_to_python(f)
-        meta: dict[str, Any] = {"canonical_layout": "NCHW", "scalar_param_mode": scalar_param_mode}
-        for key, value in attrs.items():
-            meta.setdefault(key, value)
-        if "t" in f:
-            meta.setdefault("time_values", np.asarray(f["t"][:], dtype=np.float32).tolist())
-        if "T" in attrs:
-            meta.setdefault("final_time", float(attrs["T"]))
-        if "boundary_condition" in attrs:
-            meta.setdefault("bc", str(attrs["boundary_condition"]))
-        if load_full_trajectory and "full_trajectory" in f:
-            full_traj = _as_float_tensor(f["full_trajectory"][ref.local_index : ref.local_index + 1])
-            meta["full_trajectory"] = full_traj
-            meta["full_trajectory_shape"] = tuple(full_traj.shape)
-
-        pde_params: dict[str, torch.Tensor] = {}
-        if pde == "heat":
-            alpha = _scalar_or_attr(f, "alpha", "fixed_alpha", 1, ref.local_index, required=False)
-            if alpha is not None:
-                pde_params["alpha"] = alpha
-                meta["alpha"] = alpha
-            if scalar_param_mode == "materialize":
-                alpha_field = _expand_scalar_to_field(alpha if alpha is not None else torch.full((1,), float("nan")), inp.shape[-2], inp.shape[-1])
-                full = torch.cat([inp[:, :1], alpha_field, out[:, :1], alpha_field.clone()], dim=1)
-                channels = ["u0", "alpha", "uT", "alpha_T"]
-                input_names, target_names = ["u0", "alpha"], ["uT", "alpha_T"]
-                meta.update({"input_indices": [0, 1], "target_indices": [2, 3]})
-            else:
-                full = torch.cat([inp[:, :1], out[:, :1]], dim=1)
-                channels = ["u0", "uT"]
-                input_names, target_names = ["u0"], ["uT"]
-                meta.update({"input_indices": [0], "target_indices": [1]})
-        elif pde == "wave":
-            c = _scalar_or_attr(f, "c", "fixed_c", 1, ref.local_index, required=False)
-            if c is not None:
-                pde_params["c"] = c
-                meta["c"] = c
-            if scalar_param_mode == "materialize" and c is not None:
-                c_field = _expand_scalar_to_field(c, inp.shape[-2], inp.shape[-1])
-                full = torch.cat([inp[:, :2], c_field, out[:, :2], c_field.clone()], dim=1)
-                channels = ["u0", "v0", "c", "uT", "vT", "c_T"]
-                input_names, target_names = ["u0", "v0", "c"], ["uT", "vT", "c_T"]
-                meta.update({"input_indices": [0, 1, 2], "target_indices": [3, 4, 5]})
-            else:
-                full = torch.cat([inp[:, :2], out[:, :2]], dim=1)
-                channels = ["u0", "v0", "uT", "vT"]
-                input_names, target_names = ["u0", "v0"], ["uT", "vT"]
-                meta.update({"input_indices": [0, 1], "target_indices": [2, 3]})
-        elif pde == "advection_diffusion":
-            bx = _scalar_or_attr(f, "b_x", "b_x", 1, ref.local_index, required=True)
-            by = _scalar_or_attr(f, "b_y", "b_y", 1, ref.local_index, required=True)
-            kappa = _scalar_or_attr(f, "kappa", "kappa", 1, ref.local_index, required=True)
-            pde_params.update({"b_x": bx, "b_y": by, "kappa": kappa})
-            meta.update(pde_params)
-            if scalar_param_mode == "materialize":
-                bx_f = _expand_scalar_to_field(bx, inp.shape[-2], inp.shape[-1])
-                by_f = _expand_scalar_to_field(by, inp.shape[-2], inp.shape[-1])
-                k_f = _expand_scalar_to_field(kappa, inp.shape[-2], inp.shape[-1])
-                full = torch.cat([inp[:, :1], bx_f, by_f, k_f, out[:, :1], bx_f.clone(), by_f.clone(), k_f.clone()], dim=1)
-                channels = ["u0", "b_x", "b_y", "kappa", "uT", "b_x_T", "b_y_T", "kappa_T"]
-                input_names, target_names = ["u0", "b_x", "b_y", "kappa"], ["uT", "b_x_T", "b_y_T", "kappa_T"]
-                meta.update({"input_indices": [0, 1, 2, 3], "target_indices": [4, 5, 6, 7]})
-            else:
-                full = torch.cat([inp[:, :1], out[:, :1]], dim=1)
-                channels = ["u0", "uT"]
-                input_names, target_names = ["u0"], ["uT"]
-                meta.update({"input_indices": [0], "target_indices": [1]})
-        elif pde == "steady_heat_conduction":
-            u_d = _scalar_or_attr(f, "u_D", "u_D", 1, ref.local_index, required=True)
-            pde_params["u_D"] = u_d
-            meta["u_D"] = u_d
-            if scalar_param_mode == "materialize":
-                u_d_f = _expand_scalar_to_field(u_d, inp.shape[-2], inp.shape[-1])
-                full = torch.cat([inp[:, :1], u_d_f, out[:, :1], u_d_f.clone()], dim=1)
-                channels = ["f", "u_D", "u", "u_D_T"]
-                input_names, target_names = ["f", "u_D"], ["u", "u_D_T"]
-                meta.update({"input_indices": [0, 1], "target_indices": [2, 3]})
-            else:
-                full = torch.cat([inp[:, :1], out[:, :1]], dim=1)
-                channels = ["f", "u"]
-                input_names, target_names = ["f"], ["u"]
-                meta.update({"input_indices": [0], "target_indices": [1]})
-        else:
-            raise ValueError(f"Unsupported future PDE '{pde}'")
-    meta["loaded_full_trajectory"] = isinstance(meta.get("full_trajectory"), torch.Tensor)
-    meta["load_full_trajectory"] = bool(load_full_trajectory)
-    return _finalize_lazy_raw(full, channels, input_names, target_names, split, ref, file_paths, meta, pde_params)
-
-
-def _read_lazy_static_sample(ref: LazySampleRef, pde: str, split: str, file_paths: list[str]) -> dict[str, Any]:
-    if pde == "darcy":
-        keys = ("thresh_a_data", "thresh_p_data")
-        channels = ["a", "p"]
-        meta: dict[str, Any] = {"canonical_layout": "NCHW"}
-    elif pde == "poisson":
-        keys = ("f_data", "phi_data")
-        channels = ["f", "phi"]
-        meta = {"canonical_layout": "NCHW"}
-    elif pde == "helmholtz":
-        keys = ("f_data", "psi_data")
-        channels = ["f", "psi"]
-        meta = {"canonical_layout": "NCHW", "k": 1.0}
-    else:
-        raise ValueError(f"Unsupported lazy static PDE {pde!r}")
-    try:
-        with h5py.File(ref.path, "r") as f:
-            x = _as_float_tensor(_h5_sample_at(f[keys[0]], ref.local_index))
-            y = _as_float_tensor(_h5_sample_at(f[keys[1]], ref.local_index))
-    except OSError:
-        raw = scipy.io.loadmat(ref.path, variable_names=list(keys))
-        x = _as_float_tensor(_mat_sample_at(raw[keys[0]], ref.local_index))
-        y = _as_float_tensor(_mat_sample_at(raw[keys[1]], ref.local_index))
-    full = torch.stack((x, y), dim=1)
-    return _finalize_lazy_raw(full, channels, [channels[0]], [channels[1]], split, ref, file_paths, meta)
-
-
-def _dense_dataset_count(ds: h5py.Dataset) -> int:
-    return _dense_shape_count(tuple(ds.shape))
-
-
-def _dense_shape_count(shape: tuple[int, ...]) -> int:
-    if len(shape) >= 3 and shape[0] == shape[1]:
-        return int(shape[-1])
-    return int(shape[0])
-
-
-def _h5_sample_at(ds: h5py.Dataset, index: int) -> np.ndarray:
-    shape = tuple(ds.shape)
-    if len(shape) >= 3 and shape[0] == shape[1]:
-        return np.asarray(ds[..., index : index + 1]).squeeze(-1)[None]
-    return np.asarray(ds[index : index + 1])
-
-
-def _mat_sample_at(array: np.ndarray, index: int) -> np.ndarray:
-    array = np.asarray(array)
-    if array.ndim >= 3 and array.shape[0] == array.shape[1]:
-        return array[..., index : index + 1].squeeze(-1)[None]
-    return array[index : index + 1]
 
 
 def _load_darcy(
@@ -2000,8 +1388,14 @@ def _load_reaction_diffusion(
     sample_indices: list[int] = []
     global_ids: list[str] = []
     seen = 0
+    meta_extra: dict[str, Any] = {}
     for path in files:
         with h5py.File(path, "r") as f:
+            meta_extra.update({k: v for k, v in _h5_attrs_to_python(f).items() if k not in meta_extra})
+            if "metadata" in f and isinstance(f["metadata"], h5py.Group):
+                meta_extra.update({k: v for k, v in _h5_attrs_to_python(f["metadata"]).items() if k not in meta_extra})
+            if "t" in f:
+                meta_extra.setdefault("time_values", np.asarray(f["t"][:], dtype=np.float32).tolist())
             keys = _hdf5_sample_group_keys(f)
             for key in keys:
                 if skip > 0:
@@ -2030,6 +1424,34 @@ def _load_reaction_diffusion(
     full = torch.stack(parts, dim=0)
     input_idx = 50 if load_full_trajectory and full.shape[2] > 50 else 0
     is_test = active_split == "test"
+    du = float(meta_extra.get("D_u", 2e-3 if is_test else 1e-3))
+    dv = float(meta_extra.get("D_v", 4e-3 if is_test else 5e-3))
+    k = float(meta_extra.get("k", 3e-3 if is_test else 5e-3))
+    final_time = float(meta_extra.get("T", meta_extra.get("final_time", 5.0)))
+    if "boundary_condition" in meta_extra:
+        meta_extra.setdefault("bc", str(meta_extra["boundary_condition"]))
+    pde_params = {
+        "D_u": torch.full((full.shape[0],), du, dtype=torch.float32),
+        "D_v": torch.full((full.shape[0],), dv, dtype=torch.float32),
+        "k": torch.full((full.shape[0],), k, dtype=torch.float32),
+    }
+    metadata = {
+        **meta_extra,
+        "files": [str(p) for p in files],
+        "canonical_layout": "NCTHW" if load_full_trajectory else "NCHW",
+        "input_time_index": input_idx,
+        "input_indices": [0, 1] if not load_full_trajectory else None,
+        "target_indices": [2, 3] if not load_full_trajectory else None,
+        "final_time": final_time,
+        "T": final_time,
+        "D_u": du,
+        "D_v": dv,
+        "k": k,
+        "split": split,
+        "load_full_trajectory": bool(load_full_trajectory),
+        "loaded_full_trajectory": bool(load_full_trajectory),
+        "pde_params": pde_params,
+    }
     raw = {
         "full_tensor": full,
         "channel_names": ["u", "v"] if load_full_trajectory else ["u0", "v0", "uT", "vT"],
@@ -2039,20 +1461,8 @@ def _load_reaction_diffusion(
         "file_paths": [str(p) for p in files],
         "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
         "global_sample_ids": global_ids,
-        "metadata": {
-            "files": [str(p) for p in files],
-            "canonical_layout": "NCTHW" if load_full_trajectory else "NCHW",
-            "input_time_index": input_idx,
-            "input_indices": [0, 1] if not load_full_trajectory else None,
-            "target_indices": [2, 3] if not load_full_trajectory else None,
-            "final_time": 5.0,
-            "D_u": 2e-3 if is_test else 1e-3,
-            "D_v": 4e-3 if is_test else 5e-3,
-            "k": 3e-3 if is_test else 5e-3,
-            "split": split,
-            "load_full_trajectory": bool(load_full_trajectory),
-            "loaded_full_trajectory": bool(load_full_trajectory),
-        },
+        "metadata": metadata,
+        "pde_params": pde_params,
     }
     return _finalize_loaded_raw(raw, max_samples, strict_size)
 

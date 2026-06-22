@@ -104,6 +104,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prefer-test", action="store_true", help="Compatibility/debug option. Never use for paper training.")
     parser.add_argument("--scalar-param-mode", choices=["metadata", "materialize", "global"], default="metadata")
     parser.add_argument("--data-loading-mode", choices=["eager", "lazy"], default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--pin-memory", dest="pin_memory", action="store_true", default=None)
+    parser.add_argument("--no-pin-memory", dest="pin_memory", action="store_false")
+    parser.add_argument("--persistent-workers", dest="persistent_workers", action="store_true", default=None)
+    parser.add_argument("--no-persistent-workers", dest="persistent_workers", action="store_false")
+    parser.add_argument("--prefetch-factor", type=int, default=None)
     parser.add_argument("--load-full-trajectory", action="store_true", help="Load full time trajectories when available instead of endpoint-only task tensors.")
     parser.add_argument("--physics-metric-mode", choices=["per_sample", "per_batch"], default=None)
     parser.add_argument("--strict-size", action="store_true", help="Fail if requested split size exceeds available samples.")
@@ -189,9 +195,18 @@ def main(argv: list[str] | None = None) -> None:
     torch.manual_seed(args.seed)
     cfg = load_yaml(args.config)
     args.data_loading_mode = _resolve_data_loading_mode(args)
+    args.effective_data_loading_mode = "eager"
+    _resolve_dataloader_args(args, cfg)
     args.physics_metric_mode = _resolve_physics_metric_mode(args, cfg)
     args.sensor_budget_mode = _resolve_sensor_budget_mode(args, cfg)
     method_cfg = build_method_config(cfg, args)
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_prefix = _run_file_prefix(args)
+    method_cfg["run_output_dir"] = str(out_dir)
+    method_cfg["run_prefix"] = run_prefix
+    method_cfg["train_history_json_path"] = str(out_dir / f"{run_prefix}_train_history.json")
+    method_cfg["train_history_jsonl_path"] = str(out_dir / f"{run_prefix}_train_history.jsonl")
     capability = resolve_capability(
         args.baseline,
         args.pde,
@@ -277,14 +292,10 @@ def main(argv: list[str] | None = None) -> None:
         synthetic_seed=args.seed * 1000 + 23,
     )
 
-    train_loader = DataLoader(train_dataset_for_fit, batch_size=args.batch_size, shuffle=not is_per_instance, collate_fn=pde_collate)
-    val_loader = (
-        DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=pde_collate)
-        if val_dataset is not None
-        else None
-    )
-    spec_loader = DataLoader(spec_dataset, batch_size=min(args.batch_size, len(spec_dataset)), shuffle=False, collate_fn=pde_collate)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=pde_collate)
+    train_loader = build_pde_dataloader(train_dataset_for_fit, args, shuffle=not is_per_instance)
+    val_loader = build_pde_dataloader(val_dataset, args, shuffle=False) if val_dataset is not None else None
+    spec_loader = build_pde_dataloader(spec_dataset, args, shuffle=False, batch_size=min(args.batch_size, len(spec_dataset)))
+    test_loader = build_pde_dataloader(test_dataset, args, shuffle=False)
     data_spec = build_data_spec(next(iter(spec_loader)))
     split_info.update(
         {
@@ -337,9 +348,6 @@ def main(argv: list[str] | None = None) -> None:
         train_history = model.fit(train_loader, val_loader)
     train_time = time.perf_counter() - train_start
 
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    run_prefix = _run_file_prefix(args)
     normalization_stats_path = _write_normalization_stats(out_dir, run_prefix, model)
     normalization_fields = _normalization_fields(model, normalization_stats_path)
     config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields)
@@ -401,6 +409,10 @@ def main(argv: list[str] | None = None) -> None:
             "experiment_mode": args.experiment_mode,
             "run_id": args.run_id,
             "run_name": args.run_name,
+            "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
+            **_dataloader_fields(args),
+            "epoch_log_path": str(out_dir / f"{run_prefix}_train_history.jsonl"),
+            "train_history_jsonl_path": str(out_dir / f"{run_prefix}_train_history.jsonl"),
             "train_history": json.dumps(_json_safe(train_history)),
         }
     )
@@ -437,9 +449,73 @@ def _resolve_physics_metric_mode(args: argparse.Namespace, cfg: dict[str, Any]) 
 
 
 def _resolve_data_loading_mode(args: argparse.Namespace) -> str:
-    if args.data_loading_mode:
-        return str(args.data_loading_mode)
-    return "lazy" if args.experiment_mode == "paper" else "eager"
+    mode = str(args.data_loading_mode or "eager")
+    if mode not in {"eager", "lazy"}:
+        raise ValueError(f"data_loading_mode must be eager or lazy, got {mode!r}")
+    if mode == "lazy":
+        message = (
+            "data_loading_mode='lazy' is disabled because per-sample file reads make paper baselines I/O-bound. "
+            "Regenerate the matrix/config with data_loading_mode='eager'."
+        )
+        if args.experiment_mode == "paper":
+            raise ValueError(message)
+        warnings.warn(message + " Forcing eager loading.", RuntimeWarning, stacklevel=2)
+    return "eager"
+
+
+def _resolve_dataloader_args(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
+    args.num_workers = int(args.num_workers if args.num_workers is not None else cfg.get("num_workers", 0))
+    if args.num_workers < 0:
+        raise ValueError("--num-workers must be >= 0")
+    if args.pin_memory is None:
+        args.pin_memory = bool(cfg.get("pin_memory", True))
+    if args.persistent_workers is None:
+        args.persistent_workers = bool(cfg.get("persistent_workers", False))
+    if args.prefetch_factor is None:
+        value = cfg.get("prefetch_factor", None)
+        args.prefetch_factor = None if value is None else int(value)
+    elif args.prefetch_factor is not None:
+        args.prefetch_factor = int(args.prefetch_factor)
+    if args.prefetch_factor is not None and args.prefetch_factor <= 0:
+        raise ValueError("--prefetch-factor must be > 0 when set")
+    if args.num_workers == 0:
+        args.persistent_workers = False
+
+
+def build_pde_dataloader(
+    dataset,
+    args: argparse.Namespace,
+    shuffle: bool,
+    batch_size: int | None = None,
+) -> DataLoader:
+    num_workers = int(getattr(args, "num_workers", 0) or 0)
+    device = str(getattr(args, "device", "cpu"))
+    pin_requested = bool(getattr(args, "pin_memory", False))
+    kwargs: dict[str, Any] = {
+        "batch_size": int(batch_size if batch_size is not None else args.batch_size),
+        "shuffle": bool(shuffle),
+        "drop_last": False,
+        "collate_fn": pde_collate,
+        "num_workers": num_workers,
+        "pin_memory": bool(pin_requested and device.startswith("cuda")),
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = bool(getattr(args, "persistent_workers", False))
+        prefetch = getattr(args, "prefetch_factor", None)
+        if prefetch is not None:
+            kwargs["prefetch_factor"] = int(prefetch)
+    return DataLoader(dataset, **kwargs)
+
+
+def _dataloader_fields(args: argparse.Namespace) -> dict[str, Any]:
+    num_workers = int(getattr(args, "num_workers", 0) or 0)
+    pin_memory = bool(getattr(args, "pin_memory", False) and str(getattr(args, "device", "cpu")).startswith("cuda"))
+    return {
+        "dataloader_num_workers": num_workers,
+        "dataloader_pin_memory": pin_memory,
+        "dataloader_persistent_workers": bool(getattr(args, "persistent_workers", False) and num_workers > 0),
+        "dataloader_prefetch_factor": int(args.prefetch_factor) if num_workers > 0 and getattr(args, "prefetch_factor", None) is not None else 0,
+    }
 
 
 def _resolve_sensor_budget_mode(args: argparse.Namespace, cfg: dict[str, Any]) -> str:
@@ -698,6 +774,8 @@ def _evaluate_full_test_loader(
             "test_size": len(test_dataset),
             "train_shards": args.train_shards,
             "data_loading_mode": args.data_loading_mode,
+            "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
+            **_dataloader_fields(args),
             "load_full_trajectory": bool(args.load_full_trajectory),
             "loaded_full_trajectory": bool(_batch_loaded_full_trajectory(batch)),
             "train_size_requested": int(split_info["train_size_requested"]),
@@ -909,9 +987,11 @@ def _summarize_run(
         "val_split_source": split_info["val_split_source"],
         "val_from_train_offset": split_info["val_from_train_offset"],
         "test_size": len(test_dataset),
-        "train_shards": args.train_shards,
-        "data_loading_mode": args.data_loading_mode,
-        "load_full_trajectory": bool(args.load_full_trajectory),
+            "train_shards": args.train_shards,
+            "data_loading_mode": args.data_loading_mode,
+            "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
+            **_dataloader_fields(args),
+            "load_full_trajectory": bool(args.load_full_trajectory),
         "loaded_full_trajectory": bool(getattr(test_dataset, "loaded_full_trajectory", _batch_loaded_full_trajectory(test_dataset.batch))),
         "train_size_requested": int(split_info["train_size_requested"]),
         "train_size_loaded_in_memory": int(split_info["train_size_loaded_in_memory"]),
@@ -1483,6 +1563,8 @@ def _write_config_snapshot(
         "scalar_param_mode_effective": args.scalar_param_mode,
         "scalar_params_used_as_input": _scalar_params_used_as_input_from_spec(data_spec),
         "data_loading_mode": args.data_loading_mode,
+        "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
+        **_dataloader_fields(args),
         "load_full_trajectory": bool(args.load_full_trajectory),
         "sensor_budget_mode": args.sensor_budget_mode,
         "normalization": normalization_fields,
