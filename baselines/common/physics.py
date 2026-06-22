@@ -127,9 +127,9 @@ def navier_stokes_vorticity_residual(w: torch.Tensor, metadata: dict | None = No
 def reaction_diffusion_residual(uv: torch.Tensor, metadata: dict | None = None) -> torch.Tensor:
     # uv: [B,2,T,H,W], Neumann on [-1,1]^2.
     metadata = metadata or {}
-    du = float(metadata.get("D_u", metadata.get("du", 1e-3)))
-    dv = float(metadata.get("D_v", metadata.get("dv", 5e-3)))
-    k = float(metadata.get("k", 5e-3))
+    du = _rd_parameter(metadata, ("D_u", "du"), 1e-3, uv)
+    dv = _rd_parameter(metadata, ("D_v", "dv"), 5e-3, uv)
+    k = _rd_parameter(metadata, ("k",), 5e-3, uv)
     final_time = float(metadata.get("final_time", 5.0))
     dt = _time_step(uv.shape[2], final_time, metadata)
     dx = 2.0 / max(uv.shape[-1] - 1, 1)
@@ -142,6 +142,28 @@ def reaction_diffusion_residual(uv: torch.Tensor, metadata: dict | None = None) 
     res_u = u_t - (du * lap_u + (u - u**3 - k - v))
     res_v = v_t - (dv * lap_v + (u - v))
     return torch.stack([res_u, res_v], dim=1)
+
+
+def _rd_parameter(metadata: dict, keys: tuple[str, ...], default: float, uv: torch.Tensor) -> torch.Tensor:
+    value = None
+    for key in keys:
+        if key in metadata and metadata[key] is not None:
+            value = metadata[key]
+            break
+    params = metadata.get("pde_params")
+    if value is None and isinstance(params, dict):
+        for key in keys:
+            if key in params and params[key] is not None:
+                value = params[key]
+                break
+    tensor = torch.as_tensor(default if value is None else value, device=uv.device, dtype=uv.dtype)
+    if tensor.ndim == 0:
+        return tensor.reshape(1, 1, 1, 1)
+    if tensor.ndim == 1 and tensor.shape[0] == uv.shape[0]:
+        return tensor.reshape(uv.shape[0], 1, 1, 1)
+    if tensor.numel() == 1:
+        return tensor.reshape(1, 1, 1, 1)
+    raise ValueError(f"Reaction-diffusion parameter {keys[0]!r} must be scalar or length batch_size={uv.shape[0]}, got shape {tuple(tensor.shape)}")
 
 
 def shallow_water_residual(q: torch.Tensor, metadata: dict | None = None) -> torch.Tensor:

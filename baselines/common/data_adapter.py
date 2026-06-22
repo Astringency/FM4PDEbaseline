@@ -1008,6 +1008,56 @@ def _natural_hdf5_key(value: str) -> tuple[int, int, str]:
     return (0, int(value), "") if value.isdigit() else (1, 0, value)
 
 
+_REACTION_DIFFUSION_METADATA_KEYS = (
+    "T",
+    "final_time",
+    "D_u",
+    "D_v",
+    "k",
+    "dx",
+    "dy",
+    "x_min",
+    "x_max",
+    "y_min",
+    "y_max",
+    "x_range",
+    "y_range",
+    "init_mode",
+    "boundary_condition",
+    "sample_seed",
+)
+
+
+def _reaction_diffusion_sample_metadata(group: h5py.Group, file_attrs: dict[str, Any]) -> dict[str, Any]:
+    attrs = dict(file_attrs)
+    attrs.update(_h5_attrs_to_python(group))
+    return {key: attrs[key] for key in _REACTION_DIFFUSION_METADATA_KEYS if key in attrs}
+
+
+def _sample_metadata_field(values: list[Any]) -> Any:
+    if not values:
+        return None
+    if all(_is_scalar_number(value) for value in values):
+        tensor = torch.as_tensor([float(value) for value in values], dtype=torch.float32)
+        return float(tensor[0]) if bool(torch.allclose(tensor, tensor[:1].expand_as(tensor))) else tensor
+    normalized = [_python_scalar(value) for value in values]
+    return normalized[0] if all(value == normalized[0] for value in normalized) else normalized
+
+
+def _is_scalar_number(value: Any) -> bool:
+    return isinstance(value, (int, float, np.integer, np.floating)) or (isinstance(value, np.ndarray) and value.ndim == 0 and np.issubdtype(value.dtype, np.number))
+
+
+def _python_scalar(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray) and value.ndim == 0:
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
 def _load_darcy(
     root: Path,
     split: str,
@@ -1389,11 +1439,15 @@ def _load_reaction_diffusion(
     global_ids: list[str] = []
     seen = 0
     meta_extra: dict[str, Any] = {}
+    sample_meta_values: dict[str, list[Any]] = {}
     for path in files:
         with h5py.File(path, "r") as f:
-            meta_extra.update({k: v for k, v in _h5_attrs_to_python(f).items() if k not in meta_extra})
+            file_attrs = _h5_attrs_to_python(f)
+            meta_extra.update({k: v for k, v in file_attrs.items() if k not in meta_extra})
             if "metadata" in f and isinstance(f["metadata"], h5py.Group):
-                meta_extra.update({k: v for k, v in _h5_attrs_to_python(f["metadata"]).items() if k not in meta_extra})
+                metadata_attrs = _h5_attrs_to_python(f["metadata"])
+                file_attrs.update(metadata_attrs)
+                meta_extra.update({k: v for k, v in metadata_attrs.items() if k not in meta_extra})
             if "t" in f:
                 meta_extra.setdefault("time_values", np.asarray(f["t"][:], dtype=np.float32).tolist())
             keys = _hdf5_sample_group_keys(f)
@@ -1402,13 +1456,16 @@ def _load_reaction_diffusion(
                     skip -= 1
                     seen += 1
                     continue
-                data = np.asarray(f[key]["data"][:])
+                group = f[key]
+                data = np.asarray(group["data"][:])
+                sample_meta = _reaction_diffusion_sample_metadata(group, file_attrs)
+                for meta_key, value in sample_meta.items():
+                    sample_meta_values.setdefault(meta_key, []).append(value)
                 # raw [T,H,W,2] -> canonical [2,T,H,W]
                 if load_full_trajectory:
                     parts.append(_as_float_tensor(np.moveaxis(data, -1, 0)))
                 else:
-                    input_idx_local = 50 if data.shape[0] > 50 else 0
-                    endpoints = np.concatenate([data[input_idx_local], data[-1]], axis=-1)
+                    endpoints = np.concatenate([data[0], data[-1]], axis=-1)
                     parts.append(_as_float_tensor(np.moveaxis(endpoints, -1, 0)))
                 sample_indices.append(seen)
                 global_ids.append(f"{path.name}:{key}")
@@ -1422,35 +1479,48 @@ def _load_reaction_diffusion(
     if not parts:
         raise _missing_error(root, "reaction_diffusion", active_split, patterns)
     full = torch.stack(parts, dim=0)
-    input_idx = 50 if load_full_trajectory and full.shape[2] > 50 else 0
+    input_idx = 0
     is_test = active_split == "test"
-    du = float(meta_extra.get("D_u", 2e-3 if is_test else 1e-3))
-    dv = float(meta_extra.get("D_v", 4e-3 if is_test else 5e-3))
-    k = float(meta_extra.get("k", 3e-3 if is_test else 5e-3))
+    defaults = {
+        "D_u": 2e-3 if is_test else 1e-3,
+        "D_v": 4e-3 if is_test else 5e-3,
+        "k": 3e-3 if is_test else 5e-3,
+    }
+    for param_key, default_value in defaults.items():
+        sample_meta_values.setdefault(param_key, [meta_extra.get(param_key, default_value)] * full.shape[0])
+    sample_meta = {key: _sample_metadata_field(values) for key, values in sample_meta_values.items()}
+    du = sample_meta.get("D_u", defaults["D_u"])
+    dv = sample_meta.get("D_v", defaults["D_v"])
+    k = sample_meta.get("k", defaults["k"])
     final_time = float(meta_extra.get("T", meta_extra.get("final_time", 5.0)))
-    if "boundary_condition" in meta_extra:
+    if "T" in sample_meta and not isinstance(sample_meta["T"], torch.Tensor):
+        final_time = float(sample_meta["T"])
+    elif "final_time" in sample_meta and not isinstance(sample_meta["final_time"], torch.Tensor):
+        final_time = float(sample_meta["final_time"])
+    if "boundary_condition" in sample_meta:
+        meta_extra.setdefault("bc", str(sample_meta["boundary_condition"]))
+    elif "boundary_condition" in meta_extra:
         meta_extra.setdefault("bc", str(meta_extra["boundary_condition"]))
     pde_params = {
-        "D_u": torch.full((full.shape[0],), du, dtype=torch.float32),
-        "D_v": torch.full((full.shape[0],), dv, dtype=torch.float32),
-        "k": torch.full((full.shape[0],), k, dtype=torch.float32),
+        "D_u": torch.as_tensor(sample_meta.get("D_u", du), dtype=torch.float32).reshape(-1).expand(full.shape[0]).clone(),
+        "D_v": torch.as_tensor(sample_meta.get("D_v", dv), dtype=torch.float32).reshape(-1).expand(full.shape[0]).clone(),
+        "k": torch.as_tensor(sample_meta.get("k", k), dtype=torch.float32).reshape(-1).expand(full.shape[0]).clone(),
     }
     metadata = {
         **meta_extra,
+        **sample_meta,
         "files": [str(p) for p in files],
         "canonical_layout": "NCTHW" if load_full_trajectory else "NCHW",
         "input_time_index": input_idx,
         "input_indices": [0, 1] if not load_full_trajectory else None,
         "target_indices": [2, 3] if not load_full_trajectory else None,
         "final_time": final_time,
-        "T": final_time,
-        "D_u": du,
-        "D_v": dv,
-        "k": k,
+        "T": sample_meta.get("T", final_time),
         "split": split,
         "load_full_trajectory": bool(load_full_trajectory),
         "loaded_full_trajectory": bool(load_full_trajectory),
         "pde_params": pde_params,
+        "pde_params_available": sorted(pde_params),
     }
     raw = {
         "full_tensor": full,

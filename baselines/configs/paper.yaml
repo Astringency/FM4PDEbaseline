@@ -24,6 +24,11 @@ test_size: 1000
 train_shards: 5
 scalar_param_mode: metadata
 sensor_budget_mode: per_time
+data_loading_mode: eager
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
 seeds: [1, 2, 3]
 sensor_counts: [50, 100, 250, 500, 1000]
 sensor_modes: [random, grid, fixed]

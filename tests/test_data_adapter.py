@@ -78,6 +78,53 @@ def test_reaction_diffusion_eager_preserves_physical_metadata(tiny_data_root):
     assert set(batch.pde_params) == {"D_u", "D_v", "k"}
 
 
+def test_reaction_diffusion_eager_uses_initial_endpoint_and_sample_specific_params(tmp_path):
+    rd = tmp_path / "reaction_diffusion"
+    rd.mkdir()
+    path = rd / "reaction_diffusion-128-128-10_0.h5"
+    rng = np.random.default_rng(9)
+    with h5py.File(path, "w") as f:
+        f.attrs["D_u"] = 1e-3
+        f.attrs["D_v"] = 5e-3
+        f.attrs["k"] = 5e-3
+        f.attrs["T"] = 5.0
+        f.attrs["dx"] = 0.125
+        f.attrs["dy"] = 0.125
+        f.attrs["x_range"] = np.asarray([-1.0, 1.0], dtype="float32")
+        f.attrs["y_range"] = np.asarray([-1.0, 1.0], dtype="float32")
+        f.attrs["init_mode"] = "grf"
+        f.attrs["boundary_condition"] = "neumann"
+        for i in range(3):
+            data = rng.normal(size=(10, 8, 8, 2)).astype("float32")
+            data[0, :, :, :] = float(i + 1)
+            data[-1, :, :, :] = float(i + 11)
+            g = f.create_group(str(i))
+            g.attrs["D_u"] = 0.01 + i
+            g.attrs["D_v"] = 0.02 + i
+            g.attrs["k"] = 0.03 + i
+            g.attrs["sample_seed"] = 100 + i
+            g["data"] = data
+
+    registry = build_default_registry()
+    raw = registry.load_raw("reaction_diffusion", tmp_path, split="train", max_samples=3, load_full_trajectory=False)
+
+    assert raw["metadata"]["input_time_index"] == 0
+    assert torch.allclose(raw["full_tensor"][:, 0], torch.tensor([1.0, 2.0, 3.0]).reshape(3, 1, 1).expand(3, 8, 8))
+    assert torch.allclose(raw["full_tensor"][:, 2], torch.tensor([11.0, 12.0, 13.0]).reshape(3, 1, 1).expand(3, 8, 8))
+    assert torch.allclose(raw["pde_params"]["D_u"], torch.tensor([0.01, 1.01, 2.01], dtype=torch.float32))
+    assert torch.allclose(raw["pde_params"]["D_v"], torch.tensor([0.02, 1.02, 2.02], dtype=torch.float32))
+    assert torch.allclose(raw["pde_params"]["k"], torch.tensor([0.03, 1.03, 2.03], dtype=torch.float32))
+    assert torch.allclose(raw["metadata"]["sample_seed"], torch.tensor([100.0, 101.0, 102.0]))
+    assert raw["metadata"]["x_range"] == [-1.0, 1.0]
+    assert raw["metadata"]["boundary_condition"] == "neumann"
+
+    full = registry.load_raw("reaction_diffusion", tmp_path, split="train", max_samples=1, load_full_trajectory=True)
+    batch = registry.make_task(full, "reaction_diffusion", "forward")
+    assert batch.metadata["input_time_index"] == 0
+    assert torch.allclose(batch.input_fields, batch.full_tensor[:, :, 0])
+    assert torch.allclose(batch.target_fields, batch.full_tensor[:, :, -1])
+
+
 def test_reaction_diffusion_grf_shard_name_supported_in_eager_mode(tmp_path):
     rd = tmp_path / "reaction_diffusion"
     rd.mkdir()

@@ -353,7 +353,10 @@ def main(argv: list[str] | None = None) -> None:
     config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields)
     config_hash = _file_sha1(config_snapshot)
     train_history_path = out_dir / f"{run_prefix}_train_history.json"
-    train_history_path.write_text(json.dumps(_json_safe(train_history), indent=2), encoding="utf-8")
+    train_history_payload = _json_safe(train_history)
+    if isinstance(train_history_payload, dict):
+        train_history_payload.setdefault("completed_epochs", len(train_history_payload.get("train_loss", [])))
+    train_history_path.write_text(json.dumps(train_history_payload, indent=2), encoding="utf-8")
     checkpoint_path = ""
     if args.save_checkpoint:
         ckpt = out_dir / f"{run_prefix}.pt"
