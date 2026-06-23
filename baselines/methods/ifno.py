@@ -381,8 +381,9 @@ def _ifno_training_loss(model: IFNOBaseline, batch: PDEBatch, cycle_weight: floa
     x, y = _physical_pair(batch)
     y_pred, recon_x = model._forward_map_with_aux(x)
     x_pred, recon_y = model._inverse_map_with_aux(y)
-    cycle_x = model._inverse_map(y_pred)
-    cycle_y = model._forward_map(x_pred)
     loss = F.mse_loss(y_pred, y) + F.mse_loss(x_pred, x)
-    loss = loss + cycle_weight * (F.mse_loss(cycle_x, x) + F.mse_loss(cycle_y, y))
+    if cycle_weight:
+        cycle_x = model._inverse_map(y_pred)
+        cycle_y = model._forward_map(x_pred)
+        loss = loss + cycle_weight * (F.mse_loss(cycle_x, x) + F.mse_loss(cycle_y, y))
     return loss + float(model.config.get("reconstruction_weight", 0.1)) * (recon_x + recon_y)

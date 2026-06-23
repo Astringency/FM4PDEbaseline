@@ -83,7 +83,7 @@ method_by_baseline:
     official_backend: ifno
     width: 64
     layers: 4
-    cycle_weight: 0.1
+    cycle_weight: 0.0
     lr: 0.0005
     grad_clip_norm: 1.0
     early_stopping_patience: 25

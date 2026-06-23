@@ -8,4 +8,4 @@ method:
   modes1: 20
   modes2: 20
   layers: 4
-  cycle_weight: 0.1
+  cycle_weight: 0.0
