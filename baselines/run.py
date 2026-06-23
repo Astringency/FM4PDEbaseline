@@ -70,6 +70,12 @@ BASELINES = {
 PER_INSTANCE_BASELINES = {"pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"}
 
 
+def _run_stage(stage: str, state: str, **fields: Any) -> None:
+    extra = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None and value != "")
+    suffix = f" {extra}" if extra else ""
+    print(f"[run stage] {stage} {state}{suffix}", file=sys.stderr, flush=True)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser("FM4PDE baseline runner")
     parser.add_argument("--baseline", required=True, choices=sorted(BASELINES))
@@ -272,6 +278,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
 
+    _run_stage("build_dataset", "start", baseline=args.baseline, pde=args.pde, task=args.task)
     train_size, val_size, test_size = _effective_sizes(args)
     registry = build_default_registry()
     use_sensors = args.task.startswith("sparse")
@@ -337,7 +344,15 @@ def main(argv: list[str] | None = None) -> None:
             "per_instance_baseline": bool(is_per_instance),
         }
     )
+    _run_stage(
+        "build_dataset",
+        "done",
+        train_size=len(train_dataset_for_fit),
+        val_size=0 if val_dataset is None else len(val_dataset),
+        test_size=len(test_dataset),
+    )
 
+    _run_stage("build_model", "start", baseline=args.baseline)
     try:
         model = BASELINES[args.baseline]().build(method_cfg, data_spec).to(args.device)
     except OfficialImportError as exc:
@@ -352,6 +367,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         raise
     backend_info = _backend_info(model, method_cfg)
+    _run_stage("build_model", "done", baseline=args.baseline, backend=backend_info.get("backend_used", ""))
     eligibility = _paper_table_eligibility(capability, backend_info)
     capability_info["paper_table_eligible"] = eligibility
     if capability.support_status != "unsupported":
@@ -371,6 +387,7 @@ def main(argv: list[str] | None = None) -> None:
             f"{backend_info['backend_used']!r}. Install/enable the official dependency or use implementation_mode: official_or_skip."
         )
 
+    _run_stage("fit", "start", baseline=args.baseline, pde=args.pde, task=args.task)
     train_start = time.perf_counter()
     train_history: dict[str, Any] = {}
     if not is_per_instance:
@@ -378,6 +395,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         train_history = model.fit(train_loader, val_loader)
     train_time = time.perf_counter() - train_start
+    _run_stage("fit", "done", baseline=args.baseline, elapsed_sec=f"{train_time:.3f}")
 
     normalization_stats_path = _write_normalization_stats(out_dir, run_prefix, model)
     normalization_fields = _normalization_fields(model, normalization_stats_path)
@@ -394,6 +412,7 @@ def main(argv: list[str] | None = None) -> None:
         model.save(ckpt)
         checkpoint_path = str(ckpt)
 
+    _run_stage("eval", "start", baseline=args.baseline, pde=args.pde, task=args.task)
     raw_rows, eval_totals = _evaluate_full_test_loader(
         model=model,
         loader=test_loader,
@@ -415,6 +434,7 @@ def main(argv: list[str] | None = None) -> None:
         memory_fields=memory_fields,
         config_hash=config_hash,
     )
+    _run_stage("eval", "done", baseline=args.baseline)
     summary = _summarize_run(
         raw_rows,
         eval_totals,
@@ -460,6 +480,7 @@ def main(argv: list[str] | None = None) -> None:
     (out_dir / "summary.json").write_text(json.dumps(_json_safe(summary), indent=2, sort_keys=True), encoding="utf-8")
     if args.run_id:
         (out_dir / f"{run_prefix}_summary.json").write_text(json.dumps(_json_safe(summary), indent=2, sort_keys=True), encoding="utf-8")
+    _run_stage("write_summary", "done", output_dir=out_dir)
 
     print(json.dumps(_json_safe(summary), indent=2, sort_keys=True))
 

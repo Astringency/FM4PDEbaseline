@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.experiments.run_one import build_command
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -93,3 +95,76 @@ def test_2gpu_parallel_launcher_uses_row_override_and_existing_runner():
         "JOBS_PER_GPU",
     ]:
         assert token in text
+
+
+def test_save_checkpoint_zero_disables_checkpoint_flag(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "PDEdata"))
+    monkeypatch.setenv("SAVE_CHECKPOINT", "0")
+
+    cmd = build_command(_row(tmp_path, "fno"))
+
+    assert "--save-checkpoint" not in cmd
+    assert "--no-save-checkpoint" in cmd
+
+
+def test_save_checkpoint_one_enables_checkpoint_flag(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "PDEdata"))
+    monkeypatch.setenv("SAVE_CHECKPOINT", "1")
+
+    cmd = build_command(_row(tmp_path, "pde_opt"))
+
+    assert "--save-checkpoint" in cmd
+
+
+def test_save_checkpoint_amortized_enables_neural_baselines(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "PDEdata"))
+    monkeypatch.setenv("SAVE_CHECKPOINT", "amortized")
+
+    for baseline in ["fno", "deeponet", "ifno"]:
+        cmd = build_command(_row(tmp_path, baseline))
+        assert "--save-checkpoint" in cmd
+
+
+def test_save_checkpoint_amortized_skips_per_instance_baselines(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "PDEdata"))
+    monkeypatch.setenv("SAVE_CHECKPOINT", "amortized")
+
+    for baseline in ["pde_opt", "pinn_sparse"]:
+        cmd = build_command(_row(tmp_path, baseline))
+        assert "--save-checkpoint" not in cmd
+        assert "--no-save-checkpoint" in cmd
+
+
+def _row(tmp_path: Path, baseline: str) -> dict:
+    return {
+        "baseline": baseline,
+        "pde": "poisson",
+        "task": "forward",
+        "config": "baselines/configs/paper.yaml",
+        "train_size": 4,
+        "val_size": 2,
+        "test_size": 2,
+        "train_shards": 1,
+        "batch_size": 2,
+        "epochs": 1,
+        "seed": 1,
+        "device": "cpu",
+        "data_loading_mode": "eager",
+        "num_workers": 0,
+        "prefetch_factor": 2,
+        "scalar_param_mode": "metadata",
+        "output_dir": str(tmp_path / baseline),
+        "experiment_kind": "test",
+        "ablation_factor": "",
+        "task_group": "main",
+        "run_id": f"{baseline}_poisson_forward_seed1",
+        "run_name": f"{baseline} poisson forward seed1",
+        "pin_memory": False,
+        "persistent_workers": False,
+        "steps": 0,
+        "refine_steps": 0,
+        "particles": 0,
+        "num_sensors": 50,
+        "sensor_mode": "random",
+        "noise_level": 0.0,
+    }

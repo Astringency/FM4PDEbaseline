@@ -11,6 +11,7 @@ Recommended settings:
 - First formal test: `JOBS_PER_GPU=2 NUM_WORKERS_PER_RUN=2`
 - If GPU utilization is still low and RAM/I/O are stable: `JOBS_PER_GPU=3 NUM_WORKERS_PER_RUN=1`
 - For full trajectory or time-varying tasks that use more memory: `JOBS_PER_GPU=1`
+- Checkpoints: `SAVE_CHECKPOINT=amortized` is the default and saves reusable neural baselines (`fno`, `deeponet`, `ifno`, `recfno`, `senseiver`, `voronoicnn`). Use `SAVE_CHECKPOINT=0` to disable checkpoint saving. Use `SAVE_CHECKPOINT=all` to save every baseline, but per-instance optimization methods are less reusable and use more disk.
 
 One-command smoke test:
 
@@ -25,6 +26,7 @@ One-command formal run:
 ```bash
 DATA_ROOT=/home/zhangxf/share/zhangxfA100/large_storage/PDEdata/ \
 OUT_ROOT=outputs/main_results_20260622_1500 \
+SAVE_CHECKPOINT=amortized \
 bash scripts/experiments/09_run_main_results_2gpu.sh
 ```
 
@@ -46,4 +48,3 @@ Monitor the machine:
 watch -n 2 nvidia-smi
 watch -n 2 free -h
 ```
-

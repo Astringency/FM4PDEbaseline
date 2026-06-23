@@ -23,6 +23,8 @@ FORBIDDEN_PAPER_FLAGS = {
     "--prefer-test",
 }
 
+AMORTIZED_CHECKPOINT_BASELINES = {"fno", "deeponet", "ifno", "recfno", "senseiver", "voronoicnn"}
+
 
 def timestamp() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -140,6 +142,8 @@ def build_command(row: dict[str, Any]) -> list[str]:
         )
     if _as_bool(row.get("load_full_trajectory", False)):
         cmd.append("--load-full-trajectory")
+    save_checkpoint = _save_checkpoint_for_row(row)
+    cmd.append("--save-checkpoint" if save_checkpoint else "--no-save-checkpoint")
     cmd.append("--pin-memory" if _as_bool(values["pin_memory"]) else "--no-pin-memory")
     cmd.append("--persistent-workers" if _as_bool(values["persistent_workers"]) else "--no-persistent-workers")
 
@@ -181,9 +185,24 @@ def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
         "steps": _method_steps(row, allow_override),
         "refine_steps": _method_refine_steps(row, allow_override),
         "particles": _method_particles(row, allow_override),
+        "save_checkpoint": _save_checkpoint_for_row(row),
         "allow_row_override": allow_override,
     }
     return values
+
+
+def _save_checkpoint_for_row(row: dict[str, Any]) -> bool:
+    mode = str(os.environ.get("SAVE_CHECKPOINT", "0")).strip().lower()
+    if mode in {"0", "false", "no", "off", "none", ""}:
+        return False
+    if mode in {"1", "true", "yes", "on", "all"}:
+        return True
+    if mode in {"amortized", "neural"}:
+        return str(row.get("baseline", "")).lower() in AMORTIZED_CHECKPOINT_BASELINES
+    raise RuntimeError(
+        "SAVE_CHECKPOINT must be one of 0/false/no/off/none, 1/true/yes/on/all, or amortized/neural; "
+        f"got {mode!r}"
+    )
 
 
 def run_one(

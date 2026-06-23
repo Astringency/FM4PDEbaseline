@@ -58,6 +58,36 @@ def test_run_supervised_fit_uses_strict_restore_for_tensor_only_models():
     assert model.load_strict_values == [True]
 
 
+def test_run_supervised_fit_scheduler_and_early_stopping_history():
+    model = _ConstantLossModel().build(
+        {
+            "epochs": 5,
+            "lr": 0.01,
+            "lr_scheduler": "reduce_on_plateau",
+            "scheduler_monitor": "val_loss",
+            "scheduler_patience": 0,
+            "scheduler_factor": 0.5,
+            "scheduler_min_lr": 1e-5,
+            "early_stopping": True,
+            "early_stopping_patience": 1,
+            "early_stopping_min_delta": 1e-8,
+            "min_epochs": 1,
+        },
+        {"pde": "poisson", "task": "forward"},
+    )
+    loader = _loader()
+
+    history = run_supervised_fit(model, loader, loader)
+
+    assert history["early_stopped"] is True
+    assert history["stop_epoch"] == 2
+    assert history["best_epoch"] == 1
+    assert history["monitor_name"] == "val_loss"
+    assert history["best_monitor_loss"] is not None
+    assert len(history["lr_history"]) == len(history["train_loss"])
+    assert history["lr_history"][-1] < 0.01
+
+
 def test_snapshot_state_dict_deepcopies_non_tensor_entries_without_detach():
     model = _NonTensorStateModel()
     snapshot = snapshot_state_dict(model)
@@ -119,6 +149,15 @@ class _StrictRecordingModel(BaselineModel):
 
     def predict(self, batch: PDEBatch):
         return batch.input_fields * self.weight
+
+
+class _ConstantLossModel(BaselineModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(0.0))
+
+    def predict(self, batch: PDEBatch):
+        return torch.ones_like(batch.target_fields) + self.weight * 0.0
 
 
 def _loader() -> DataLoader:

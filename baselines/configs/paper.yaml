@@ -38,6 +38,18 @@ method:
   implementation_mode: official_or_skip
   official_backend: auto
   normalize: true
+  lr_scheduler: reduce_on_plateau
+  scheduler_monitor: val_loss
+  scheduler_patience: 5
+  scheduler_factor: 0.5
+  scheduler_min_lr: 1.0e-5
+  scheduler_threshold: 1.0e-6
+  early_stopping: true
+  early_stopping_patience: 20
+  early_stopping_min_delta: 1.0e-8
+  min_epochs: 5
+  restore_best: true
+  grad_clip_norm: null
   width: 48
   modes1: 16
   modes2: 16
@@ -72,6 +84,9 @@ method_by_baseline:
     width: 64
     layers: 4
     cycle_weight: 0.1
+    lr: 0.0005
+    grad_clip_norm: 1.0
+    early_stopping_patience: 25
   recfno:
     width: 64
     embedding: mask

@@ -13,9 +13,10 @@ OUT_ROOT="${OUT_ROOT:-outputs/main_results_$(date +%Y%m%d_%H%M)}"
 FIRST_N="${FIRST_N:-8}"
 JOBS_PER_GPU="${JOBS_PER_GPU:-2}"
 NUM_WORKERS_PER_RUN="${NUM_WORKERS_PER_RUN:-2}"
+SAVE_CHECKPOINT="${SAVE_CHECKPOINT:-amortized}"
 MATRIX="$OUT_ROOT/matrices/main_results.jsonl"
 SMOKE_MATRIX="$OUT_ROOT/matrices/main_results_first${FIRST_N}.jsonl"
-export DATA_ROOT OUT_ROOT JOBS_PER_GPU NUM_WORKERS_PER_RUN
+export DATA_ROOT OUT_ROOT JOBS_PER_GPU NUM_WORKERS_PER_RUN SAVE_CHECKPOINT
 
 if ! [[ "$FIRST_N" =~ ^[0-9]+$ ]] || [ "$FIRST_N" -lt 1 ]; then
   log "FIRST_N must be an integer >= 1: $FIRST_N"
@@ -28,6 +29,7 @@ log "OUT_ROOT=$OUT_ROOT"
 log "FIRST_N=$FIRST_N"
 log "MATRIX=$MATRIX"
 log "SMOKE_MATRIX=$SMOKE_MATRIX"
+log "SAVE_CHECKPOINT=$SAVE_CHECKPOINT"
 
 if [ ! -f "$MATRIX" ]; then
   log "main matrix not found; building main_results matrix"
@@ -57,4 +59,3 @@ print(count)
 PY
 
 bash scripts/experiments/08_run_matrix_2gpu_parallel.sh "$SMOKE_MATRIX"
-

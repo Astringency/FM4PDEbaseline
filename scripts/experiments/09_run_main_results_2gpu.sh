@@ -21,14 +21,16 @@ DEVICE="${DEVICE:-cuda}"
 GPUS="${GPUS:-0,1}"
 JOBS_PER_GPU="${JOBS_PER_GPU:-4}"
 NUM_WORKERS_PER_RUN="${NUM_WORKERS_PER_RUN:-2}"
+SAVE_CHECKPOINT="${SAVE_CHECKPOINT:-amortized}"
 MATRIX="$OUT_ROOT/matrices/main_results.jsonl"
-export DATA_ROOT OUT_ROOT DEVICE GPUS JOBS_PER_GPU NUM_WORKERS_PER_RUN
+export DATA_ROOT OUT_ROOT DEVICE GPUS JOBS_PER_GPU NUM_WORKERS_PER_RUN SAVE_CHECKPOINT
 
 log "script=$(basename "$0") start_time=$(date '+%Y-%m-%d %H:%M:%S')"
 log "DATA_ROOT=$DATA_ROOT"
 log "OUT_ROOT=$OUT_ROOT"
 log "MATRIX=$MATRIX"
 log "DEVICE=$DEVICE GPUS=$GPUS JOBS_PER_GPU=$JOBS_PER_GPU NUM_WORKERS_PER_RUN=$NUM_WORKERS_PER_RUN"
+log "SAVE_CHECKPOINT=$SAVE_CHECKPOINT"
 
 if [ ! -f "$MATRIX" ]; then
   log "matrix not found; building main_results matrix"
@@ -38,4 +40,3 @@ else
 fi
 
 bash scripts/experiments/08_run_matrix_2gpu_parallel.sh "$MATRIX"
-

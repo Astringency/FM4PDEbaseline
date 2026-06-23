@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,7 +10,23 @@ import torch.nn.functional as F
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.normalization import estimate_normalization_stats, normalize_batch_input_target
 
-from .base import BaselineModel, _to_device_batch, restore_state_dict, snapshot_state_dict
+from .base import (
+    BaselineModel,
+    _build_lr_scheduler,
+    _build_optimizer,
+    _compact_float_list,
+    _cuda_mem_text,
+    _fmt_optional,
+    _raise_if_nonfinite_loss,
+    _raise_if_nonfinite_scalar,
+    _safe_len,
+    _scheduler_monitor_name,
+    _step_lr_scheduler,
+    _to_device_batch,
+    _write_incremental_history,
+    restore_state_dict,
+    snapshot_state_dict,
+)
 from .ifno_official_aligned import OfficialAlignedIFNO2d
 from .official import (
     OfficialImportError,
@@ -137,48 +156,109 @@ class IFNOBaseline(BaselineModel):
         lr = float(self.config.get("lr", 1e-3))
         max_steps = self.config.get("max_steps")
         max_val_steps = self.config.get("max_val_steps")
+        log_interval = int(self.config.get("log_interval") or 0)
         cycle_weight = float(self.config.get("cycle_weight", 0.1))
         normalize = bool(self.config.get("normalize", False))
         if normalize and self.normalization_stats is None:
+            max_norm_batches = self.config.get("normalization_max_batches")
+            scope = "entire train_loader" if max_norm_batches is None else f"max_batches={max_norm_batches}"
+            print(
+                f"[normalization] baseline=ifno pde={self.data_spec.get('pde', '')} "
+                f"task={self.data_spec.get('task', '')} start scope={scope}",
+                file=sys.stderr,
+                flush=True,
+            )
             self.normalization_stats = estimate_normalization_stats(
                 train_loader,
-                max_batches=self.config.get("normalization_max_batches"),
+                max_batches=max_norm_batches,
                 eps=float(self.config.get("normalization_eps", 1e-6)),
+            )
+            stats = self.normalization_stats.json_summary()
+            print(
+                f"[normalization] baseline=ifno pde={self.data_spec.get('pde', '')} "
+                f"task={self.data_spec.get('task', '')} done num_batches={stats['num_batches']} "
+                f"num_samples={stats['num_samples']} input_mean={_compact_float_list(stats['input_mean'])} "
+                f"input_std={_compact_float_list(stats['input_std'])} target_mean={_compact_float_list(stats['target_mean'])} "
+                f"target_std={_compact_float_list(stats['target_std'])}",
+                file=sys.stderr,
+                flush=True,
             )
         self.uses_normalization = bool(normalize and self.normalization_stats is not None)
         self.to(device)
-        opt = torch.optim.Adam(self.parameters(), lr=lr)
+        opt = _build_optimizer(self, self.config, lr)
+        scheduler = _build_lr_scheduler(opt, self.config, epochs)
+        monitor_name = _scheduler_monitor_name(self.config, val_loader)
+        early_stopping = bool(self.config.get("early_stopping", False))
+        early_stopping_patience = int(self.config.get("early_stopping_patience", 20))
+        early_stopping_min_delta = float(self.config.get("early_stopping_min_delta", 0.0))
+        min_epochs = int(self.config.get("min_epochs", 1))
+        restore_best = bool(self.config.get("restore_best", True))
+        grad_clip_norm = self.config.get("grad_clip_norm")
+        if grad_clip_norm is not None:
+            grad_clip_norm = float(grad_clip_norm)
         history = {
             "train_loss": [],
             "val_loss": [],
             "best_epoch": None,
             "best_val_loss": None,
+            "early_stopped": False,
+            "stop_epoch": None,
+            "stop_reason": "",
+            "monitor_name": monitor_name,
+            "best_monitor_loss": None,
+            "lr_history": [],
             "normalize": self.uses_normalization,
             "normalization_stats": self.normalization_stats.json_summary() if self.normalization_stats is not None else None,
         }
         best_val = None
+        best_train = None
+        best_monitor = None
+        no_improve_epochs = 0
         best_state = None
         for epoch in range(epochs):
+            epoch_start = time.perf_counter()
             total = 0.0
             count = 0
+            train_samples = 0
             self.train()
             for step, batch in enumerate(train_loader):
                 if max_steps is not None and step >= int(max_steps):
                     break
                 batch = _to_device_batch(batch, device)
+                train_samples += int(batch.input_fields.shape[0])
                 if self.uses_normalization and self.normalization_stats is not None:
                     batch = normalize_batch_input_target(batch, self.normalization_stats)
                 opt.zero_grad(set_to_none=True)
                 loss = _ifno_training_loss(self, batch, cycle_weight)
+                _raise_if_nonfinite_loss(loss, self, epoch + 1, step + 1, "train_loss")
                 loss.backward()
+                if grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip_norm)
                 opt.step()
                 total += float(loss.detach().cpu())
                 count += 1
-            history["train_loss"].append(total / max(count, 1))
+                if log_interval > 0 and (step + 1) % log_interval == 0:
+                    running = total / max(count, 1)
+                    print(
+                        f"[fit step] baseline=ifno pde={self.data_spec.get('pde', '')} "
+                        f"task={self.data_spec.get('task', '')} epoch={epoch + 1}/{epochs} "
+                        f"step={step + 1}/{_safe_len(train_loader)} batch_loss={float(loss.detach().cpu()):.6g} "
+                        f"running_train_loss={running:.6g} device={device}{_cuda_mem_text(device)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            train_loss = total / max(count, 1)
+            _raise_if_nonfinite_scalar(train_loss, self, epoch + 1, count, "train_loss")
+            history["train_loss"].append(train_loss)
+            if val_loader is None and (best_train is None or train_loss < best_train):
+                best_train = train_loss
+                history["best_epoch"] = epoch + 1
+                best_state = snapshot_state_dict(self)
+            val_loss = None
+            val_count = 0
             if val_loader is not None:
                 self.eval()
                 val_total = 0.0
-                val_count = 0
                 with torch.no_grad():
                     for step, batch in enumerate(val_loader):
                         if max_val_steps is not None and step >= int(max_val_steps):
@@ -186,16 +266,71 @@ class IFNOBaseline(BaselineModel):
                         batch = _to_device_batch(batch, device)
                         if self.uses_normalization and self.normalization_stats is not None:
                             batch = normalize_batch_input_target(batch, self.normalization_stats)
-                        val_total += float(_ifno_training_loss(self, batch, cycle_weight).detach().cpu())
+                        loss = _ifno_training_loss(self, batch, cycle_weight)
+                        _raise_if_nonfinite_loss(loss, self, epoch + 1, step + 1, "val_loss")
+                        val_total += float(loss.detach().cpu())
                         val_count += 1
                 val_loss = val_total / max(val_count, 1)
+                _raise_if_nonfinite_scalar(val_loss, self, epoch + 1, val_count, "val_loss")
                 history["val_loss"].append(val_loss)
                 if best_val is None or val_loss < best_val:
                     best_val = val_loss
-                    history["best_epoch"] = epoch
+                    history["best_epoch"] = epoch + 1
                     history["best_val_loss"] = val_loss
                     best_state = snapshot_state_dict(self)
-        if best_state is not None:
+            monitor_loss = train_loss if monitor_name == "train_loss" else val_loss
+            if monitor_loss is None:
+                monitor_name = "train_loss"
+                history["monitor_name"] = monitor_name
+                monitor_loss = train_loss
+            improved = best_monitor is None or float(monitor_loss) < float(best_monitor) - early_stopping_min_delta
+            if improved:
+                best_monitor = float(monitor_loss)
+                history["best_monitor_loss"] = best_monitor
+                no_improve_epochs = 0
+            else:
+                no_improve_epochs += 1
+            old_lr = float(opt.param_groups[0]["lr"])
+            _step_lr_scheduler(scheduler, monitor_loss)
+            new_lr = float(opt.param_groups[0]["lr"])
+            history["lr_history"].append(new_lr)
+            if old_lr != new_lr:
+                print(
+                    f"[lr scheduler] baseline=ifno pde={self.data_spec.get('pde', '')} "
+                    f"task={self.data_spec.get('task', '')} epoch={epoch + 1}/{epochs} "
+                    f"old_lr={old_lr:.6g} new_lr={new_lr:.6g} monitor={monitor_name} monitor_loss={float(monitor_loss):.6g}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            epoch_time = time.perf_counter() - epoch_start
+            samples_per_sec = train_samples / max(epoch_time, 1e-12)
+            should_stop = early_stopping and epoch + 1 >= min_epochs and no_improve_epochs >= early_stopping_patience
+            if should_stop:
+                history["early_stopped"] = True
+                history["stop_epoch"] = epoch + 1
+                history["stop_reason"] = (
+                    f"no improvement in {monitor_name} for {no_improve_epochs} epochs "
+                    f"(patience={early_stopping_patience}, min_delta={early_stopping_min_delta})"
+                )
+            _write_incremental_history(self.config, history, epoch + 1)
+            print(
+                f"[fit epoch] baseline=ifno pde={self.data_spec.get('pde', '')} "
+                f"task={self.data_spec.get('task', '')} epoch={epoch + 1}/{epochs} "
+                f"train_loss={history['train_loss'][-1]:.6g} val_loss={_fmt_optional(val_loss)} "
+                f"best_val_loss={_fmt_optional(history['best_val_loss'])} best_epoch={history['best_epoch']} "
+                f"monitor={monitor_name} monitor_loss={float(monitor_loss):.6g} "
+                f"no_improve_epochs={no_improve_epochs} early_stopping_patience={early_stopping_patience} "
+                f"epoch_time_sec={epoch_time:.3f} train_steps={count} val_steps={val_count} "
+                f"samples_per_sec={samples_per_sec:.3f} lr={opt.param_groups[0]['lr']:.3e} "
+                f"device={device}{_cuda_mem_text(device)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if should_stop:
+                break
+        if not history["early_stopped"]:
+            history["stop_epoch"] = len(history["train_loss"])
+        if best_state is not None and restore_best:
             restore_state_dict(self, best_state)
         return history
 
