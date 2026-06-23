@@ -115,7 +115,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--load-full-trajectory", action="store_true", help="Load full time trajectories when available instead of endpoint-only task tensors.")
     parser.add_argument("--physics-metric-mode", choices=["per_sample", "per_batch"], default=None)
     parser.add_argument("--strict-size", action="store_true", help="Fail if requested split size exceeds available samples.")
-    parser.add_argument("--save-checkpoint", action="store_true")
+    parser.add_argument(
+        "--save-checkpoint",
+        dest="save_checkpoint",
+        action="store_true",
+        default=True,
+        help="Save a reusable model checkpoint after training. Enabled by default.",
+    )
+    parser.add_argument(
+        "--no-save-checkpoint",
+        dest="save_checkpoint",
+        action="store_false",
+        help="Disable checkpoint saving for runs where only metrics are needed.",
+    )
     parser.add_argument("--steps", type=int, default=None, help="Override per-instance optimization steps in the method config.")
     parser.add_argument("--refine-steps", type=int, default=None, help="Override VIVID refinement steps in the method config.")
     parser.add_argument("--particles", type=int, default=None, help="Override PC-BNN particle count in the method config.")
@@ -130,6 +142,18 @@ def load_yaml(path: str | None) -> dict[str, Any]:
         return {}
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def load_baseline_checkpoint(path: str | Path, *, baseline: str | None = None, map_location: str | torch.device = "cpu") -> torch.nn.Module:
+    payload = torch.load(path, map_location=map_location)
+    baseline_name = str(baseline or payload.get("baseline") or "")
+    if not baseline_name:
+        raise ValueError("Checkpoint does not record a baseline name; pass baseline='...' explicitly.")
+    if baseline_name not in BASELINES:
+        raise ValueError(f"Unknown baseline in checkpoint: {baseline_name!r}")
+    model = BASELINES[baseline_name]().build(payload.get("config", {}), payload.get("data_spec", {}))
+    model.load_payload(payload)
+    return model.to(torch.device(map_location))
 
 
 def build_method_config(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:

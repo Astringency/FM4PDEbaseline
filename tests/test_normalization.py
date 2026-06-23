@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from baselines.common.data_adapter import PDEBatch, PDEBatchDataset, build_default_registry, pde_collate
 from baselines.common.normalization import NormalizationStats, denormalize_prediction, estimate_normalization_stats, normalize_batch_input_target
 from baselines.methods.base import BaselineModel
-from baselines.run import _evaluate_full_test_loader, build_data_spec
+from baselines.run import _evaluate_full_test_loader, build_data_spec, load_baseline_checkpoint
 from baselines.run import main
 
 
@@ -226,6 +226,7 @@ def test_evaluation_uses_predict_physical_for_normalized_model(tmp_path: Path):
         },
         method_budget_fields={"steps": 0, "refine_steps": 0, "particles": 0, "method_budget_label": ""},
         normalization_fields={"normalize": True, "uses_normalization": True, "normalization_stats_path": "", "input_mean": "", "input_std": "", "target_mean": "", "target_std": ""},
+        memory_fields={},
         config_hash="",
     )
     assert rows[0]["mse"] == pytest.approx(0.0)
@@ -280,7 +281,6 @@ def test_normalized_fno_tiny_run_saves_stats_and_best_val(tmp_path: Path):
             "2",
             "--epochs",
             "1",
-            "--save-checkpoint",
             "--output-dir",
             str(out),
         ]
@@ -290,8 +290,12 @@ def test_normalized_fno_tiny_run_saves_stats_and_best_val(tmp_path: Path):
     assert summary["best_val_loss"] is not None
     assert Path(summary["normalization_stats_path"]).exists()
     ckpt = torch.load(summary["checkpoint_path"], map_location="cpu")
+    assert ckpt["baseline"] == "fno"
     assert ckpt["uses_normalization"] is True
     assert ckpt["normalization_stats"]["input_mean"].numel() == 1
+    restored = load_baseline_checkpoint(summary["checkpoint_path"])
+    assert restored.name == "fno"
+    assert restored.uses_normalization is True
 
 
 class _NormalizedTargetEcho(BaselineModel):

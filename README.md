@@ -88,6 +88,23 @@ Check status:
 bash scripts/experiments/08_status.sh
 ```
 
+Baseline runs save reusable model checkpoints by default. Each run writes
+`<output_dir>/<run_prefix>.pt`, and records the path in `summary.json` and the
+result tables as `checkpoint_path`. Disable this only when metrics are enough:
+
+```bash
+python -m baselines.run ... --no-save-checkpoint
+```
+
+Reload a saved model in Python:
+
+```python
+from baselines.run import load_baseline_checkpoint
+
+model = load_baseline_checkpoint("outputs/.../run_id.pt", map_location="cpu")
+model.eval()
+```
+
 Retry failed runs:
 
 ```bash

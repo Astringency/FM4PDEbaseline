@@ -131,6 +131,8 @@ class BaselineModel(nn.Module):
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
+                "format_version": 1,
+                "baseline": self.name,
                 "state_dict": self.state_dict(),
                 "config": self.config,
                 "data_spec": self.data_spec,
@@ -141,8 +143,11 @@ class BaselineModel(nn.Module):
             path,
         )
 
-    def load(self, path):
-        payload = torch.load(path, map_location="cpu")
+    def load(self, path, map_location="cpu"):
+        payload = torch.load(path, map_location=map_location)
+        return self.load_payload(payload)
+
+    def load_payload(self, payload: dict[str, Any]):
         self.load_state_dict(payload["state_dict"])
         self.config = payload.get("config", {})
         self.data_spec = payload.get("data_spec", {})
