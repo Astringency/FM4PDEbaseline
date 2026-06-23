@@ -9,7 +9,7 @@ log() {
 }
 
 DATA_ROOT="${DATA_ROOT:-/home/zhangxf/share/zhangxfA100/large_storage/PDEdata/}"
-OUT_ROOT="${OUT_ROOT:-outputs/main_results_$(date +%Y%m%d_%H%M)}"
+OUT_ROOT="${OUT_ROOT:-outputs/main_results_$(date +%Y%m%d_%H%M%S)}"
 FIRST_N="${FIRST_N:-8}"
 JOBS_PER_GPU="${JOBS_PER_GPU:-2}"
 NUM_WORKERS_PER_RUN="${NUM_WORKERS_PER_RUN:-2}"

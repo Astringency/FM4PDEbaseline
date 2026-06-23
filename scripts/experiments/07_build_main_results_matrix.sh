@@ -9,7 +9,7 @@ log() {
 }
 
 DATA_ROOT="${DATA_ROOT:-/home/zhangxf/share/zhangxfA100/large_storage/PDEdata/}"
-OUT_ROOT="${OUT_ROOT:-outputs/main_results_$(date +%Y%m%d_%H%M)}"
+OUT_ROOT="${OUT_ROOT:-outputs/main_results_$(date +%Y%m%d_%H%M%S)}"
 MATRIX_NAME="${MATRIX_NAME:-main_results}"
 CONFIG="${CONFIG:-configs/experiments/main_results.yaml}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
@@ -69,4 +69,3 @@ PY
 log "matrix path=$MATRIX"
 log "matrix total rows=$total"
 log "OUT_ROOT=$OUT_ROOT"
-
