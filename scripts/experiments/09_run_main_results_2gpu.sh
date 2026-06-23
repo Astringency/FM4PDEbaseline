@@ -16,10 +16,10 @@ log() {
 }
 
 DATA_ROOT="${DATA_ROOT:-/home/zhangxf/share/zhangxfA100/large_storage/PDEdata/}"
-OUT_ROOT="${OUT_ROOT:-outputs/main_results_$(date +%Y%m%d_%H%M)}"
+OUT_ROOT="${OUT_ROOT:-outputs/main_results_$(date +%Y%m%d_%H%M%S)}"
 DEVICE="${DEVICE:-cuda}"
 GPUS="${GPUS:-0,1}"
-JOBS_PER_GPU="${JOBS_PER_GPU:-2}"
+JOBS_PER_GPU="${JOBS_PER_GPU:-4}"
 NUM_WORKERS_PER_RUN="${NUM_WORKERS_PER_RUN:-2}"
 MATRIX="$OUT_ROOT/matrices/main_results.jsonl"
 export DATA_ROOT OUT_ROOT DEVICE GPUS JOBS_PER_GPU NUM_WORKERS_PER_RUN
