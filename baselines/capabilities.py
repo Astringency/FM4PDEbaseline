@@ -126,6 +126,8 @@ def task_family_for(task: str, sensor_mode: str = "", task_group: str = "") -> s
         return "sparse_reconstruction"
     if task == "sparse_inverse":
         return "sparse_inverse"
+    if task == "sparse_forward":
+        return "sparse_forward"
     return task
 
 
@@ -304,7 +306,7 @@ def resolve_capability(
         )
 
     if baseline == "recfno":
-        if family == "sparse_reconstruction":
+        if family in {"sparse_reconstruction", "sparse_forward"}:
             return _cap(
                 baseline,
                 pde,
@@ -313,7 +315,7 @@ def resolve_capability(
                 "official_adapter",
                 "official",
                 family,
-                "RecFNO is native for sparse-sensor global field reconstruction with mask/Voronoi embedding",
+                "RecFNO is native for sparse-sensor field reconstruction/forward with mask/Voronoi embedding",
                 "Use vendored RecFNO VoronoiFNO2d/model components in paper mode.",
             )
         if family == "sparse_inverse":
@@ -322,12 +324,11 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "adapted",
-                "adapted_allowed",
+                "official_adapter",
+                "official",
                 family,
-                "changing the supervised target to coefficient/source is a RecFNO adaptation",
-                "Report only in supplement as adapted sparse inverse.",
-                eligible=False,
+                "RecFNO supervised sparse inverse maps sparse solution observations to coefficient/source fields",
+                "Use vendored RecFNO VoronoiFNO2d/model components with coefficient/source target.",
             )
         return _cap(
             baseline,
@@ -341,7 +342,7 @@ def resolve_capability(
         )
 
     if baseline == "senseiver":
-        if family == "sparse_reconstruction":
+        if family in {"sparse_reconstruction", "sparse_forward"}:
             return _cap(
                 baseline,
                 pde,
@@ -350,7 +351,7 @@ def resolve_capability(
                 "official_adapter",
                 "official",
                 family,
-                "Senseiver is native for sparse/irregular sensor field reconstruction with query coordinates",
+                "Senseiver is native for sparse/irregular sensor field reconstruction/forward with query coordinates",
                 "Use official Encoder/Decoder where importable; local Perceiver variant is adapted supplement.",
             )
         if family == "sparse_inverse":
@@ -359,12 +360,11 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "adapted",
-                "adapted_allowed",
+                "official_adapter",
+                "official",
                 family,
-                "coefficient/source reconstruction from sensors is a supervised Senseiver adaptation",
-                "Do not include in native main table.",
-                eligible=False,
+                "Senseiver supervised sparse inverse maps sparse solution observations to coefficient/source fields",
+                "Use official Encoder/Decoder where importable.",
             )
         return _cap(
             baseline,
@@ -378,7 +378,7 @@ def resolve_capability(
         )
 
     if baseline == "voronoicnn":
-        if family == "sparse_reconstruction":
+        if family in {"sparse_reconstruction", "sparse_forward"}:
             return _cap(
                 baseline,
                 pde,
@@ -387,7 +387,7 @@ def resolve_capability(
                 "official_adapter",
                 "official",
                 family,
-                "VoronoiCNN is native for sparse-sensor global field reconstruction via Voronoi tessellation and the published CNN stack",
+                "VoronoiCNN is native for sparse-sensor field reconstruction/forward via Voronoi tessellation and the published CNN stack",
                 "If original Keras scripts are not importable, label the PyTorch Conv2D architecture reimplementation as official_architecture_reimplementation.",
                 official_architecture_allowed=True,
             )
@@ -397,12 +397,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "adapted",
-                "adapted_allowed",
+                "official_adapter",
+                "official",
                 family,
-                "sparse inverse is a supervised target-change adaptation, not native VoronoiCNN",
-                "Supplement only.",
-                eligible=False,
+                "VoronoiCNN supervised sparse inverse maps sparse solution observations to coefficient/source fields",
+                "If original Keras scripts are not importable, label the PyTorch Conv2D architecture reimplementation as official_architecture_reimplementation.",
+                official_architecture_allowed=True,
             )
         return _cap(
             baseline,
@@ -427,6 +427,29 @@ def resolve_capability(
                 family,
                 "PINN is native for per-instance PDE fitting from sparse observations",
                 "DeepXDE FNN may provide the architecture; the PDE objective is local and must be disclosed.",
+            )
+        if family == "sparse_forward":
+            if pde in STATIC_SPARSE_INVERSE_PDES:
+                return _cap(
+                    baseline,
+                    pde,
+                    task,
+                    sensor_mode,
+                    "official_adapter",
+                    "canonical_math",
+                    family,
+                    "PINN is native for per-instance PDE fitting from sparse observations",
+                    "DeepXDE FNN may provide the architecture; the PDE objective is local and must be disclosed.",
+                )
+            return _cap(
+                baseline,
+                pde,
+                task,
+                sensor_mode,
+                "unsupported",
+                "unsupported",
+                family,
+                "time-dependent sparse forward is disabled until the source/coefficient residual is explicit",
             )
         if family == "sparse_inverse":
             if pde in STATIC_SPARSE_INVERSE_PDES:
@@ -522,8 +545,31 @@ def resolve_capability(
                 "native",
                 "canonical_math",
                 family,
-                "PDE-constrained optimization is a canonical per-instance sparse reconstruction baseline",
+                "PDE-constrained optimization is a canonical per-instance sparse reconstruction/forward baseline",
                 "No single official repository is claimed.",
+            )
+        if family == "sparse_forward":
+            if pde in STATIC_SPARSE_INVERSE_PDES:
+                return _cap(
+                    baseline,
+                    pde,
+                    task,
+                    sensor_mode,
+                    "native",
+                    "canonical_math",
+                    family,
+                    "PDE-constrained optimization is a canonical per-instance sparse reconstruction/forward baseline",
+                    "No single official repository is claimed.",
+                )
+            return _cap(
+                baseline,
+                pde,
+                task,
+                sensor_mode,
+                "unsupported",
+                "unsupported",
+                family,
+                "time-dependent sparse forward is disabled until the source/coefficient residual is explicit",
             )
         if family == "sparse_inverse":
             if pde in STATIC_SPARSE_INVERSE_PDES:

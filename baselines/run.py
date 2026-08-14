@@ -140,6 +140,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--implementation-mode", default=None, help="Override method implementation_mode.")
     parser.add_argument("--official-backend", default=None, help="Override method official_backend.")
     parser.add_argument("--method-override", action="append", default=[], help="Override a method config key as key=value. Can be repeated.")
+    parser.add_argument("--eval-only", action="store_true", help="Skip training; load checkpoint and run test evaluation only.")
+    parser.add_argument("--checkpoint", default="", help="Path to checkpoint .pt file for --eval-only mode.")
     return parser.parse_args(argv)
 
 
@@ -151,7 +153,7 @@ def load_yaml(path: str | None) -> dict[str, Any]:
 
 
 def load_baseline_checkpoint(path: str | Path, *, baseline: str | None = None, map_location: str | torch.device = "cpu") -> torch.nn.Module:
-    payload = torch.load(path, map_location=map_location)
+    payload = torch.load(path, map_location=map_location, weights_only=False)
     baseline_name = str(baseline or payload.get("baseline") or "")
     if not baseline_name:
         raise ValueError("Checkpoint does not record a baseline name; pass baseline='...' explicitly.")
@@ -387,30 +389,46 @@ def main(argv: list[str] | None = None) -> None:
             f"{backend_info['backend_used']!r}. Install/enable the official dependency or use implementation_mode: official_or_skip."
         )
 
-    _run_stage("fit", "start", baseline=args.baseline, pde=args.pde, task=args.task)
-    train_start = time.perf_counter()
-    train_history: dict[str, Any] = {}
-    if not is_per_instance:
-        train_history = model.fit(train_loader, val_loader)
+    if args.eval_only:
+        if not args.checkpoint:
+            raise ValueError("--eval-only requires --checkpoint")
+        ckpt_path = Path(args.checkpoint)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        model = load_baseline_checkpoint(ckpt_path, map_location=args.device)
+        train_time = 0.0
+        train_history = {}
+        normalization_stats_path = ""
+        normalization_fields = {}
+        config_snapshot = Path("")
+        config_hash = ""
+        checkpoint_path = str(ckpt_path)
+        train_history_path = out_dir / f"{run_prefix}_train_history.json"
     else:
-        train_history = model.fit(train_loader, val_loader)
-    train_time = time.perf_counter() - train_start
-    _run_stage("fit", "done", baseline=args.baseline, elapsed_sec=f"{train_time:.3f}")
+        _run_stage("fit", "start", baseline=args.baseline, pde=args.pde, task=args.task)
+        train_start = time.perf_counter()
+        train_history = {}
+        if not is_per_instance:
+            train_history = model.fit(train_loader, val_loader)
+        else:
+            train_history = model.fit(train_loader, val_loader)
+        train_time = time.perf_counter() - train_start
+        _run_stage("fit", "done", baseline=args.baseline, elapsed_sec=f"{train_time:.3f}")
 
-    normalization_stats_path = _write_normalization_stats(out_dir, run_prefix, model)
-    normalization_fields = _normalization_fields(model, normalization_stats_path)
-    config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields, memory_fields)
-    config_hash = _file_sha1(config_snapshot)
-    train_history_path = out_dir / f"{run_prefix}_train_history.json"
-    train_history_payload = _json_safe(train_history)
-    if isinstance(train_history_payload, dict):
-        train_history_payload.setdefault("completed_epochs", len(train_history_payload.get("train_loss", [])))
-    train_history_path.write_text(json.dumps(train_history_payload, indent=2), encoding="utf-8")
-    checkpoint_path = ""
-    if args.save_checkpoint:
-        ckpt = out_dir / f"{run_prefix}.pt"
-        model.save(ckpt)
-        checkpoint_path = str(ckpt)
+        normalization_stats_path = _write_normalization_stats(out_dir, run_prefix, model)
+        normalization_fields = _normalization_fields(model, normalization_stats_path)
+        config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields, memory_fields)
+        config_hash = _file_sha1(config_snapshot)
+        train_history_path = out_dir / f"{run_prefix}_train_history.json"
+        train_history_payload = _json_safe(train_history)
+        if isinstance(train_history_payload, dict):
+            train_history_payload.setdefault("completed_epochs", len(train_history_payload.get("train_loss", [])))
+        train_history_path.write_text(json.dumps(train_history_payload, indent=2), encoding="utf-8")
+        checkpoint_path = ""
+        if args.save_checkpoint:
+            ckpt = out_dir / f"{run_prefix}.pt"
+            model.save(ckpt)
+            checkpoint_path = str(ckpt)
 
     _run_stage("eval", "start", baseline=args.baseline, pde=args.pde, task=args.task)
     raw_rows, eval_totals = _evaluate_full_test_loader(

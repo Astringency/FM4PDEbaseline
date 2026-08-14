@@ -103,7 +103,10 @@ def test_main_table_only_skips_adapted_but_debug_filter_allows_it():
     assert compatibility_reason("fno", "poisson", "inverse") == ""
     assert "supplement-only" in compatibility_reason("fno", "poisson", "inverse", main_table_only=True)
     assert "supplement-only" in compatibility_reason("deeponet", "darcy", "sparse_solution", "random", main_table_only=True)
-    assert "supplement-only" in compatibility_reason("recfno", "poisson", "sparse_inverse", "random", main_table_only=True)
+    # recfno/senseiver/voronoicnn sparse_inverse are now main-table eligible.
+    assert compatibility_reason("recfno", "poisson", "sparse_inverse", "random", main_table_only=True) == ""
+    assert compatibility_reason("senseiver", "poisson", "sparse_inverse", "random", main_table_only=True) == ""
+    assert compatibility_reason("voronoicnn", "poisson", "sparse_inverse", "random", main_table_only=True) == ""
 
 
 def test_diffusionpde_and_fm4pde_are_outside_matrix():

@@ -185,6 +185,7 @@ def test_vivid_predict_physical_avoids_double_denormalization(tmp_path):
             "target_mean": "",
             "target_std": "",
         },
+        memory_fields={},
         config_hash="",
     )
     assert rows[0]["mse"] == pytest.approx(0.0)

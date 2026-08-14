@@ -27,13 +27,13 @@ def tiny_data_root(tmp_path: Path) -> Path:
     with h5py.File(d / "darcy_10000-128-128_1.mat", "w") as f:
         f["thresh_a_data"] = rng.normal(size=(s, s, n)).astype("float32")
         f["thresh_p_data"] = rng.normal(size=(s, s, n)).astype("float32")
-    with h5py.File(d / "darcy_test_1000-128-128.mat", "w") as f:
+    with h5py.File(d / "darcy_test_10000-128-128.mat", "w") as f:
         f["thresh_a_data"] = rng.normal(size=(s, s, n)).astype("float32")
         f["thresh_p_data"] = rng.normal(size=(s, s, n)).astype("float32")
 
     p = mkdir("poisson")
     scipy.io.savemat(p / "poisson_10000-128-128_1.mat", {"f_data": rng.normal(size=(n, s, s)), "phi_data": rng.normal(size=(n, s, s))})
-    scipy.io.savemat(p / "poisson_test_1000-128-128.mat", {"f_data": rng.normal(size=(n, s, s)), "phi_data": rng.normal(size=(n, s, s))})
+    scipy.io.savemat(p / "poisson_test_10000-128-128.mat", {"f_data": rng.normal(size=(n, s, s)), "phi_data": rng.normal(size=(n, s, s))})
 
     h = mkdir("helmholtz")
     scipy.io.savemat(h / "helmholtz_10000-128-128_1.mat", {"f_data": rng.normal(size=(n, s, s)), "psi_data": rng.normal(size=(n, s, s))})
@@ -45,7 +45,7 @@ def tiny_data_root(tmp_path: Path) -> Path:
     with h5py.File(ns / "nsnonbounded_10000-128-128-10_1_new.mat", "w") as f:
         f["w0"] = rng.normal(size=(n, s, s)).astype("float32")
         f["w"] = rng.normal(size=(n, s, s, 10)).astype("float32")
-    with h5py.File(ns / "nsnonbounded_test_1000-128-128-10.mat", "w") as f:
+    with h5py.File(ns / "nsnonbounded_test_10000-128-128-10.mat", "w") as f:
         f["w0"] = rng.normal(size=(n, s, s)).astype("float32")
         f["w"] = rng.normal(size=(n, s, s, 10)).astype("float32")
 

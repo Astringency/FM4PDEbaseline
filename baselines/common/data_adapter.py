@@ -322,7 +322,7 @@ class PDEDataRegistry:
             effective_sensor_mode = sensor_mode
             observation_source = target_fields
             observation_names = list(target_names)
-            if task == "sparse_inverse":
+            if task in {"sparse_inverse", "sparse_forward"}:
                 observation_source = input_fields
                 observation_names = list(input_names)
                 metadata["observed_solution_fields"] = observation_source
@@ -370,7 +370,7 @@ class PDEDataRegistry:
             if task in {"sparse_solution", "sparse_reconstruction"}:
                 input_fields = obs["masked_grid"]
                 input_names = list(target_names)
-            elif task == "sparse_inverse":
+            elif task in {"sparse_inverse", "sparse_forward"}:
                 input_fields = obs["masked_grid"]
                 input_names = observation_names
         else:
@@ -1131,7 +1131,7 @@ def _load_darcy(
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
     if active_split == "test":
-        patterns = ["darcy_test_*-128-128.mat", "darcy_*-128-128_test.mat"]
+        patterns = ["darcy_test_10000-128-128.mat"]
     elif active_split == "val":
         patterns = ["darcy_val_*-128-128.mat", "darcy_*-128-128_val.mat"]
     else:
@@ -1303,8 +1303,8 @@ def _load_static_mat(
 def _static_patterns(pde: str, split: str) -> list[str]:
     if split == "test":
         if pde == "helmholtz":
-            return ["helmholtz_test_*-128-128*.mat", "helmholtz_*-128-128_test.mat"]
-        return [f"{pde}_test_*-128-128.mat", f"{pde}_*-128-128_test.mat"]
+            return ["helmholtz_test_10000-128-128.mat"]
+        return [f"{pde}_test_10000-128-128.mat", f"{pde}_test_10000-*.mat"]
     if split == "val":
         return [f"{pde}_val_*-128-128*.mat", f"{pde}_*-128-128_val.mat"]
     return [f"{pde}_10000-128-128_*.mat"]
@@ -1325,12 +1325,7 @@ def _load_nsnonbounded(
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
     if active_split == "test":
-        patterns = [
-            "nsnonbounded_test_*-128-128-10*.mat",
-            "nsnonbounded_1000-128-128-10*.mat",
-            "nsnonbounded_10000-128-128-10_test*.mat",
-            "nsnonbounded_*_test*.mat",
-        ]
+        patterns = ["nsnonbounded_test_10000-128-128-10.mat"]
     elif active_split == "val":
         patterns = ["nsnonbounded_val_*-128-128-10_*.mat", "nsnonbounded_*-128-128-10_val*.mat"]
     else:
@@ -1411,7 +1406,7 @@ def _load_burger(
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
     if active_split == "test":
-        patterns = ["burger_test_*-128-128.mat", "burger_*-128-128_test.mat"]
+        patterns = ["burger_test_10000-128-128.mat"]
     elif active_split == "val":
         patterns = ["burger_val_*-128-128.mat", "burger_*-128-128_val.mat"]
     else:

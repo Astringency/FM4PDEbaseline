@@ -145,11 +145,11 @@ class BaselineModel(nn.Module):
         )
 
     def load(self, path, map_location="cpu"):
-        payload = torch.load(path, map_location=map_location)
+        payload = torch.load(path, map_location=map_location, weights_only=False)
         return self.load_payload(payload)
 
     def load_payload(self, payload: dict[str, Any]):
-        self.load_state_dict(payload["state_dict"])
+        restore_state_dict(self, payload["state_dict"])
         self.config = payload.get("config", {})
         self.data_spec = payload.get("data_spec", {})
         backend = payload.get("backend", {})

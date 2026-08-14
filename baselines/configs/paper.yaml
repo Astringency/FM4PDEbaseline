@@ -45,7 +45,7 @@ method:
   scheduler_min_lr: 1.0e-5
   scheduler_threshold: 1.0e-6
   early_stopping: true
-  early_stopping_patience: 20
+  early_stopping_patience: 10
   early_stopping_min_delta: 1.0e-8
   min_epochs: 5
   restore_best: true
@@ -86,7 +86,7 @@ method_by_baseline:
     cycle_weight: 0.0
     lr: 0.0005
     grad_clip_norm: 1.0
-    early_stopping_patience: 25
+    early_stopping_patience: 12
   recfno:
     width: 64
     embedding: mask

@@ -71,6 +71,8 @@ class PINNSparseBaseline(BaselineModel):
     def predict(self, batch: PDEBatch):
         if batch.task == "sparse_inverse":
             return self._predict_sparse_inverse(batch)
+        if batch.task == "sparse_forward":
+            return self._predict_sparse_forward(batch)
         start = time.perf_counter()
         preds = []
         steps = int(self.config.get("steps", 2))
@@ -155,6 +157,49 @@ class PINNSparseBaseline(BaselineModel):
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         return torch.cat(preds, dim=0).detach()
 
+    def _predict_sparse_forward(self, batch: PDEBatch):
+        pde = batch.pde_name.lower()
+        if pde not in STATIC_SPARSE_INVERSE_PDES:
+            raise NotImplementedError(f"PINN-Sparse sparse_forward is only enabled for static PDEs, got {batch.pde_name}")
+        start = time.perf_counter()
+        preds = []
+        steps = int(self.config.get("steps", 2))
+        lr = float(self.config.get("lr", 1e-2))
+        lam_obs = float(self.config.get("lambda_obs", 1.0))
+        lam_reg = float(self.config.get("lambda_reg", 1e-6))
+        opt_name = str(self.config.get("optimizer", "adam")).lower()
+        for item in range(batch.target_fields.shape[0]):
+            coords = batch.coords[item].to(batch.target_fields.device, batch.target_fields.dtype)
+            unknown_target_shape = batch.input_fields[item : item + 1].shape
+            solution_target_shape = batch.target_fields[item : item + 1].shape
+            unknown = self._new_field(coords.shape[-1], unknown_target_shape[1]).to(batch.target_fields.device)
+            solution = self._new_field(coords.shape[-1], solution_target_shape[1]).to(batch.target_fields.device)
+            params = list(unknown.parameters()) + list(solution.parameters())
+            optimizer = torch.optim.LBFGS(params, lr=lr, max_iter=steps) if opt_name == "lbfgs" else torch.optim.Adam(params, lr=lr)
+
+            def closure():
+                optimizer.zero_grad(set_to_none=True)
+                unknown_grid = unknown(coords).T.reshape(unknown_target_shape)
+                solution_grid = solution(coords).T.reshape(solution_target_shape)
+                loss = lam_obs * sparse_forward_observation_loss(unknown_grid, batch, item=item)
+                physics_value = sparse_inverse_physics_loss(unknown_grid, solution_grid, batch, item, self.config)
+                if torch.isfinite(physics_value):
+                    loss = loss + physics_value
+                loss = loss + lam_reg * (_smoothness_reg(unknown_grid) + _smoothness_reg(solution_grid))
+                loss.backward()
+                return loss
+
+            if opt_name == "lbfgs":
+                optimizer.step(closure)
+            else:
+                for _ in range(max(steps, 0)):
+                    closure()
+                    optimizer.step()
+            with torch.no_grad():
+                preds.append(solution(coords).T.reshape(solution_target_shape))
+        batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        return torch.cat(preds, dim=0).detach()
+
     def _new_field(self, coord_dim: int, out_channels: int) -> nn.Module:
         if self.deepxde_fnn_cls is not None:
             layers = [coord_dim] + [self.hidden] * max(self.depth - 1, 1) + [out_channels]
@@ -186,6 +231,14 @@ def sparse_inverse_observation_loss(solution: torch.Tensor, batch: PDEBatch, ite
     target = observed[item : item + 1] if item is not None and isinstance(observed, torch.Tensor) else observed
     obs_values = batch.obs_values[item : item + 1] if item is not None and batch.obs_values is not None else batch.obs_values
     return _observation_loss(solution, target.to(solution.device, solution.dtype), batch.mask, obs_values)
+
+
+def sparse_forward_observation_loss(unknown: torch.Tensor, batch: PDEBatch, item: int | None = None) -> torch.Tensor:
+    # sparse_forward observes the source/coefficient field, so the reconstructed
+    # `unknown` (source) must match the observed source values at sensor points.
+    target = batch.input_fields[item : item + 1] if item is not None else batch.input_fields
+    obs_values = batch.obs_values[item : item + 1] if item is not None and batch.obs_values is not None else batch.obs_values
+    return _observation_loss(unknown, target.to(unknown.device, unknown.dtype), batch.mask, obs_values)
 
 
 def sparse_inverse_physics_loss(
