@@ -18,10 +18,14 @@ if str(ROOT) not in sys.path:
 from scripts.experiments.provenance import (
     FINGERPRINT_FIELDS,
     quarantine_output_artifacts,
+    reject_historical_experiment_path,
+    reject_historical_experiment_row,
     repository_revision,
+    requires_full_data_manifest,
     run_fingerprint,
     sha256_file,
     summary_validation_reasons,
+    validate_full_data_manifest,
 )
 
 FORBIDDEN_PAPER_FLAGS = {
@@ -81,10 +85,10 @@ def load_row_with_total(matrix: str | Path, index: int) -> tuple[dict[str, Any],
 
 def build_command(row: dict[str, Any]) -> list[str]:
     values = effective_command_values(row)
-    _validate_matrix_provenance(row, values)
     data_root = os.environ.get("DATA_ROOT", "")
     if not data_root:
         raise RuntimeError("DATA_ROOT must be set to a real PDE data root for paper-mode runs")
+    _validate_matrix_provenance(row, values, data_root=data_root)
     cmd = [
         os.environ.get("PYTHON", "python"),
         "-m",
@@ -139,11 +143,14 @@ def build_command(row: dict[str, Any]) -> list[str]:
         str(row.get("run_name", row["run_id"])),
         "--sensor-seed",
         str(values["sensor_seed"]),
+        "--strict-size",
     ]
     provenance_flags = {
+        "--matrix-schema-version": row.get("matrix_schema_version"),
         "--summary-schema-version": row.get("summary_schema_version"),
         "--run-fingerprint": row.get("run_fingerprint"),
         "--config-content-sha256": row.get("config_content_sha256"),
+        "--experiment-config-sha256": row.get("experiment_config_sha256"),
         "--data-manifest-sha256": row.get("data_manifest_sha256"),
         "--data-manifest-path": row.get("data_manifest_path"),
         "--task-protocol-version": row.get("task_protocol_version"),
@@ -154,6 +161,7 @@ def build_command(row: dict[str, Any]) -> list[str]:
         "--source-train-run-fingerprint": row.get("source_train_run_fingerprint"),
         "--source-train-seed": row.get("source_train_seed"),
         "--commit-hash": row.get("commit_hash"),
+        "--checkpoint-sha256": row.get("checkpoint_sha256"),
     }
     for flag, value in provenance_flags.items():
         # Hand-authored legacy/debug rows remain CLI-compatible, but they will
@@ -167,6 +175,8 @@ def build_command(row: dict[str, Any]) -> list[str]:
                 str(values["num_sensors"]),
                 "--sensor-mode",
                 str(values["sensor_mode"]),
+                "--sensor-budget-mode",
+                str(values["sensor_budget_mode"]),
                 "--noise-level",
                 str(values["noise_level"]),
             ]
@@ -200,7 +210,9 @@ def build_command(row: dict[str, Any]) -> list[str]:
     return cmd
 
 
-def _validate_matrix_provenance(row: dict[str, Any], values: dict[str, Any]) -> None:
+def _validate_matrix_provenance(
+    row: dict[str, Any], values: dict[str, Any], *, data_root: str | Path
+) -> None:
     """Fail before launch when a v2 matrix row no longer describes the command."""
     expected_fingerprint = str(row.get("run_fingerprint", "") or "")
     if not expected_fingerprint:
@@ -215,11 +227,34 @@ def _validate_matrix_provenance(row: dict[str, Any], values: dict[str, Any]) -> 
         effective["commit_hash"] = repository_revision(ROOT)
         effective["config_content_sha256"] = sha256_file(str(values["config"]), root=ROOT)
         data_manifest_path = str(effective.get("data_manifest_path", "") or "")
+        expected_data_manifest_hash = str(
+            effective.get("data_manifest_sha256", "") or ""
+        )
+        if requires_full_data_manifest(effective.get("task_protocol_version")) and (
+            not data_manifest_path or not expected_data_manifest_hash
+        ):
+            raise ValueError(
+                "formal v2 matrix row requires data_manifest_path and data_manifest_sha256"
+            )
         if data_manifest_path:
-            observed_data_manifest_hash = sha256_file(data_manifest_path, root=ROOT)
-            expected_data_manifest_hash = str(effective.get("data_manifest_sha256", "") or "")
-            if not expected_data_manifest_hash:
-                raise ValueError("data_manifest_path is present but data_manifest_sha256 is missing")
+            manifest, _manifest_path, observed_data_manifest_hash = validate_full_data_manifest(
+                data_manifest_path,
+                expected_sha256=expected_data_manifest_hash,
+                expected_experiment_config_sha256=str(
+                    effective["experiment_config_sha256"]
+                ),
+                expected_data_root=data_root,
+                expected_verifier_sha256=sha256_file(
+                    ROOT / "scripts" / "verify_data_protocol.py"
+                ),
+                verify_source_signatures=True,
+            )
+            if str(effective.get("pde", "")) not in {
+                str(value) for value in manifest.get("pdes", [])
+            }:
+                raise ValueError(
+                    f"data manifest does not cover matrix PDE {effective.get('pde')!r}"
+                )
             if observed_data_manifest_hash != expected_data_manifest_hash:
                 raise ValueError(
                     f"data manifest SHA-256 {observed_data_manifest_hash} does not match matrix "
@@ -262,6 +297,9 @@ def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
         "prefetch_factor": row_value_default(row, "prefetch_factor", 2, "PREFETCH_FACTOR", allow_override),
         "num_sensors": row_value(row, "num_sensors", "NUM_SENSORS", allow_override),
         "sensor_mode": row_value(row, "sensor_mode", "SENSOR_MODE", allow_override),
+        "sensor_budget_mode": row_value_default(
+            row, "sensor_budget_mode", "per_time", "SENSOR_BUDGET_MODE", allow_override
+        ),
         "noise_level": row_value(row, "noise_level", "NOISE_LEVEL", allow_override),
         "sensor_seed": row_value_default(row, "sensor_seed", row.get("seed", 1), "SENSOR_SEED", allow_override),
         "steps": _method_steps(row, allow_override),
@@ -278,8 +316,20 @@ def _save_checkpoint_for_row(row: dict[str, Any]) -> bool:
     # be reloaded for later inspection or re-evaluation. Per-instance methods
     # (pinn_sparse/pde_opt/...) have no persistent model state to save.
     mode = str(os.environ.get("SAVE_CHECKPOINT", "amortized")).strip().lower()
+    formal_amortized_training = bool(
+        row.get("execution_mode", "train") == "train"
+        and requires_full_data_manifest(row.get("task_protocol_version"))
+        and str(row.get("baseline", "")).lower() in AMORTIZED_CHECKPOINT_BASELINES
+    )
     if mode in {"0", "false", "no", "off", "none", ""}:
+        if formal_amortized_training:
+            raise RuntimeError(
+                "formal amortized training must save a checkpoint for reproducibility; "
+                "remove SAVE_CHECKPOINT=off or rebuild a non-formal debug matrix"
+            )
         return False
+    if formal_amortized_training:
+        return True
     if mode in {"1", "true", "yes", "on", "all"}:
         return True
     if mode in {"amortized", "neural"}:
@@ -298,6 +348,9 @@ def run_one(
     total: int | None = None,
     matrix: str | Path | None = None,
 ) -> int:
+    reject_historical_experiment_row(row)
+    if matrix is not None:
+        reject_historical_experiment_path(matrix, field="matrix")
     output_dir = Path(row["output_dir"])
     log_dir = Path(row.get("log_dir") or output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -645,10 +698,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.matrix:
         raise RuntimeError("matrix path is required")
+    reject_historical_experiment_path(args.matrix, field="matrix")
     index = int(args.index)
     if os.environ.get("ONE_BASED_INDEX", "0") in {"1", "true", "yes"}:
         index -= 1
     row, total = load_row_with_total(args.matrix, index)
+    reject_historical_experiment_row(row)
     if row.get("skip_reason"):
         status_raw = str(row.get("status_file") or "")
         if status_raw:

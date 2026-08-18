@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import torch
 
 from baselines.common.data_adapter import PDEBatch
@@ -10,6 +8,7 @@ from baselines.common.metrics import physics_loss_metric
 from .base import BaselineModel
 from .pinn_sparse import (
     STATIC_SPARSE_INVERSE_PDES,
+    _synchronized_perf_counter,
     _physics_weight_metadata,
     _select_physics_loss,
     _smoothness_reg,
@@ -25,7 +24,13 @@ class PDEOptBaseline(BaselineModel):
 
     def build(self, config, data_spec):
         super().build(config, data_spec)
-        self.optimized_numel = int(data_spec["target_numel"]) if "target_numel" in data_spec else int(data_spec["target_channels"])
+        target_numel = int(data_spec.get("target_numel", data_spec["target_channels"]))
+        input_numel = int(data_spec.get("input_numel", data_spec["input_channels"]))
+        self.optimized_numel = (
+            target_numel + input_numel
+            if str(data_spec.get("task", "")) in {"sparse_inverse", "sparse_forward"}
+            else target_numel
+        )
         self.mark_canonical_math("pde_opt", adapter_status="canonical_pde_constrained_optimization")
         return self
 
@@ -48,7 +53,7 @@ class PDEOptBaseline(BaselineModel):
                 "PDE-Opt is disabled for the sensor-only sparse_solution protocol because its PDE objective "
                 "requires hidden source/coefficient/initial fields. Use a separately named equal-context protocol."
             )
-        start = time.perf_counter()
+        start = _synchronized_perf_counter(batch)
         pred = torch.nn.Parameter(batch.metadata.get("voronoi_grid", batch.input_fields).detach().clone())
         steps = int(self.config.get("steps", 3))
         lam_obs = float(self.config.get("lambda_obs", 1.0))
@@ -71,14 +76,14 @@ class PDEOptBaseline(BaselineModel):
                 loss = self._objective(pred, batch, lam_obs, lam_reg)
                 loss.backward()
                 opt.step()
-        batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
         return pred.detach()
 
     def _predict_sparse_inverse(self, batch: PDEBatch):
         pde = batch.pde_name.lower()
         if pde not in STATIC_SPARSE_INVERSE_PDES:
             raise NotImplementedError(f"PDE-Opt sparse_inverse is only enabled for static PDEs, got {batch.pde_name}")
-        start = time.perf_counter()
+        start = _synchronized_perf_counter(batch)
         solution0 = batch.metadata.get("voronoi_grid", batch.input_fields).detach().clone()
         unknown0 = torch.zeros_like(batch.target_fields)
         solution = torch.nn.Parameter(solution0)
@@ -106,14 +111,14 @@ class PDEOptBaseline(BaselineModel):
                 loss = self._sparse_inverse_objective(unknown, solution, batch, lam_obs, lam_reg)
                 loss.backward()
                 opt.step()
-        batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
         return unknown.detach()
 
     def _predict_sparse_forward(self, batch: PDEBatch):
         pde = batch.pde_name.lower()
         if pde not in STATIC_SPARSE_INVERSE_PDES:
             raise NotImplementedError(f"PDE-Opt sparse_forward is only enabled for static PDEs, got {batch.pde_name}")
-        start = time.perf_counter()
+        start = _synchronized_perf_counter(batch)
         unknown0 = batch.metadata.get("voronoi_grid", batch.input_fields).detach().clone()
         solution0 = torch.zeros_like(batch.target_fields)
         unknown = torch.nn.Parameter(unknown0)
@@ -141,7 +146,7 @@ class PDEOptBaseline(BaselineModel):
                 loss = self._sparse_forward_objective(unknown, solution, batch, lam_obs, lam_reg)
                 loss.backward()
                 opt.step()
-        batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
         return solution.detach()
 
     def _objective(self, pred, batch, lam_obs, lam_reg):

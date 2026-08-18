@@ -1,23 +1,29 @@
 #!/usr/bin/env python
-"""Run every remaining ``experiment_plan_v2`` run, in dependency order.
+"""Run every remaining corrected protocol-v2 run, in dependency order.
 
 The remaining set is computed dynamically.  A run is complete only when its
 ``summary.json`` is a successful, schema-v2 result whose identity, configuration
 content hash, and run fingerprint match the matrix row.  Legacy, eval-only, or
 mismatched summaries remain auditable but are never mistaken for training runs.
 
+This launcher is intentionally unable to run the historical
+``experiment_plan_v2`` cohort. Those matrices and artifacts are immutable audit
+evidence. The default and every accepted row must use the separate
+``experiment_plan_v2_corrected`` namespace.
+
 Phases
 ------
-1. ``sparse_forward_main_physics`` (per-instance pde_opt / pinn_sparse, 6 runs):
+1. ``sparse_forward_main_physics`` (per-instance pde_opt / pinn_sparse):
    launched round-robin across the configured GPUs. These are tiny per-instance
    models, so several can share a GPU.
-2. Remaining amortized runs (ifno / recfno / senseiver / voronoicnn, 32 runs):
+2. Remaining amortized runs (fno / deeponet / ifno / recfno / senseiver /
+   voronoicnn):
    memory-aware scheduling: at most ``MAX_PER_GPU`` trainings per GPU and only
    when the GPU's free memory exceeds ``GPU_MEM_THRESHOLD_GB``.
 
 Usage
 -----
-    python scripts/run_remaining_plan_v2.py            # run everything
+    python scripts/run_remaining_plan_v2.py            # run corrected matrix
     python scripts/run_remaining_plan_v2.py --dry-run  # only list what would run
 
 Env overrides: OUTPUT_ROOT, DATA_ROOT, N_GPUS, MAX_PER_GPU, GPU_MEM_THRESHOLD_GB,
@@ -39,13 +45,23 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.experiments.run_one import build_command  # noqa: E402
-from scripts.experiments.provenance import quarantine_output_artifacts, summary_validation_reasons  # noqa: E402
+from scripts.experiments.provenance import (  # noqa: E402
+    HISTORICAL_EXPERIMENT_NAMESPACE,
+    HistoricalExperimentError,
+    path_contains_namespace,
+    quarantine_output_artifacts,
+    reject_historical_experiment_path,
+    reject_historical_experiment_row,
+    summary_validation_reasons,
+)
 
-# Directory containing the ``experiment_plan_v2`` outputs (matrix + runs + logs).
+# Directory containing the corrected outputs (matrix + runs + logs).
 # Defaults to the local ``outputs/``; set OUTPUT_ROOT to run against a different
 # location (e.g. an NFS copy) without creating a symlink.
+CORRECTED_NAMESPACE = "experiment_plan_v2_corrected"
+HISTORICAL_NAMESPACE = HISTORICAL_EXPERIMENT_NAMESPACE
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_ROOT", ROOT / "outputs"))
-MATRIX = OUTPUT_ROOT / "experiment_plan_v2" / "matrices" / "experiment_plan_v2.jsonl"
+MATRIX = OUTPUT_ROOT / CORRECTED_NAMESPACE / "matrices" / f"{CORRECTED_NAMESPACE}.jsonl"
 DEFAULT_DATA_ROOT = "/home/zhangxf/share/zhangxfA100/large_storage/PDEdata/"
 
 PHYSICS_GROUP = "sparse_forward_main_physics"
@@ -60,10 +76,40 @@ GPU_MEM_THRESHOLD_GB = float(os.environ.get("GPU_MEM_THRESHOLD_GB", "9.0"))
 POLL_SECONDS = float(os.environ.get("POLL_SECONDS", "20"))
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser("Run remaining experiment_plan_v2 runs")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser("Run remaining experiment_plan_v2_corrected runs")
+    parser.add_argument(
+        "--matrix",
+        type=Path,
+        default=MATRIX,
+        help=f"Corrected matrix JSONL (default: {MATRIX})",
+    )
     parser.add_argument("--dry-run", action="store_true", help="List remaining runs without launching them")
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def _path_contains_namespace(value: str | Path, namespace: str) -> bool:
+    return path_contains_namespace(value, namespace)
+
+
+def _reject_historical_path(value: str | Path, *, field: str) -> None:
+    reject_historical_experiment_path(value, field=field)
+
+
+def _reject_historical_row(row: dict[str, Any]) -> None:
+    reject_historical_experiment_row(row)
+
+
+def _require_corrected_row(row: dict[str, Any]) -> None:
+    _reject_historical_row(row)
+    output_dir = row.get("output_dir")
+    if not isinstance(output_dir, (str, Path)) or not str(output_dir):
+        raise ValueError(f"matrix row {row.get('run_id', '<unknown>')} is missing output_dir")
+    if not _path_contains_namespace(output_dir, CORRECTED_NAMESPACE):
+        raise ValueError(
+            f"matrix row {row.get('run_id', '<unknown>')} is outside the required "
+            f"{CORRECTED_NAMESPACE} namespace: {output_dir}"
+        )
 
 
 def completion_reasons(row: dict[str, Any]) -> list[str]:
@@ -86,7 +132,8 @@ def is_complete(row: dict[str, Any]) -> bool:
 def _remap_output_paths(row: dict[str, Any]) -> dict[str, Any]:
     """Rewrite matrix ``outputs/...`` paths onto the configured OUTPUT_ROOT.
 
-    The matrix stores relative paths like ``outputs/experiment_plan_v2/runs/...``.
+    The matrix stores relative paths like
+    ``outputs/experiment_plan_v2_corrected/runs/...``.
     When OUTPUT_ROOT points elsewhere (e.g. an NFS copy), rewrite the run paths so
     completion detection, log writing, and ``build_command`` all target that root.
     """
@@ -97,21 +144,28 @@ def _remap_output_paths(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def load_rows() -> list[dict[str, Any]]:
+def load_rows(matrix: str | Path = MATRIX) -> list[dict[str, Any]]:
+    matrix_path = Path(matrix).expanduser()
+    _reject_historical_path(matrix_path, field="matrix")
     rows = []
-    with MATRIX.open() as f:
+    with matrix_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"matrix row must be a JSON object: {matrix_path}")
+            _require_corrected_row(row)
             if not row.get("skip_reason"):
-                rows.append(_remap_output_paths(row))
+                remapped = _remap_output_paths(row)
+                _require_corrected_row(remapped)
+                rows.append(remapped)
     return rows
 
 
-def load_remaining() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    rows = load_rows()
+def load_remaining(matrix: str | Path = MATRIX) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows = load_rows(matrix)
     remaining = [row for row in rows if not is_complete(row)]
     physics = [row for row in remaining if row["task_group"] == PHYSICS_GROUP]
     amortized = [row for row in remaining if row["task_group"] != PHYSICS_GROUP]
@@ -127,7 +181,8 @@ def _env_for(row: dict[str, Any], gpu: int) -> dict[str, str]:
 
 
 def _log_path(row: dict[str, Any]) -> Path:
-    path = OUTPUT_ROOT / "experiment_plan_v2" / "logs" / f"train_{row['run_id']}.log"
+    _require_corrected_row(row)
+    path = OUTPUT_ROOT / CORRECTED_NAMESPACE / "logs" / f"train_{row['run_id']}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -141,12 +196,14 @@ def _clean_stale_output(row: dict[str, Any]) -> None:
     every prior top-level artifact keeps the evidence readable while ensuring
     the relaunched run starts clean.
     """
+    _reject_historical_row(row)
     if is_complete(row):
         return
     quarantine_invalid_output(row)
 
 
 def quarantine_invalid_output(row: dict[str, Any]) -> Path | None:
+    _reject_historical_row(row)
     out = Path(row["output_dir"])
     if not out.exists() or is_complete(row):
         return None
@@ -155,9 +212,12 @@ def quarantine_invalid_output(row: dict[str, Any]) -> Path | None:
 
 
 def _launch(row: dict[str, Any], gpu: int) -> subprocess.Popen:
-    _clean_stale_output(row)
     env = _env_for(row, gpu)
+    # Validate the complete row/config/data contract before moving any stale
+    # artifact. A malformed corrected row must be as non-mutating as a
+    # historical-row refusal.
     cmd = build_command(row)
+    _clean_stale_output(row)
     log = _log_path(row)
     lf = log.open("w")
     proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdout=lf, stderr=subprocess.STDOUT)
@@ -280,7 +340,11 @@ def main() -> int:
     args = parse_args()
     os.environ.setdefault("DATA_ROOT", DEFAULT_DATA_ROOT)
 
-    physics, amortized = load_remaining()
+    try:
+        physics, amortized = load_remaining(args.matrix)
+    except (HistoricalExperimentError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        print(f"[refused] {exc}", file=sys.stderr, flush=True)
+        return 2
     print(f"[plan] remaining={len(physics) + len(amortized)} "
           f"(physics={len(physics)}, amortized={len(amortized)})", flush=True)
     for row in physics + amortized:

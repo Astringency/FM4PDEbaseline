@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 from scripts.experiments.run_one import build_command
 
 
@@ -16,14 +18,24 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _command_generation_config(tmp_path: Path, source: str) -> Path:
+    """Use a non-formal protocol for tests that only inspect CLI generation."""
+    config = yaml.safe_load((ROOT / source).read_text(encoding="utf-8"))
+    config["task_protocol_version"] = "command-generation-test-v1"
+    target = tmp_path / Path(source).name
+    target.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return target
+
+
 def test_run_one_generates_paper_sparse_command_without_debug_flags(tmp_path: Path):
     out = tmp_path / "large"
+    config = _command_generation_config(tmp_path, "configs/experiments/sanity_main.yaml")
     subprocess.run(
         [
             sys.executable,
             "scripts/experiments/build_matrix.py",
             "--config",
-            "configs/experiments/sanity_main.yaml",
+            str(config),
             "--output-root",
             str(out),
             "--matrix-name",
@@ -56,12 +68,16 @@ def test_run_one_generates_paper_sparse_command_without_debug_flags(tmp_path: Pa
 
 def test_run_one_generates_load_full_trajectory_for_time_varying(tmp_path: Path):
     out = tmp_path / "large"
+    config = _command_generation_config(
+        tmp_path,
+        "configs/experiments/time_varying_sensor_ablation.yaml",
+    )
     subprocess.run(
         [
             sys.executable,
             "scripts/experiments/build_matrix.py",
             "--config",
-            "configs/experiments/time_varying_sensor_ablation.yaml",
+            str(config),
             "--output-root",
             str(out),
             "--matrix-name",
@@ -83,18 +99,18 @@ def test_run_one_generates_load_full_trajectory_for_time_varying(tmp_path: Path)
     assert "--sensor-mode time_varying" in result.stdout
 
 
-def test_2gpu_parallel_launcher_uses_row_override_and_existing_runner():
+def test_2gpu_parallel_launcher_preserves_fingerprinted_row_and_uses_existing_runner():
     text = (ROOT / "scripts/experiments/08_run_matrix_2gpu_parallel.sh").read_text(encoding="utf-8")
     for token in [
         "CUDA_VISIBLE_DEVICES",
-        "ALLOW_ROW_OVERRIDE=1",
-        "NUM_WORKERS",
-        "PREFETCH_FACTOR",
+        "unset ALLOW_ROW_OVERRIDE DEVICE",
         "05_run_one.sh",
         "xargs",
         "JOBS_PER_GPU",
     ]:
         assert token in text
+    for forbidden in ["export ALLOW_ROW_OVERRIDE=1", "NUM_WORKERS_PER_RUN", "export NUM_WORKERS="]:
+        assert forbidden not in text
 
 
 def test_save_checkpoint_zero_disables_checkpoint_flag(tmp_path: Path, monkeypatch):

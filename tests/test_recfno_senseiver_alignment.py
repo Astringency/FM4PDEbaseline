@@ -56,6 +56,7 @@ def test_recfno_official_component_receives_voronoi_mask_and_coordinates(monkeyp
 
     backend = model.backend_metadata()
     assert backend["official_import_success"] is True
+    assert backend["implementation_mode_effective"] == "adapted"
     assert backend["official_alignment_level"] == "component"
     assert "component" in backend["adapter_status"]
     assert "unified" in backend["official_alignment_notes"].lower()
@@ -161,6 +162,7 @@ def test_senseiver_official_components_receive_official_fourier_features(monkeyp
 
     backend = model.backend_metadata()
     assert backend["official_import_success"] is True
+    assert backend["implementation_mode_effective"] == "adapted"
     assert backend["official_alignment_level"] == "component"
     assert "component" in backend["adapter_status"]
     assert "unified" in backend["official_alignment_notes"].lower()

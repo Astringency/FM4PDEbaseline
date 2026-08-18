@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
 import torch
 
@@ -47,8 +47,28 @@ def make_sensor_mask(
     num = min(int(num_sensors), total)
 
     if mode in {"random", "random_per_sample", "fixed"}:
-        perm = torch.randperm(total, generator=generator)[:num]
-        base.reshape(-1)[perm] = 1.0
+        if time_dim is not None and sensor_budget_mode == "per_time":
+            if time_dim < 0 or time_dim >= len(obs_shape):
+                raise ValueError(
+                    f"time_dim={time_dim} incompatible with observation shape {obs_shape}"
+                )
+            per_t_shape = obs_shape[:time_dim] + obs_shape[time_dim + 1 :]
+            per_t_total = int(math.prod(per_t_shape))
+            per_t_num = min(int(num_sensors), per_t_total)
+            for t in range(obs_shape[time_dim]):
+                local = torch.zeros(per_t_shape, dtype=torch.float32)
+                perm = torch.randperm(per_t_total, generator=generator)[:per_t_num]
+                local.reshape(-1)[perm] = 1.0
+                sl = [slice(None)] * len(obs_shape)
+                sl[time_dim] = t
+                base[tuple(sl)] = local
+        elif sensor_budget_mode == "total" or time_dim is None:
+            perm = torch.randperm(total, generator=generator)[:num]
+            base.reshape(-1)[perm] = 1.0
+        else:
+            raise ValueError(
+                f"sensor_budget_mode must be per_time or total, got {sensor_budget_mode!r}"
+            )
     elif mode == "grid":
         dims = len(obs_shape)
         per_dim = max(1, int(round(num ** (1.0 / dims))))
@@ -120,7 +140,6 @@ def extract_observations(fields: torch.Tensor, mask: torch.Tensor) -> tuple[torc
     c = fields.shape[1]
     grid_shape = tuple(fields.shape[2:])
     flat = fields.reshape(fields.shape[0], c, -1)
-    coords_all = make_coordinate_grid(grid_shape, batch_size=fields.shape[0], device=fields.device)
     values: list[torch.Tensor] = []
     coords: list[torch.Tensor] = []
     counts: list[int] = []
@@ -131,10 +150,23 @@ def extract_observations(fields: torch.Tensor, mask: torch.Tensor) -> tuple[torc
         flat_idx = sample_mask[0].bool().reshape(-1).nonzero(as_tuple=False).squeeze(-1)
         counts.append(int(flat_idx.numel()))
         values.append(flat[sample, :, flat_idx].transpose(0, 1).contiguous())
-        coords.append(coords_all[sample, flat_idx])
+        coords.append(_normalized_coords_from_flat_indices(flat_idx, grid_shape))
     if len(set(counts)) > 1:
         raise ValueError(f"Per-sample masks must contain the same number of sensors, got {counts}")
     return torch.stack(values, dim=0), torch.stack(coords, dim=0)
+
+
+def _normalized_coords_from_flat_indices(
+    flat_indices: torch.Tensor, grid_shape: tuple[int, ...]
+) -> torch.Tensor:
+    """Compute only sensor coordinates instead of materializing the full grid."""
+    coordinates: list[torch.Tensor] = []
+    for axis, size in enumerate(grid_shape):
+        stride = int(math.prod(grid_shape[axis + 1 :]))
+        integer_coordinate = torch.div(flat_indices, stride, rounding_mode="floor") % size
+        denominator = max(int(size) - 1, 1)
+        coordinates.append(integer_coordinate.to(torch.float32) / denominator)
+    return torch.stack(coordinates, dim=-1)
 
 
 def build_observation_tensors(
@@ -148,9 +180,8 @@ def build_observation_tensors(
     sample_ids: Sequence[str | int] | None = None,
     split: str = "",
     epoch: int = 0,
-) -> dict[str, torch.Tensor | str]:
-    from .voronoi import voronoi_fill
-
+    build_voronoi_grid: bool = True,
+) -> dict[str, Any]:
     if time_dim is None and target_fields.ndim == 5:
         time_dim = 0
     if mode == "random_per_sample":
@@ -211,7 +242,11 @@ def build_observation_tensors(
             flat_idx = sample_mask[0].bool().reshape(-1).nonzero(as_tuple=False).squeeze(-1)
             masked_flat[sample, :, flat_idx] = obs_values[sample].transpose(0, 1)
         masked_grid = masked_flat.reshape_as(target_fields)
-    voronoi_grid = voronoi_fill(masked_grid, mask)
+    voronoi_grid = None
+    if build_voronoi_grid:
+        from .voronoi import voronoi_fill
+
+        voronoi_grid = voronoi_fill(masked_grid, mask)
     if mask.ndim == target_fields.ndim:
         mask_ids = [_mask_id(sample_mask) for sample_mask in mask]
         sample_mask = mask[0]
@@ -221,7 +256,7 @@ def build_observation_tensors(
     mask_id = _mask_id(mask)
     num_observations_total = int(sample_mask[0].sum().detach().cpu())
     num_sensors_per_time: int | list[int]
-    if mode == "time_varying" and time_dim is not None:
+    if time_dim is not None:
         spatial_mask = sample_mask[0]
         dims = tuple(i for i in range(spatial_mask.ndim) if i != time_dim)
         counts = spatial_mask.sum(dim=dims).detach().cpu().to(torch.long).tolist()

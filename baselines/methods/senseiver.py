@@ -19,6 +19,7 @@ class SenseiverBaseline(BaselineModel):
     def build(self, config, data_spec):
         super().build(config, data_spec)
         self.out_shape = tuple(data_spec["target_shape"][1:])
+        self.in_channels = int(data_spec["input_channels"])
         self.out_channels = int(data_spec["target_channels"])
         self.spatial_shape = tuple(int(size) for size in self.out_shape[1:])
         coord_dim = len(self.spatial_shape)
@@ -78,7 +79,7 @@ class SenseiverBaseline(BaselineModel):
             try:
                 encoder_cls, decoder_cls = get_senseiver_classes()
                 self.official_encoder = encoder_cls(
-                    input_ch=self.position_channels + self.out_channels,
+                    input_ch=self.position_channels + self.in_channels,
                     preproc_ch=enc_preproc_ch,
                     num_latents=num_latents,
                     num_latent_channels=latent_channels,
@@ -101,7 +102,7 @@ class SenseiverBaseline(BaselineModel):
                     "senseiver",
                     "senseiver",
                     fallback_used=False,
-                    implementation_mode_effective="official",
+                    implementation_mode_effective="adapted",
                     implementation_source="vendored_senseiver_encoder_decoder_components_with_fourier_positions_and_unified_training",
                     official_import_success=True,
                     official_reimplementation_success=False,
@@ -124,7 +125,7 @@ class SenseiverBaseline(BaselineModel):
             raise OfficialImportError(fallback_reason)
         local_channels = latent_channels
         self.sensor_proj = MLP(
-            self.position_channels + self.out_channels,
+            self.position_channels + self.in_channels,
             local_channels,
             hidden=max(enc_preproc_ch, local_channels),
             depth=2,
@@ -159,6 +160,11 @@ class SenseiverBaseline(BaselineModel):
 
     def predict(self, batch: PDEBatch):
         if batch.obs_values is None or batch.obs_coords is None:
+            if batch.metadata.get("deferred_dynamic_sensors"):
+                raise ValueError(
+                    "Senseiver received an unmaterialized random_per_sample batch; access it through "
+                    "PDEBatchDataset so observations are generated per item"
+                )
             # Dense fallback: use all target-grid input values as pseudo sensors.
             b, c, h, w = batch.input_fields.shape
             values = batch.input_fields.reshape(b, c, -1).permute(0, 2, 1)
@@ -166,10 +172,15 @@ class SenseiverBaseline(BaselineModel):
         else:
             values = batch.obs_values.to(batch.input_fields.device, batch.input_fields.dtype)
             coords = batch.obs_coords.to(batch.input_fields.device, batch.input_fields.dtype)
-            if values.shape[-1] != self.out_channels:
-                values = values[..., : self.out_channels]
+        if values.shape[-1] != self.in_channels:
+            raise ValueError(
+                f"Senseiver observations have {values.shape[-1]} channels, expected {self.in_channels}; "
+                "input and target channels must not be truncated or broadcast"
+            )
         b = values.shape[0]
         query = batch.coords.to(batch.input_fields.device, batch.input_fields.dtype)
+        if query.shape[0] == 1 and b != 1:
+            query = query.expand(b, -1, -1)
         sensor_positions = senseiver_fourier_features(coords, self.spatial_shape, self.space_bands)
         query_positions = senseiver_fourier_features(query, self.spatial_shape, self.space_bands)
         if self.official_encoder is not None and self.official_decoder is not None:

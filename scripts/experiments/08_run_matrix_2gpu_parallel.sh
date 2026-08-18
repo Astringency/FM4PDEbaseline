@@ -17,13 +17,8 @@ MATRIX="${1:-${MATRIX:-}}"
 DATA_ROOT="${DATA_ROOT:-/home/zhangxf/share/zhangxfA100/large_storage/PDEdata/}"
 GPUS="${GPUS:-0,1}"
 JOBS_PER_GPU="${JOBS_PER_GPU:-2}"
-NUM_WORKERS_PER_RUN="${NUM_WORKERS_PER_RUN:-0}"
-PREFETCH_FACTOR="${PREFETCH_FACTOR:-2}"
-PIN_MEMORY="${PIN_MEMORY:-1}"
-PERSISTENT_WORKERS="${PERSISTENT_WORKERS:-1}"
 RUN_TAIL_LOGS="${RUN_TAIL_LOGS:-1}"
 PROGRESS_INTERVAL_SECONDS="${PROGRESS_INTERVAL_SECONDS:-60}"
-DEVICE="${DEVICE:-cuda}"
 SAVE_CHECKPOINT="${SAVE_CHECKPOINT:-amortized}"
 
 [ -n "$MATRIX" ] || die "matrix path is required: bash scripts/experiments/08_run_matrix_2gpu_parallel.sh <matrix.jsonl>"
@@ -34,8 +29,6 @@ SAVE_CHECKPOINT="${SAVE_CHECKPOINT:-amortized}"
 if [ "$JOBS_PER_GPU" -lt 1 ]; then
   die "JOBS_PER_GPU must be >= 1: $JOBS_PER_GPU"
 fi
-[[ "$NUM_WORKERS_PER_RUN" =~ ^[0-9]+$ ]] || die "NUM_WORKERS_PER_RUN must be an integer >= 0: $NUM_WORKERS_PER_RUN"
-
 if [ -n "${N_JOBS:-}" ]; then
   log "WARNING: this script does not use N_JOBS=$N_JOBS; use JOBS_PER_GPU to control concurrency."
 fi
@@ -79,11 +72,7 @@ log "DATA_ROOT=$DATA_ROOT"
 log "OUT_ROOT=$OUT_ROOT"
 log "GPUS=${clean_gpus[*]}"
 log "JOBS_PER_GPU=$JOBS_PER_GPU"
-log "NUM_WORKERS_PER_RUN=$NUM_WORKERS_PER_RUN"
-log "PREFETCH_FACTOR=$PREFETCH_FACTOR"
-log "PIN_MEMORY=$PIN_MEMORY PERSISTENT_WORKERS=$PERSISTENT_WORKERS"
 log "RUN_TAIL_LOGS=$RUN_TAIL_LOGS PROGRESS_INTERVAL_SECONDS=$PROGRESS_INTERVAL_SECONDS"
-log "DEVICE=$DEVICE"
 log "SAVE_CHECKPOINT=$SAVE_CHECKPOINT"
 log "total=$total"
 log "launcher_log=$LAUNCHER_LOG"
@@ -105,18 +94,15 @@ run_gpu_queue() {
     matrix="$1"
     gpu="$2"
     export CUDA_VISIBLE_DEVICES="$gpu"
-    export DEVICE="$3"
-    export ALLOW_ROW_OVERRIDE=1
-    export NUM_WORKERS="$4"
-    export PIN_MEMORY="$5"
-    export PERSISTENT_WORKERS="$6"
-    export PREFETCH_FACTOR="$7"
-    export DATA_ROOT="$8"
-    export OUT_ROOT="$9"
-    export RUN_TAIL_LOGS="${10}"
-    export PROGRESS_INTERVAL_SECONDS="${11}"
-    export SAVE_CHECKPOINT="${12}"
-    idx="${13}"
+    # Scheduling controls choose a physical GPU only. Fingerprinted design and
+    # loader settings must come from the matrix row unchanged.
+    unset ALLOW_ROW_OVERRIDE DEVICE
+    export DATA_ROOT="$3"
+    export OUT_ROOT="$4"
+    export RUN_TAIL_LOGS="$5"
+    export PROGRESS_INTERVAL_SECONDS="$6"
+    export SAVE_CHECKPOINT="$7"
+    idx="$8"
     start_time="$(date "+%Y-%m-%d %H:%M:%S")"
     printf "[%s] child start gpu=%s matrix_index=%s\n" "$start_time" "$gpu" "$idx"
     bash scripts/experiments/05_run_one.sh "$matrix" "$idx"
@@ -124,7 +110,7 @@ run_gpu_queue() {
     finish_time="$(date "+%Y-%m-%d %H:%M:%S")"
     printf "[%s] child finish gpu=%s matrix_index=%s exit_code=%s\n" "$finish_time" "$gpu" "$idx" "$status"
     exit "$status"
-  ' _ "$MATRIX" "$gpu" "$DEVICE" "$NUM_WORKERS_PER_RUN" "$PIN_MEMORY" "$PERSISTENT_WORKERS" "$PREFETCH_FACTOR" "$DATA_ROOT" "$OUT_ROOT" "$RUN_TAIL_LOGS" "$PROGRESS_INTERVAL_SECONDS" "$SAVE_CHECKPOINT"
+  ' _ "$MATRIX" "$gpu" "$DATA_ROOT" "$OUT_ROOT" "$RUN_TAIL_LOGS" "$PROGRESS_INTERVAL_SECONDS" "$SAVE_CHECKPOINT"
   log "gpu=$gpu queue finish"
 }
 

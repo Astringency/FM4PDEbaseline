@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -127,3 +128,10 @@ def test_write_outputs_emits_json_and_csv_provenance(tiny_data_root, tmp_path: P
     assert all(Path(path).is_file() for path in paths.values())
     saved = json.loads(Path(paths["report_json"]).read_text(encoding="utf-8"))
     assert saved["report_schema_version"] == "fm4pde-data-protocol-report-v1"
+    sample_manifest = Path(paths["manifest_jsonl"])
+    assert saved["sample_manifest_record_count"] == len(
+        sample_manifest.read_text(encoding="utf-8").splitlines()
+    )
+    assert saved["sample_manifest_sha256"] == hashlib.sha256(
+        sample_manifest.read_bytes()
+    ).hexdigest()

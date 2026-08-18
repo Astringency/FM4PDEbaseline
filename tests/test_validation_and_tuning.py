@@ -35,10 +35,10 @@ def test_deterministic_train_tail_validation_is_not_test(tiny_data_root):
     assert "test" in test.batch.file_paths[0].lower()
 
 
-def test_test_split_uses_available_samples_when_request_exceeds_file(tiny_data_root):
+def test_strict_test_split_rejects_short_file(tiny_data_root):
     registry = build_default_registry()
-    with pytest.warns(RuntimeWarning, match="Requested 10000 samples but only loaded 3"):
-        test = registry.make_dataset(
+    with pytest.raises(ValueError, match="Requested 10000 samples but only loaded 3"):
+        registry.make_dataset(
             "poisson",
             tiny_data_root,
             "forward",
@@ -47,10 +47,6 @@ def test_test_split_uses_available_samples_when_request_exceeds_file(tiny_data_r
             data_loading_mode="eager",
             strict_size=True,
         )
-
-    assert len(test) == 3
-    assert test.batch.split == "test"
-    assert "test" in test.batch.file_paths[0].lower()
 
 
 def test_aggregator_writes_tuning_summary(tmp_path: Path):

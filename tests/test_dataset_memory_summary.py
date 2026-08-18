@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 
 from baselines.common.data_adapter import PDEBatchDataset, build_default_registry
@@ -51,6 +52,23 @@ def test_dataset_memory_limit_is_optional_but_enforced_when_set():
     _check_loaded_dataset_memory_limit(Namespace(max_loaded_dataset_gb=None), fields)
     with pytest.raises(RuntimeError, match="exceeds max_loaded_dataset_gb"):
         _check_loaded_dataset_memory_limit(Namespace(max_loaded_dataset_gb=1e-12), fields)
+
+
+def test_dataset_memory_summary_counts_auxiliary_storage_once():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("poisson", n=2, resolution=8, seed=5)
+    dataset = PDEBatchDataset(registry.make_task(raw, "poisson", "forward"))
+    before = dataset_tensor_memory_summary(dataset)
+    auxiliary = torch.zeros(257, dtype=torch.float32)
+    dataset.batch.metadata["auxiliary_one"] = auxiliary
+    dataset.batch.metadata["auxiliary_alias"] = auxiliary
+
+    after = dataset_tensor_memory_summary(dataset)
+
+    assert after["tensor_memory_gb"] - before["tensor_memory_gb"] == pytest.approx(
+        auxiliary.untyped_storage().nbytes() / 1e9
+    )
+    assert after["auxiliary_tensor_memory_gb"] > before["auxiliary_tensor_memory_gb"]
 
 
 def test_run_writes_dataset_memory_fields_and_enforces_cli_limit(tmp_path: Path):

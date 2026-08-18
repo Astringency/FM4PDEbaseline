@@ -52,8 +52,13 @@ from baselines.methods.voronoicnn import VoronoiCNNBaseline
 from baselines.experiment_matrix import capability_skip_row
 from scripts.experiments.provenance import (
     DEFAULT_TASK_PROTOCOL_VERSION,
+    MATRIX_SCHEMA_VERSION,
+    reject_historical_experiment_path,
     requires_full_data_manifest,
     repository_revision,
+    run_fingerprint,
+    sha256_file,
+    validate_full_data_manifest,
 )
 
 
@@ -117,7 +122,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-id", default="", help="Stable external run identifier used in output filenames.")
     parser.add_argument("--run-name", default="", help="Human-readable external run name stored in metadata.")
     parser.add_argument("--run-fingerprint", default="", help="Content-addressed experiment fingerprint supplied by the matrix builder.")
+    parser.add_argument("--matrix-schema-version", type=int, default=MATRIX_SCHEMA_VERSION)
     parser.add_argument("--config-content-sha256", default="", help="SHA-256 of the resolved experiment config contract.")
+    parser.add_argument(
+        "--experiment-config-sha256",
+        default="",
+        help="SHA-256 of the matrix-design YAML audited by the full data manifest.",
+    )
     parser.add_argument(
         "--data-manifest-sha256",
         default="",
@@ -183,6 +194,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--method-override", action="append", default=[], help="Override a method config key as key=value. Can be repeated.")
     parser.add_argument("--eval-only", action="store_true", help="Skip training; load checkpoint and run test evaluation only.")
     parser.add_argument("--checkpoint", default="", help="Path to checkpoint .pt file for --eval-only mode.")
+    parser.add_argument("--checkpoint-sha256", default="", help="Expected SHA-256 of --checkpoint for a strict eval-only run.")
     return parser.parse_args(argv)
 
 
@@ -226,6 +238,7 @@ def _validate_checkpoint_payload(payload: dict[str, Any], expected: dict[str, An
         "task": provenance.get("task", data_spec.get("task")),
         "run_fingerprint": provenance.get("run_fingerprint"),
         "config_content_sha256": provenance.get("config_content_sha256"),
+        "experiment_config_sha256": provenance.get("experiment_config_sha256"),
         "data_manifest_sha256": provenance.get("data_manifest_sha256"),
         "data_manifest_path": provenance.get("data_manifest_path"),
         "task_protocol_version": provenance.get("task_protocol_version"),
@@ -314,7 +327,12 @@ def build_data_spec(batch: PDEBatch) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    reject_historical_experiment_path(args.output_dir, field="--output-dir")
     _validate_mode(args)
+    if args.experiment_mode == "paper" and requires_full_data_manifest(
+        args.task_protocol_version
+    ):
+        args.strict_size = True
     actual_revision = repository_revision(ROOT)
     if args.commit_hash and args.commit_hash != actual_revision:
         raise ValueError(
@@ -328,12 +346,14 @@ def main(argv: list[str] | None = None) -> None:
         args.source_train_seed = int(args.seed)
     torch.manual_seed(args.seed)
     cfg = load_yaml(args.config)
+    _record_requested_runtime_args(args, cfg)
     args.data_loading_mode = _resolve_data_loading_mode(args)
     args.effective_data_loading_mode = "eager"
     _resolve_dataloader_args(args, cfg)
     args.physics_metric_mode = _resolve_physics_metric_mode(args, cfg)
     args.sensor_budget_mode = _resolve_sensor_budget_mode(args, cfg)
     method_cfg = build_method_config(cfg, args)
+    args.epochs_effective = int(method_cfg.get("epochs", 0) or 0)
     derived_execution_mode = "eval_only" if args.eval_only else "train"
     if args.execution_mode is not None and args.execution_mode != derived_execution_mode:
         raise ValueError(
@@ -341,11 +361,18 @@ def main(argv: list[str] | None = None) -> None:
             f"{'--eval-only' if args.eval_only else 'a training invocation'}"
         )
     args.execution_mode = derived_execution_mode
-    if not args.config_content_sha256:
-        args.config_content_sha256 = _config_content_sha256(args.config, cfg)
+    observed_config_sha256 = _config_content_sha256(args.config, cfg)
+    if (
+        args.config_content_sha256
+        and args.config_content_sha256 != observed_config_sha256
+    ):
+        raise ValueError(
+            "--config-content-sha256 does not match the loaded configuration: "
+            f"supplied={args.config_content_sha256}, observed={observed_config_sha256}"
+        )
+    args.config_content_sha256 = observed_config_sha256
     _validate_data_manifest_binding(args)
-    if not args.run_fingerprint:
-        args.run_fingerprint = _local_run_fingerprint(args, method_cfg)
+    _validate_and_bind_run_fingerprint(args, method_cfg)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_prefix = _run_file_prefix(args)
@@ -535,6 +562,7 @@ def main(argv: list[str] | None = None) -> None:
                 "task": args.task,
                 "run_fingerprint": args.source_train_run_fingerprint,
                 "config_content_sha256": args.config_content_sha256,
+                "experiment_config_sha256": args.experiment_config_sha256,
                 "data_manifest_sha256": args.data_manifest_sha256,
                 "data_manifest_path": args.data_manifest_path,
                 "task_protocol_version": args.task_protocol_version,
@@ -566,12 +594,14 @@ def main(argv: list[str] | None = None) -> None:
         train_history_path = out_dir / f"{run_prefix}_train_history.json"
     else:
         _run_stage("fit", "start", baseline=args.baseline, pde=args.pde, task=args.task)
+        _synchronize_device(args.device)
         train_start = time.perf_counter()
         train_history = {}
         if not is_per_instance:
             train_history = model.fit(train_loader, val_loader)
         else:
             train_history = model.fit(train_loader, val_loader)
+        _synchronize_device(args.device)
         train_time = time.perf_counter() - train_start
         split_info["fit_setup_time"] = float(train_time)
         if is_per_instance:
@@ -592,6 +622,7 @@ def main(argv: list[str] | None = None) -> None:
             "task": args.task,
             "seed": int(args.seed),
             "config_content_sha256": args.config_content_sha256,
+            "experiment_config_sha256": args.experiment_config_sha256,
             "data_manifest_sha256": args.data_manifest_sha256,
             "data_manifest_path": args.data_manifest_path,
             "config_hash": config_hash,
@@ -737,6 +768,32 @@ def _resolve_data_loading_mode(args: argparse.Namespace) -> str:
     return "eager"
 
 
+def _record_requested_runtime_args(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
+    """Preserve matrix-level requests before resolving device/runtime effects."""
+    args.data_loading_mode_requested = str(
+        args.data_loading_mode
+        if args.data_loading_mode is not None
+        else cfg.get("data_loading_mode", "eager")
+    )
+    args.num_workers_requested = int(
+        args.num_workers if args.num_workers is not None else cfg.get("num_workers", 0)
+    )
+    args.pin_memory_requested = bool(
+        args.pin_memory if args.pin_memory is not None else cfg.get("pin_memory", True)
+    )
+    args.persistent_workers_requested = bool(
+        args.persistent_workers
+        if args.persistent_workers is not None
+        else cfg.get("persistent_workers", False)
+    )
+    requested_prefetch = (
+        args.prefetch_factor
+        if args.prefetch_factor is not None
+        else cfg.get("prefetch_factor", None)
+    )
+    args.prefetch_factor_requested = int(requested_prefetch or 0)
+
+
 def _resolve_dataloader_args(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
     args.num_workers = int(args.num_workers if args.num_workers is not None else cfg.get("num_workers", 0))
     if args.num_workers < 0:
@@ -796,10 +853,97 @@ def _dataloader_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _requested_design_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """Requested values bound by the matrix fingerprint (not device effects)."""
+    return {
+        "test_requested_size": int(getattr(args, "test_size", 0) or 0),
+        "batch_size": int(getattr(args, "batch_size", 0) or 0),
+        "epochs": int(
+            getattr(args, "epochs_effective", getattr(args, "epochs", 0) or 0)
+        ),
+        "device": str(getattr(args, "device", "cpu")),
+        "sensor_budget_mode_requested": (
+            str(getattr(args, "sensor_budget_mode", "per_time"))
+            if str(getattr(args, "task", "")).startswith("sparse")
+            else "none"
+        ),
+        "data_loading_mode_requested": str(
+            getattr(
+                args,
+                "data_loading_mode_requested",
+                getattr(args, "data_loading_mode", "eager"),
+            )
+        ),
+        "num_workers": int(
+            getattr(args, "num_workers_requested", getattr(args, "num_workers", 0) or 0)
+        ),
+        "pin_memory_requested": bool(
+            getattr(args, "pin_memory_requested", getattr(args, "pin_memory", False))
+        ),
+        "persistent_workers_requested": bool(
+            getattr(
+                args,
+                "persistent_workers_requested",
+                getattr(args, "persistent_workers", False),
+            )
+        ),
+        "prefetch_factor_requested": int(
+            getattr(
+                args,
+                "prefetch_factor_requested",
+                getattr(args, "prefetch_factor", 0) or 0,
+            )
+        ),
+    }
+
+
 def tensor_nbytes(tensor: Any) -> int:
     if not isinstance(tensor, torch.Tensor):
         return 0
     return int(tensor.numel() * tensor.element_size())
+
+
+def _unique_tensor_storage_nbytes(
+    value: Any,
+    *,
+    seen_storages: set[tuple[str, int, int]],
+    seen_containers: set[int],
+) -> int:
+    if isinstance(value, torch.Tensor):
+        storage = value.untyped_storage()
+        storage_nbytes = int(storage.nbytes())
+        key = (str(value.device), int(storage.data_ptr()), storage_nbytes)
+        if key in seen_storages:
+            return 0
+        seen_storages.add(key)
+        return storage_nbytes
+    if isinstance(value, dict):
+        container_id = id(value)
+        if container_id in seen_containers:
+            return 0
+        seen_containers.add(container_id)
+        return sum(
+            _unique_tensor_storage_nbytes(
+                item,
+                seen_storages=seen_storages,
+                seen_containers=seen_containers,
+            )
+            for item in value.values()
+        )
+    if isinstance(value, (list, tuple, set)):
+        container_id = id(value)
+        if container_id in seen_containers:
+            return 0
+        seen_containers.add(container_id)
+        return sum(
+            _unique_tensor_storage_nbytes(
+                item,
+                seen_storages=seen_storages,
+                seen_containers=seen_containers,
+            )
+            for item in value
+        )
+    return 0
 
 
 def dataset_tensor_memory_summary(dataset: PDEBatchDataset | None) -> dict[str, Any]:
@@ -809,6 +953,7 @@ def dataset_tensor_memory_summary(dataset: PDEBatchDataset | None) -> dict[str, 
             "full_tensor_gb": 0.0,
             "input_fields_gb": 0.0,
             "target_fields_gb": 0.0,
+            "auxiliary_tensor_memory_gb": 0.0,
             "tensor_memory_gb": 0.0,
             "loaded_full_trajectory": False,
             "data_loading_mode": "",
@@ -817,12 +962,24 @@ def dataset_tensor_memory_summary(dataset: PDEBatchDataset | None) -> dict[str, 
     full_gb = tensor_nbytes(batch.full_tensor) / 1e9
     input_gb = tensor_nbytes(batch.input_fields) / 1e9
     target_gb = tensor_nbytes(batch.target_fields) / 1e9
+    primary_storage_bytes = _unique_tensor_storage_nbytes(
+        (batch.full_tensor, batch.input_fields, batch.target_fields),
+        seen_storages=set(),
+        seen_containers=set(),
+    )
+    total_storage_bytes = _unique_tensor_storage_nbytes(
+        vars(batch),
+        seen_storages=set(),
+        seen_containers=set(),
+    )
+    auxiliary_gb = max(total_storage_bytes - primary_storage_bytes, 0) / 1e9
     return {
         "samples": len(dataset),
         "full_tensor_gb": full_gb,
         "input_fields_gb": input_gb,
         "target_fields_gb": target_gb,
-        "tensor_memory_gb": full_gb + input_gb + target_gb,
+        "auxiliary_tensor_memory_gb": auxiliary_gb,
+        "tensor_memory_gb": total_storage_bytes / 1e9,
         "loaded_full_trajectory": bool(getattr(dataset, "loaded_full_trajectory", _batch_loaded_full_trajectory(batch))),
         "data_loading_mode": str(getattr(dataset, "data_loading_mode", batch.metadata.get("data_loading_mode", ""))),
     }
@@ -835,6 +992,7 @@ def print_dataset_memory_summary(name: str, dataset: PDEBatchDataset | None) -> 
         f"full_tensor={summary['full_tensor_gb']:.6g}GB "
         f"input_fields={summary['input_fields_gb']:.6g}GB "
         f"target_fields={summary['target_fields_gb']:.6g}GB "
+        f"auxiliary_tensors={summary['auxiliary_tensor_memory_gb']:.6g}GB "
         f"loaded_full_trajectory={summary['loaded_full_trajectory']} "
         f"data_loading_mode={summary['data_loading_mode']}",
         file=sys.stderr,
@@ -857,6 +1015,7 @@ def dataset_memory_result_fields(
         "train_full_tensor_memory_gb": float(train["full_tensor_gb"]),
         "train_input_tensor_memory_gb": float(train["input_fields_gb"]),
         "train_target_tensor_memory_gb": float(train["target_fields_gb"]),
+        "train_auxiliary_tensor_memory_gb": float(train["auxiliary_tensor_memory_gb"]),
     }
 
 
@@ -1031,6 +1190,7 @@ def _make_split_dataset(
             noise_level=args.noise_level,
             seed=args.sensor_seed,
             experiment_mode=args.experiment_mode,
+            build_voronoi_grid=args.baseline in {"recfno", "voronoicnn"},
         )
         return PDEBatchDataset(batch)
     return registry.make_dataset(
@@ -1055,10 +1215,11 @@ def _make_split_dataset(
         data_loading_mode=args.data_loading_mode,
         load_full_trajectory=_split_load_full_trajectory(args, split),
         experiment_mode=args.experiment_mode,
+        build_voronoi_grid=args.baseline in {"recfno", "voronoicnn"},
         strict_size=(
-            False
-            if split == "test"
-            else (args.strict_size if strict_size_override is None else bool(strict_size_override))
+            args.strict_size
+            if strict_size_override is None
+            else bool(strict_size_override)
         ),
     )
 
@@ -1097,12 +1258,16 @@ def _evaluate_full_test_loader(
     checkpoint_sha256 = _file_sha256(Path(checkpoint_path)) if checkpoint_path else ""
     checkpoint_provenance = dict(getattr(model, "provenance", {}) or {})
     provenance_fields = {
+        "matrix_schema_version": int(getattr(args, "matrix_schema_version", MATRIX_SCHEMA_VERSION)),
         "summary_schema_version": int(getattr(args, "summary_schema_version", 2)),
         "status": "success",
         "execution_mode": str(getattr(args, "execution_mode", "eval_only" if getattr(args, "eval_only", False) else "train")),
         "eval_only": bool(getattr(args, "eval_only", False)),
         "run_fingerprint": str(getattr(args, "run_fingerprint", "")),
         "config_content_sha256": str(getattr(args, "config_content_sha256", "")),
+        "experiment_config_sha256": str(
+            getattr(args, "experiment_config_sha256", "")
+        ),
         "data_manifest_sha256": str(getattr(args, "data_manifest_sha256", "")),
         "data_manifest_path": str(getattr(args, "data_manifest_path", "")),
         "task_protocol_version": str(getattr(args, "task_protocol_version", "2")),
@@ -1121,10 +1286,12 @@ def _evaluate_full_test_loader(
         "checkpoint_sha256": checkpoint_sha256,
     }
     for batch_index, batch in enumerate(loader):
+        _synchronize_device(args.device)
         start = time.perf_counter()
         eval_batch = _to_device_batch_for_eval(_make_inference_batch(batch), args.device)
         with torch.set_grad_enabled(grad_enabled):
             pred = model.predict_physical(eval_batch) if hasattr(model, "predict_physical") else model.predict(eval_batch)
+        _synchronize_device(args.device)
         elapsed = time.perf_counter() - start
         _copy_eval_metadata(batch, eval_batch)
         pred_cpu = pred.detach().cpu()
@@ -1166,6 +1333,7 @@ def _evaluate_full_test_loader(
             "val_from_train_offset": split_info["val_from_train_offset"],
             "test_size": len(test_dataset),
             "train_shards": args.train_shards,
+            **_requested_design_fields(args),
             "data_loading_mode": args.data_loading_mode,
             "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
             **_dataloader_fields(args),
@@ -1379,12 +1547,16 @@ def _summarize_run(
     summary: dict[str, Any] = {
         "run_id": args.run_id,
         "run_name": args.run_name,
+        "matrix_schema_version": int(getattr(args, "matrix_schema_version", MATRIX_SCHEMA_VERSION)),
         "summary_schema_version": int(getattr(args, "summary_schema_version", 2)),
         "status": "success",
         "execution_mode": str(getattr(args, "execution_mode", "eval_only" if getattr(args, "eval_only", False) else "train")),
         "eval_only": bool(getattr(args, "eval_only", False)),
         "run_fingerprint": str(getattr(args, "run_fingerprint", "")),
         "config_content_sha256": str(getattr(args, "config_content_sha256", "")),
+        "experiment_config_sha256": str(
+            getattr(args, "experiment_config_sha256", "")
+        ),
         "data_manifest_sha256": str(getattr(args, "data_manifest_sha256", "")),
         "data_manifest_path": str(getattr(args, "data_manifest_path", "")),
         "task_protocol_version": str(getattr(args, "task_protocol_version", "2")),
@@ -1419,12 +1591,13 @@ def _summarize_run(
         "val_split_source": split_info["val_split_source"],
         "val_from_train_offset": split_info["val_from_train_offset"],
         "test_size": len(test_dataset),
-            "train_shards": args.train_shards,
-            "data_loading_mode": args.data_loading_mode,
-            "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
-            **_dataloader_fields(args),
-            **memory_fields,
-            "load_full_trajectory": bool(args.load_full_trajectory),
+        "train_shards": args.train_shards,
+        **_requested_design_fields(args),
+        "data_loading_mode": args.data_loading_mode,
+        "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
+        **_dataloader_fields(args),
+        **memory_fields,
+        "load_full_trajectory": bool(args.load_full_trajectory),
         "loaded_full_trajectory": bool(getattr(test_dataset, "loaded_full_trajectory", _batch_loaded_full_trajectory(test_dataset.batch))),
         "train_size_requested": int(split_info["train_size_requested"]),
         "train_size_loaded_in_memory": int(split_info["train_size_loaded_in_memory"]),
@@ -1595,7 +1768,16 @@ def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
 
 
 def _batch_loaded_full_trajectory(batch: PDEBatch) -> bool:
-    return bool(batch.full_tensor.ndim == 5 or isinstance(batch.metadata.get("full_trajectory"), torch.Tensor))
+    return bool(
+        batch.metadata.get("loaded_full_trajectory", False)
+        or batch.full_tensor.ndim == 5
+        or (
+            batch.full_tensor.ndim == 4
+            and str(batch.metadata.get("canonical_layout", "")) == "NCTX"
+            and int(batch.full_tensor.shape[2]) > 1
+        )
+        or isinstance(batch.metadata.get("full_trajectory"), torch.Tensor)
+    )
 
 
 def _scalar_params_used_as_input(batch: PDEBatch) -> bool:
@@ -1773,6 +1955,13 @@ def _file_sha256(path: Path) -> str:
         return ""
 
 
+def _synchronize_device(device: str | torch.device) -> None:
+    """Make wall-clock timings include queued CUDA work and host transfers."""
+    resolved = torch.device(device)
+    if resolved.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(resolved)
+
+
 def _config_content_sha256(config_path: str | None, cfg: dict[str, Any]) -> str:
     if config_path:
         path = Path(config_path)
@@ -1786,50 +1975,93 @@ def _validate_data_manifest_binding(args: argparse.Namespace) -> None:
     """Fail closed on missing, stale, or non-full formal data evidence."""
     manifest_sha256 = str(getattr(args, "data_manifest_sha256", "") or "").strip().lower()
     manifest_path_text = str(getattr(args, "data_manifest_path", "") or "").strip()
+    experiment_config_sha256 = str(
+        getattr(args, "experiment_config_sha256", "") or ""
+    ).strip().lower()
     formal_paper_run = args.experiment_mode == "paper" and requires_full_data_manifest(
         args.task_protocol_version
     )
-    if formal_paper_run and not manifest_sha256:
+    if formal_paper_run and (
+        not manifest_sha256
+        or not manifest_path_text
+        or not experiment_config_sha256
+    ):
         raise ValueError(
             f"paper runs using task protocol {DEFAULT_TASK_PROTOCOL_VERSION} require "
-            "--data-manifest-sha256 from a passing full data-protocol report"
+            "--data-manifest-sha256, --data-manifest-path, and "
+            "--experiment-config-sha256 from a passing full data-protocol report"
+        )
+    if experiment_config_sha256:
+        _require_cli_sha256(
+            experiment_config_sha256, "--experiment-config-sha256"
         )
     if manifest_sha256 and (
         len(manifest_sha256) != 64 or any(character not in "0123456789abcdef" for character in manifest_sha256)
     ):
         raise ValueError("--data-manifest-sha256 must be a 64-character hexadecimal SHA-256 digest")
     if manifest_path_text:
-        manifest_path = Path(manifest_path_text).expanduser().resolve()
-        if not manifest_path.is_file():
-            raise FileNotFoundError(f"data manifest not found: {manifest_path}")
         if not manifest_sha256:
             raise ValueError("--data-manifest-path requires --data-manifest-sha256")
-        observed_sha256 = _file_sha256(manifest_path)
-        if observed_sha256 != manifest_sha256:
+        manifest, manifest_path, _observed_sha256 = validate_full_data_manifest(
+            manifest_path_text,
+            expected_sha256=manifest_sha256,
+            expected_experiment_config_sha256=experiment_config_sha256,
+            expected_data_root=args.data_root,
+            expected_verifier_sha256=sha256_file(
+                ROOT / "scripts" / "verify_data_protocol.py"
+            ),
+            verify_source_signatures=True,
+        )
+        if str(args.pde) not in {str(value) for value in manifest.get("pdes", [])}:
             raise ValueError(
-                "data manifest SHA-256 mismatch: "
-                f"observed={observed_sha256}, expected={manifest_sha256}, path={manifest_path}"
+                f"data manifest does not cover requested PDE {args.pde!r}: {manifest_path}"
             )
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"data manifest is not readable JSON: {manifest_path}") from exc
-        if not isinstance(manifest, dict):
-            raise ValueError(f"data manifest must be a JSON object: {manifest_path}")
-        if manifest.get("status") != "pass" or manifest.get("mode") != "full":
-            raise ValueError(
-                "data manifest must record status='pass' and mode='full': "
-                f"status={manifest.get('status')!r}, mode={manifest.get('mode')!r}, path={manifest_path}"
-            )
-        args.data_manifest_path = str(manifest_path)
+        args.data_manifest_path = manifest_path
     args.data_manifest_sha256 = manifest_sha256
+    args.experiment_config_sha256 = experiment_config_sha256
 
 
-def _local_run_fingerprint(args: argparse.Namespace, method_cfg: dict[str, Any]) -> str:
-    payload = {
+def _require_cli_sha256(value: str, field: str) -> None:
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(
+            f"{field} must be a 64-character hexadecimal SHA-256 digest"
+        )
+
+
+def _validate_and_bind_run_fingerprint(
+    args: argparse.Namespace, method_cfg: dict[str, Any]
+) -> None:
+    sparse = str(args.task).startswith("sparse")
+    if args.execution_mode == "eval_only":
+        checkpoint_path = Path(str(args.checkpoint or ""))
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"eval-only checkpoint not found for fingerprint validation: {checkpoint_path}"
+            )
+        observed_checkpoint_sha256 = sha256_file(checkpoint_path)
+        supplied_checkpoint_sha256 = str(args.checkpoint_sha256 or "").lower()
+        if supplied_checkpoint_sha256 and supplied_checkpoint_sha256 != observed_checkpoint_sha256:
+            raise ValueError(
+                "--checkpoint-sha256 does not match --checkpoint: "
+                f"supplied={supplied_checkpoint_sha256}, observed={observed_checkpoint_sha256}"
+            )
+        args.checkpoint_sha256 = observed_checkpoint_sha256
+
+    payload: dict[str, Any] = {
+        "matrix_schema_version": int(args.matrix_schema_version),
+        "summary_schema_version": int(args.summary_schema_version),
+        "execution_mode": str(args.execution_mode),
+        "comparison_track": str(args.comparison_track),
+        "experiment_kind": str(args.experiment_kind),
+        "ablation_factor": str(args.ablation_factor),
+        "task_group": str(args.task_group),
         "baseline": args.baseline,
         "pde": args.pde,
         "task": args.task,
+        "task_protocol_version": str(args.task_protocol_version),
+        "sensor_protocol_version": str(args.sensor_protocol_version),
         "seed": int(args.seed),
         "sensor_seed": int(args.sensor_seed),
         "train_size": int(args.train_size),
@@ -1837,24 +2069,45 @@ def _local_run_fingerprint(args: argparse.Namespace, method_cfg: dict[str, Any])
         "test_size": int(args.test_size),
         "train_shards": int(args.train_shards),
         "batch_size": int(args.batch_size),
-        "epochs": int(method_cfg.get("epochs", 0)),
+        "epochs": int(method_cfg.get("epochs", 0) or 0),
         "device": str(args.device),
-        "sensor_mode": str(args.sensor_mode),
-        "sensor_budget_mode": str(args.sensor_budget_mode),
-        "num_sensors": int(args.num_sensors),
-        "noise_level": float(args.noise_level),
+        "sensor_mode": str(args.sensor_mode) if sparse else "none",
+        "sensor_budget_mode": str(args.sensor_budget_mode) if sparse else "none",
+        "num_sensors": int(args.num_sensors) if sparse else 0,
+        "noise_level": float(args.noise_level) if sparse else 0.0,
+        "steps": int(method_cfg.get("steps", 0) or 0),
+        "refine_steps": int(method_cfg.get("refine_steps", 0) or 0),
+        "particles": int(method_cfg.get("particles", 0) or 0),
+        "scalar_param_mode": str(args.scalar_param_mode),
+        "data_loading_mode": str(args.data_loading_mode_requested),
+        "num_workers": int(args.num_workers_requested),
+        "pin_memory": bool(args.pin_memory_requested),
+        "persistent_workers": bool(args.persistent_workers_requested),
+        "prefetch_factor": int(args.prefetch_factor_requested),
+        "load_full_trajectory": bool(args.load_full_trajectory),
         "config_content_sha256": args.config_content_sha256,
+        "experiment_config_sha256": str(args.experiment_config_sha256),
         "data_manifest_sha256": str(args.data_manifest_sha256),
-        "data_manifest_path": str(args.data_manifest_path),
-        "task_protocol_version": str(args.task_protocol_version),
-        "sensor_protocol_version": str(args.sensor_protocol_version),
-        "comparison_track": str(args.comparison_track),
-        "execution_mode": str(args.execution_mode),
-        "method": _json_safe(method_cfg),
         "commit_hash": str(args.commit_hash),
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    if args.execution_mode == "eval_only":
+        payload.update(
+            {
+                "source_train_run_id": str(args.source_train_run_id),
+                "source_train_run_fingerprint": str(args.source_train_run_fingerprint),
+                "source_train_seed": int(args.source_train_seed),
+                "checkpoint_sha256": str(args.checkpoint_sha256),
+            }
+        )
+    observed_fingerprint = run_fingerprint(payload)
+    supplied_fingerprint = str(args.run_fingerprint or "")
+    if supplied_fingerprint and supplied_fingerprint != observed_fingerprint:
+        raise ValueError(
+            "--run-fingerprint does not match the effective execution design: "
+            f"supplied={supplied_fingerprint}, observed={observed_fingerprint}; "
+            "launch through run_one.py or regenerate the matrix"
+        )
+    args.run_fingerprint = observed_fingerprint
 
 
 def _uses_official_inverse_observation_operator(baseline: str, method_cfg: dict[str, Any]) -> bool:

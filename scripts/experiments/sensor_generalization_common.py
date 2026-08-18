@@ -103,10 +103,14 @@ def make_provenance_row(
         "commit_hash": repository_revision(ROOT),
         "config": str(template["config"]),
         "config_content_sha256": _config_hash(template),
+        "experiment_config_sha256": str(
+            template.get("experiment_config_sha256", "") or ""
+        ),
         "data_manifest_sha256": str(template.get("data_manifest_sha256", "") or ""),
         "data_manifest_path": str(template.get("data_manifest_path", "") or ""),
         "num_sensors": _int_value(template.get("num_sensors"), 500),
         "sensor_mode": str(sensor_mode or template.get("sensor_mode", "random_per_sample")),
+        "sensor_budget_mode": str(template.get("sensor_budget_mode", "per_time")),
         "noise_level": float(template.get("noise_level", 0.0)),
         "steps": int(template.get("steps") or 0),
         "refine_steps": int(template.get("refine_steps") or 0),
@@ -175,6 +179,7 @@ def write_eval_request(output_dir: str | Path, row: Mapping[str, Any], command: 
                 "source_train_seed": row["source_train_seed"],
                 "checkpoint_path": row["checkpoint_path"],
                 "checkpoint_sha256": row["checkpoint_sha256"],
+                "experiment_config_sha256": row["experiment_config_sha256"],
                 "data_manifest_sha256": row["data_manifest_sha256"],
                 "data_manifest_path": row["data_manifest_path"],
                 "command": command,

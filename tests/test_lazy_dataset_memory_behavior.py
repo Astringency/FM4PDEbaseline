@@ -6,6 +6,7 @@ import pytest
 
 from baselines.common.data_adapter import PDEBatchDataset, build_default_registry
 from baselines.run import build_pde_dataloader
+from baselines.run import _split_mask_manifest
 
 
 CURRENT_PDES = [
@@ -76,6 +77,93 @@ def test_lazy_mode_raises_in_paper(tiny_data_root):
             data_loading_mode="lazy",
             experiment_mode="paper",
         )
+
+
+def test_paper_random_per_sample_defers_observation_tensors_until_getitem(tiny_data_root):
+    registry = build_default_registry()
+    ds = registry.make_dataset(
+        "nsnonbounded",
+        tiny_data_root,
+        "sparse_forward",
+        split="train",
+        max_samples=2,
+        num_sensors=5,
+        sensor_mode="random_per_sample",
+        load_full_trajectory=True,
+        experiment_mode="paper",
+    )
+
+    assert ds.batch.mask is None
+    assert ds.batch.obs_values is None
+    assert ds.batch.obs_coords is None
+    assert "masked_grid" not in ds.batch.metadata
+    assert "voronoi_grid" not in ds.batch.metadata
+    assert ds.batch.metadata["deferred_dynamic_sensors"] is True
+    assert ds.batch.coords.shape[0] == 1
+
+    item = ds[0]
+
+    assert item.mask is not None
+    assert item.obs_values is not None
+    assert item.obs_coords is not None
+    assert item.metadata["masked_grid"].shape == item.input_fields.shape
+    assert item.metadata["voronoi_grid"].shape == item.input_fields.shape
+    assert item.metadata["mask_id"] == ds.batch.metadata["mask_ids"][0]
+    assert item.metadata["mask_tensor_sha1"]
+    assert ds.batch.mask is None
+    manifest = _split_mask_manifest(ds, None, ds)
+    assert manifest["train_epoch0"]["sample_mask_count"] == len(ds)
+    assert manifest["train_epoch0"]["mask_ids_sha256"]
+
+
+def test_deferred_random_per_sample_epoch_reaches_persistent_workers(tiny_data_root):
+    registry = build_default_registry()
+    ds = registry.make_dataset(
+        "poisson",
+        tiny_data_root,
+        "sparse_solution",
+        split="train",
+        max_samples=3,
+        num_sensors=5,
+        sensor_mode="random_per_sample",
+        seed=3,
+        experiment_mode="paper",
+    )
+    args = Namespace(
+        batch_size=3,
+        device="cpu",
+        num_workers=1,
+        pin_memory=False,
+        persistent_workers=True,
+        prefetch_factor=2,
+    )
+    loader = build_pde_dataloader(ds, args, shuffle=False)
+    first = next(iter(loader))
+    ds.set_epoch(1)
+    second = next(iter(loader))
+
+    assert not first.metadata["mask_id"] == second.metadata["mask_id"]
+
+
+def test_deferred_sensors_skip_voronoi_when_baseline_does_not_require_it(tiny_data_root):
+    registry = build_default_registry()
+    ds = registry.make_dataset(
+        "poisson",
+        tiny_data_root,
+        "sparse_solution",
+        split="train",
+        max_samples=2,
+        num_sensors=5,
+        sensor_mode="random_per_sample",
+        experiment_mode="paper",
+        build_voronoi_grid=False,
+    )
+
+    item = ds[0]
+
+    assert item.mask is not None
+    assert "masked_grid" in item.metadata
+    assert "voronoi_grid" not in item.metadata
 
 
 def test_static_eager_train_tail_validation_offset(tiny_data_root):

@@ -12,9 +12,10 @@ from openpyxl import load_workbook
 
 from baselines.run import main as run_baseline
 from baselines.run import parse_args as parse_baseline_args
+import scripts.export_results_xlsx as exporter
 from scripts.experiments.build_matrix import build_matrix
 from scripts.experiments.run_one import build_command, run_one as run_matrix_row
-from scripts.experiments.provenance import repository_revision, run_fingerprint
+from scripts.experiments.provenance import SUMMARY_DESIGN_FIELD_MAP, repository_revision, run_fingerprint
 from scripts.export_results_xlsx import (
     ExportValidationError,
     collect_results,
@@ -22,6 +23,9 @@ from scripts.export_results_xlsx import (
     require_single_cohort,
 )
 from scripts.run_remaining_plan_v2 import completion_reasons, is_complete, quarantine_invalid_output
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _config(method_config: Path) -> dict:
@@ -62,12 +66,14 @@ def _only_row(cfg: dict, tmp_path: Path) -> dict:
 
 
 def _valid_summary(row: dict) -> dict:
-    return {
+    summary = {
         "status": "success",
+        "matrix_schema_version": row["matrix_schema_version"],
         "summary_schema_version": row["summary_schema_version"],
         "run_id": row["run_id"],
         "run_fingerprint": row["run_fingerprint"],
         "execution_mode": row["execution_mode"],
+        "eval_only": row["execution_mode"] == "eval_only",
         "comparison_track": row["comparison_track"],
         "config_content_sha256": row["config_content_sha256"],
         "config_hash": "resolved-config-sha1",
@@ -81,6 +87,16 @@ def _valid_summary(row: dict) -> dict:
         "baseline": row["baseline"],
         "seed": row["seed"],
     }
+    summary.update(
+        {
+            summary_field: row[matrix_field]
+            for matrix_field, summary_field in SUMMARY_DESIGN_FIELD_MAP.items()
+        }
+    )
+    summary["train_size_requested"] = row["train_size"]
+    summary["val_size"] = row["val_size"]
+    summary["test_size"] = row["test_size"]
+    return summary
 
 
 def test_matrix_fingerprint_tracks_config_content(tmp_path: Path):
@@ -107,6 +123,18 @@ def test_matrix_fingerprint_tracks_config_content(tmp_path: Path):
     assert changed["config_content_sha256"] != first["config_content_sha256"]
     assert changed["run_fingerprint"] != first["run_fingerprint"]
     assert changed["run_id"] != first["run_id"]
+
+
+def test_matrix_rejects_nonignored_in_repository_output_root(tmp_path: Path):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not git-ignored"):
+        build_matrix(
+            _config(method_config),
+            ROOT / "nonignored-matrix-output-fixture",
+            "unsafe",
+        )
 
 
 def test_repository_revision_covers_tracked_and_untracked_content(tmp_path: Path):
@@ -300,6 +328,23 @@ def test_run_command_rejects_config_drift_after_matrix_generation(tmp_path: Path
         build_command(row)
 
 
+def test_core_runner_recomputes_supplied_fingerprint_before_data_loading():
+    with pytest.raises(ValueError, match="effective execution design"):
+        run_baseline(
+            [
+                "--baseline",
+                "fno",
+                "--pde",
+                "poisson",
+                "--experiment-mode",
+                "debug",
+                "--synthetic-data",
+                "--run-fingerprint",
+                "0" * 64,
+            ]
+        )
+
+
 def test_run_command_rejects_fingerprint_bound_environment_override(tmp_path: Path, monkeypatch):
     method_config = tmp_path / "method.yaml"
     method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
@@ -310,6 +355,22 @@ def test_run_command_rejects_fingerprint_bound_environment_override(tmp_path: Pa
 
     with pytest.raises(RuntimeError, match="regenerate the matrix"):
         build_command(row)
+
+
+def test_exporter_defaults_to_the_corrected_namespace():
+    args = exporter.parse_args([])
+
+    assert Path(args.matrix) == (
+        exporter.OUTPUT_ROOT
+        / "experiment_plan_v2_corrected"
+        / "matrices"
+        / "experiment_plan_v2_corrected.jsonl"
+    )
+    assert Path(args.output) == exporter.OUTPUT_ROOT / "experiment_plan_v2_corrected_summary.xlsx"
+    assert exporter.IMMUTABLE_HISTORICAL_WORKBOOK == (
+        exporter.ROOT / "outputs" / "experiment_plan_v2_summary.xlsx"
+    )
+    assert Path(args.output) != exporter.IMMUTABLE_HISTORICAL_WORKBOOK
 
 
 def test_exporter_quarantines_legacy_summary_and_keeps_provenance_fields(tmp_path: Path):
@@ -350,6 +411,35 @@ def test_exporter_quarantines_legacy_summary_and_keeps_provenance_fields(tmp_pat
     assert record["inference_optimization_time_total"] == 2.0
     assert "summary_missing:run_fingerprint" in result.quarantine[0]["validation_reasons"]
     assert result.quarantine[0]["summary_path"].endswith("summary.json")
+
+
+def test_exporter_quarantines_every_mismatched_design_field(tmp_path: Path):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
+    row = _only_row(_config(method_config), tmp_path / "matrix")
+    output_dir = Path(row["output_dir"])
+    output_dir.mkdir(parents=True)
+    summary_path = output_dir / "summary.json"
+    valid = _valid_summary(row)
+
+    for matrix_field, summary_field in SUMMARY_DESIGN_FIELD_MAP.items():
+        expected = row[matrix_field]
+        if isinstance(expected, bool):
+            mismatched_value = not expected
+        elif isinstance(expected, (int, float)):
+            mismatched_value = expected + 1
+        else:
+            mismatched_value = f"{expected}-mismatch"
+        summary_path.write_text(
+            json.dumps(valid | {summary_field: mismatched_value}),
+            encoding="utf-8",
+        )
+
+        result = collect_results([row])
+
+        assert not result.records, summary_field
+        assert len(result.quarantine) == 1, summary_field
+        assert f"summary_mismatch:{summary_field}" in result.quarantine[0]["validation_reasons"]
 
 
 def test_exporter_rejects_multiple_provenance_cohorts(tmp_path: Path):
@@ -411,6 +501,71 @@ def test_exporter_writes_provenance_and_timing_columns_for_one_valid_cohort(tmp_
     assert values["inference_optimization_time_total"] == 2.0
 
 
+@pytest.mark.parametrize(
+    ("checkpoint_state", "expected_reason"),
+    [
+        ("missing", "checkpoint_missing"),
+        ("tampered", "checkpoint_hash_mismatch"),
+    ],
+)
+def test_exporter_quarantines_eval_only_summary_when_live_checkpoint_is_invalid(
+    tmp_path: Path,
+    checkpoint_state: str,
+    expected_reason: str,
+):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
+    train_row = _only_row(_config(method_config), tmp_path / "matrix")
+    checkpoint = tmp_path / "model.pt"
+    checkpoint.write_bytes(b"checkpoint-at-evaluation-time")
+    eval_row = deepcopy(train_row)
+    eval_row.update(
+        {
+            "execution_mode": "eval_only",
+            "source_train_run_id": train_row["run_id"],
+            "source_train_run_fingerprint": train_row["run_fingerprint"],
+            "source_train_seed": train_row["seed"],
+            "checkpoint_path": str(checkpoint),
+            "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        }
+    )
+    eval_row["run_fingerprint"] = run_fingerprint(eval_row)
+    eval_row["run_id"] = f"eval_{eval_row['run_fingerprint'][:12]}"
+    summary = _valid_summary(eval_row) | {
+        "source_train_run_id": eval_row["source_train_run_id"],
+        "source_train_run_fingerprint": eval_row["source_train_run_fingerprint"],
+        "source_train_seed": eval_row["source_train_seed"],
+        "checkpoint_path": eval_row["checkpoint_path"],
+        "checkpoint_sha256": eval_row["checkpoint_sha256"],
+    }
+    output_dir = Path(eval_row["output_dir"])
+    output_dir.mkdir(parents=True)
+    (output_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    valid_collection = collect_results([eval_row])
+    assert len(valid_collection.records) == 1
+    assert not valid_collection.quarantine
+    if checkpoint_state == "missing":
+        checkpoint.unlink()
+    else:
+        checkpoint.write_bytes(b"checkpoint-tampered-after-summary")
+    output = tmp_path / "must_not_publish_eval.xlsx"
+    quarantine = tmp_path / "eval_quarantine.xlsx"
+    quarantine_jsonl = tmp_path / "eval_quarantine.jsonl"
+
+    with pytest.raises(ExportValidationError, match="publication blocked"):
+        export_results(
+            [eval_row],
+            output=output,
+            quarantine_output=quarantine,
+            quarantine_jsonl=quarantine_jsonl,
+        )
+
+    assert not output.exists()
+    assert quarantine.exists()
+    quarantined = json.loads(quarantine_jsonl.read_text(encoding="utf-8"))
+    assert expected_reason in quarantined["validation_reasons"]
+
+
 def test_exporter_blocks_main_workbook_and_writes_readable_quarantine(tmp_path: Path):
     method_config = tmp_path / "method.yaml"
     method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
@@ -444,6 +599,94 @@ def test_exporter_blocks_main_workbook_and_writes_readable_quarantine(tmp_path: 
     values = dict(zip(headers, quarantine_rows[1], strict=True))
     assert values["publishable"] is False
     assert "summary_missing:run_fingerprint" in values["validation_reasons"]
+
+
+def test_exporter_preserves_immutable_historical_workbook_when_publication_is_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
+    row = _only_row(_config(method_config), tmp_path / "matrix")
+    output_dir = Path(row["output_dir"])
+    output_dir.mkdir(parents=True)
+    (output_dir / "summary.json").write_text(json.dumps({"run_id": row["run_id"]}), encoding="utf-8")
+    historical = tmp_path / "experiment_plan_v2_summary.xlsx"
+    historical_bytes = b"immutable historical workbook"
+    historical.write_bytes(historical_bytes)
+    monkeypatch.setattr(exporter, "IMMUTABLE_HISTORICAL_WORKBOOK", historical)
+    quarantine = tmp_path / "quarantine.xlsx"
+    quarantine_jsonl = tmp_path / "quarantine.jsonl"
+
+    with pytest.raises(ExportValidationError, match="publication blocked"):
+        export_results(
+            [row],
+            output=historical,
+            quarantine_output=quarantine,
+            quarantine_jsonl=quarantine_jsonl,
+        )
+
+    assert historical.read_bytes() == historical_bytes
+    assert quarantine.exists()
+    assert quarantine_jsonl.exists()
+    assert not list(tmp_path.glob("quarantine_previous_publication*.xlsx"))
+    manifest_rows = list(
+        load_workbook(quarantine, read_only=True, data_only=True)["manifest"].iter_rows(values_only=True)
+    )
+    manifest = dict(zip(manifest_rows[0], manifest_rows[1], strict=True))
+    assert manifest["immutable_historical_workbook_preserved"] == str(historical)
+
+
+def test_exporter_refuses_to_overwrite_immutable_historical_workbook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
+    row = _only_row(_config(method_config), tmp_path / "matrix")
+    output_dir = Path(row["output_dir"])
+    output_dir.mkdir(parents=True)
+    (output_dir / "summary.json").write_text(json.dumps(_valid_summary(row)), encoding="utf-8")
+    historical = tmp_path / "experiment_plan_v2_summary.xlsx"
+    historical_bytes = b"immutable historical workbook"
+    historical.write_bytes(historical_bytes)
+    monkeypatch.setattr(exporter, "IMMUTABLE_HISTORICAL_WORKBOOK", historical)
+
+    with pytest.raises(ExportValidationError, match="immutable historical workbook"):
+        export_results(
+            [row],
+            output=historical,
+            quarantine_output=tmp_path / "quarantine.xlsx",
+            quarantine_jsonl=tmp_path / "quarantine.jsonl",
+        )
+
+    assert historical.read_bytes() == historical_bytes
+
+
+@pytest.mark.parametrize("historical_target", ["quarantine_output", "quarantine_jsonl"])
+def test_exporter_refuses_to_use_historical_workbook_as_a_quarantine_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    historical_target: str,
+):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
+    row = _only_row(_config(method_config), tmp_path / "matrix")
+    historical = tmp_path / "experiment_plan_v2_summary.xlsx"
+    historical_bytes = b"immutable historical workbook"
+    historical.write_bytes(historical_bytes)
+    monkeypatch.setattr(exporter, "IMMUTABLE_HISTORICAL_WORKBOOK", historical)
+    targets = {
+        "output": tmp_path / "corrected.xlsx",
+        "quarantine_output": tmp_path / "quarantine.xlsx",
+        "quarantine_jsonl": tmp_path / "quarantine.jsonl",
+    }
+    targets[historical_target] = historical
+
+    with pytest.raises(ExportValidationError, match="immutable historical workbook"):
+        export_results([row], **targets)
+
+    assert historical.read_bytes() == historical_bytes
 
 
 def test_exporter_blocks_partial_matrix_when_a_summary_is_missing(tmp_path: Path):

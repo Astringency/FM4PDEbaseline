@@ -45,6 +45,29 @@ def test_time_varying_sensor_budget_modes():
     assert sum(total["num_sensors_per_time"]) <= 5
 
 
+def test_random_per_sample_temporal_budget_modes_are_honored():
+    target = torch.randn(2, 1, 4, 8)
+    common = {
+        "num_sensors": 3,
+        "mode": "random_per_sample",
+        "seed": 4,
+        "time_dim": 0,
+        "sample_ids": ["burger:test:0", "burger:test:1"],
+        "split": "test",
+    }
+    per_time = build_observation_tensors(
+        target, sensor_budget_mode="per_time", **common
+    )
+    total = build_observation_tensors(
+        target, sensor_budget_mode="total", **common
+    )
+
+    assert per_time["num_observations_total"] == 12
+    assert per_time["num_sensors_per_time"] == [3, 3, 3, 3]
+    assert total["num_observations_total"] == 3
+    assert sum(total["num_sensors_per_time"]) == 3
+
+
 def test_random_per_sample_masks_are_deterministic_and_sample_specific():
     target = torch.randn(3, 1, 8, 8)
     kwargs = {

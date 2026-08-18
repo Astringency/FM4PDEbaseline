@@ -311,6 +311,31 @@ def test_burger_full_inverse_is_terminal_state_to_initial_state():
     assert batch.target_channel_names == ["u0"]
 
 
+def test_burger_nctx_is_reported_as_a_loaded_full_trajectory():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("burger", n=2, resolution=8)
+    batch = registry.make_task(raw, "burger", "sparse_solution", num_sensors=5, sensor_mode="fixed")
+    dataset = registry.make_dataset_from_batch(batch)
+
+    assert raw["metadata"]["loaded_full_trajectory"] is True
+    assert dataset.loaded_full_trajectory is True
+
+
+def test_burger_loader_reports_nctx_trajectory_even_when_request_flag_is_false(tiny_data_root):
+    registry = build_default_registry()
+    raw = registry.load_raw(
+        "burger",
+        tiny_data_root,
+        split="train",
+        max_samples=1,
+        load_full_trajectory=False,
+    )
+
+    assert raw["metadata"]["canonical_layout"] == "NCTX"
+    assert raw["metadata"]["load_full_trajectory"] is False
+    assert raw["metadata"]["loaded_full_trajectory"] is True
+
+
 def test_missing_file_error_lists_pde_and_candidates(tmp_path):
     registry = build_default_registry()
     with pytest.raises(FileNotFoundError) as exc:

@@ -27,7 +27,7 @@ def test_2gpu_readme_mentions_key_controls():
     readme = ROOT / "scripts/experiments/README_2gpu_parallel.md"
     assert readme.exists()
     text = readme.read_text(encoding="utf-8")
-    for token in ["JOBS_PER_GPU", "CUDA_VISIBLE_DEVICES", "NUM_WORKERS_PER_RUN", "SAVE_CHECKPOINT"]:
+    for token in ["JOBS_PER_GPU", "CUDA_VISIBLE_DEVICES", "fingerprint", "SAVE_CHECKPOINT"]:
         assert token in text
 
 

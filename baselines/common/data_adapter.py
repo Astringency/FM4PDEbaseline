@@ -134,16 +134,107 @@ def _finalize_loaded_raw(raw: dict[str, Any], max_samples: int | None, strict_si
     raw["metadata"].setdefault("pde_params", raw.get("pde_params", {}))
     raw["metadata"].setdefault("data_loading_mode", "eager")
     raw["metadata"].setdefault("train_size_loaded_in_memory", n)
-    raw["metadata"].setdefault(
-        "loaded_full_trajectory",
-        bool(raw["full_tensor"].ndim == 5 or isinstance(raw["metadata"].get("full_trajectory"), torch.Tensor)),
+    canonical_layout = str(raw["metadata"].get("canonical_layout", "")).upper()
+    inferred_full_trajectory = bool(
+        raw["full_tensor"].ndim == 5
+        or canonical_layout == "NCTX"
+        or isinstance(raw["metadata"].get("full_trajectory"), torch.Tensor)
     )
+    if inferred_full_trajectory:
+        # Burgers stores its complete x-t trajectory as a four-dimensional
+        # NCTX tensor, so ndim==5 alone is not a valid provenance test.
+        raw["metadata"]["loaded_full_trajectory"] = True
+    else:
+        raw["metadata"].setdefault("loaded_full_trajectory", False)
     if max_samples is not None and n < int(max_samples):
         message = f"Requested {max_samples} samples but only loaded {n} from split={split or 'unknown'}."
-        if strict_size and split != "test":
+        if strict_size:
             raise ValueError(message)
         warnings.warn(message, RuntimeWarning, stacklevel=2)
     return raw
+
+
+_DYNAMIC_SENSOR_EAGER_BYTE_LIMIT = 64 * 1024 * 1024
+
+
+def _should_defer_dynamic_sensors(observation_source: torch.Tensor, experiment_mode: str) -> bool:
+    """Avoid retaining four additional batch-sized sensor representations."""
+    if str(experiment_mode).lower() == "paper":
+        return True
+    source_bytes = int(observation_source.numel() * observation_source.element_size())
+    # mask + masked_grid + voronoi_grid; observation lists/coordinates only
+    # increase the eager footprint further.
+    return 3 * source_bytes >= _DYNAMIC_SENSOR_EAGER_BYTE_LIMIT
+
+
+def _canonical_sample_ids(canonical: dict[str, Any], count: int) -> list[str | int]:
+    global_ids = list(canonical.get("global_sample_ids", []) or [])
+    if global_ids:
+        if len(global_ids) != count:
+            raise ValueError(f"global_sample_ids length {len(global_ids)} does not match batch size {count}")
+        return global_ids
+    sample_indices = canonical.get("sample_indices")
+    if isinstance(sample_indices, torch.Tensor):
+        values = sample_indices.detach().cpu().reshape(-1).tolist()
+        if len(values) != count:
+            raise ValueError(f"sample_indices length {len(values)} does not match batch size {count}")
+        return [int(value) for value in values]
+    if sample_indices is not None:
+        values = list(sample_indices)
+        if len(values) != count:
+            raise ValueError(f"sample_indices length {len(values)} does not match batch size {count}")
+        return values
+    return list(range(count))
+
+
+def _deferred_sensor_layout_ids(
+    canonical: dict[str, Any],
+    observation_source: torch.Tensor,
+    *,
+    num_sensors: int,
+    seed: int,
+    split: str,
+    sensor_budget_mode: str,
+) -> list[str]:
+    """Record deterministic epoch-zero layout identities without materializing masks."""
+    shape = tuple(int(size) for size in observation_source.shape[1:])
+    sample_ids = _canonical_sample_ids(canonical, int(observation_source.shape[0]))
+    return [
+        _deferred_sensor_layout_id(
+            shape,
+            num_sensors=num_sensors,
+            seed=seed,
+            split=split,
+            sample_id=sample_id,
+            epoch=0,
+            sensor_budget_mode=sensor_budget_mode,
+        )
+        for sample_id in sample_ids
+    ]
+
+
+def _deferred_sensor_layout_id(
+    shape: tuple[int, ...],
+    *,
+    num_sensors: int,
+    seed: int,
+    split: str,
+    sample_id: str | int,
+    epoch: int,
+    sensor_budget_mode: str,
+) -> str:
+    effective_epoch = int(epoch) if str(split).lower() == "train" else 0
+    payload = (
+        f"fm4pde-sensor-contract-v2|random_per_sample|{int(seed)}|{str(split).lower()}|"
+        f"{sample_id}|{effective_epoch}|{shape}|{int(num_sensors)}|{sensor_budget_mode}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _aggregate_layout_id(mask_ids: list[str]) -> str:
+    if not mask_ids:
+        return ""
+    return hashlib.sha256("|".join(mask_ids).encode("utf-8")).hexdigest()[:16]
 
 
 class PDEDataRegistry:
@@ -287,6 +378,7 @@ class PDEDataRegistry:
         noise_level: float = 0.0,
         seed: int = 0,
         experiment_mode: str = "debug",
+        build_voronoi_grid: bool = True,
     ) -> PDEBatch:
         spec = self.get(pde_name)
         canonical = (
@@ -315,9 +407,8 @@ class PDEDataRegistry:
         original_input_fields = input_fields
         metadata["original_input_fields"] = original_input_fields
         metadata["background_fields"] = _background_fields_for_task(full, spec, metadata, original_input_fields)
-        coords = make_coordinate_grid(tuple(target_fields.shape[2:]), batch_size=target_fields.shape[0])
-
         mask = obs_values = obs_coords = None
+        deferred_dynamic_sensors = False
         if task.startswith("sparse") or num_sensors:
             requested_sensor_mode = sensor_mode
             effective_sensor_mode = sensor_mode
@@ -349,30 +440,72 @@ class PDEDataRegistry:
                     raise ValueError(message)
                 warnings.warn(message + " Falling back to an explicit fixed layout for this smoke/debug run.", RuntimeWarning, stacklevel=2)
                 effective_sensor_mode = "fixed"
-            obs = build_observation_tensors(
+            sensor_count = int(num_sensors or 500)
+            split_name = str(canonical.get("split", metadata.get("split", "")))
+            deferred_dynamic_sensors = effective_sensor_mode == "random_per_sample" and _should_defer_dynamic_sensors(
                 observation_source,
-                num_sensors=num_sensors or 500,
-                mode=effective_sensor_mode,
-                seed=seed,
-                noise_level=noise_level,
-                sensor_budget_mode=sensor_budget_mode,
-                time_dim=0 if (effective_sensor_mode == "time_varying" and spec.name == "burger" and observation_source.ndim == 4) else None,
-                sample_ids=canonical.get("global_sample_ids") or canonical.get("sample_indices"),
-                split=str(canonical.get("split", metadata.get("split", ""))),
-                epoch=0,
+                experiment_mode=experiment_mode,
             )
-            mask = obs["mask"]
-            obs_values = obs["obs_values"]
-            obs_coords = obs["obs_coords"]
-            metadata.update(
-                {
+            if deferred_dynamic_sensors:
+                # Keep only the observation source/view needed to construct a
+                # single item. Full-batch masks, observations, masked grids,
+                # and Voronoi grids are intentionally absent.
+                input_fields = observation_source
+                input_names = observation_names
+                mask_ids = _deferred_sensor_layout_ids(
+                    canonical,
+                    observation_source,
+                    num_sensors=sensor_count,
+                    seed=seed,
+                    split=split_name,
+                    sensor_budget_mode=sensor_budget_mode,
+                )
+                metadata.update(
+                    {
+                        "requested_sensor_mode": requested_sensor_mode,
+                        "effective_sensor_mode": effective_sensor_mode,
+                        "sensor_mode": effective_sensor_mode,
+                        "time_varying_sensor_valid": bool(time_varying_valid),
+                        "num_sensors": sensor_count,
+                        "sensor_budget_mode": str(sensor_budget_mode),
+                        "num_observations_total": min(sensor_count, int(np.prod(observation_source.shape[2:]))),
+                        "num_sensors_per_time": min(sensor_count, int(np.prod(observation_source.shape[2:]))),
+                        "noise_level": float(noise_level),
+                        "mask_id": _aggregate_layout_id(mask_ids),
+                        "mask_ids": mask_ids,
+                        "mask_id_kind": "deterministic_sensor_spec",
+                        "sensor_seed": int(seed),
+                        "sensor_protocol_version": "2",
+                        "deferred_dynamic_sensors": True,
+                        "build_voronoi_grid": bool(build_voronoi_grid),
+                    }
+                )
+            else:
+                obs = build_observation_tensors(
+                    observation_source,
+                    num_sensors=sensor_count,
+                    mode=effective_sensor_mode,
+                    seed=seed,
+                    noise_level=noise_level,
+                    sensor_budget_mode=sensor_budget_mode,
+                    time_dim=0
+                    if spec.name == "burger" and observation_source.ndim == 4
+                    else None,
+                    sample_ids=_canonical_sample_ids(canonical, int(observation_source.shape[0])),
+                    split=split_name,
+                    epoch=0,
+                    build_voronoi_grid=build_voronoi_grid,
+                )
+                mask = obs["mask"]
+                obs_values = obs["obs_values"]
+                obs_coords = obs["obs_coords"]
+                observation_metadata = {
                     "masked_grid": obs["masked_grid"],
-                    "voronoi_grid": obs["voronoi_grid"],
                     "requested_sensor_mode": requested_sensor_mode,
                     "effective_sensor_mode": effective_sensor_mode,
                     "sensor_mode": effective_sensor_mode,
                     "time_varying_sensor_valid": bool(time_varying_valid),
-                    "num_sensors": int(num_sensors or 500),
+                    "num_sensors": sensor_count,
                     "sensor_budget_mode": str(obs["sensor_budget_mode"]),
                     "num_observations_total": int(obs["num_observations_total"]),
                     "num_sensors_per_time": obs["num_sensors_per_time"],
@@ -381,18 +514,29 @@ class PDEDataRegistry:
                     "mask_ids": list(obs.get("mask_ids", [])),
                     "sensor_seed": int(seed),
                     "sensor_protocol_version": "2",
+                    "deferred_dynamic_sensors": False,
+                    "build_voronoi_grid": bool(build_voronoi_grid),
                 }
-            )
-            if task in {"sparse_solution", "sparse_reconstruction"}:
-                input_fields = obs["masked_grid"]
-                input_names = list(target_names)
-            elif task in {"sparse_inverse", "sparse_forward"}:
-                input_fields = obs["masked_grid"]
-                input_names = observation_names
+                if isinstance(obs.get("voronoi_grid"), torch.Tensor):
+                    observation_metadata["voronoi_grid"] = obs["voronoi_grid"]
+                metadata.update(observation_metadata)
+                if task in {"sparse_solution", "sparse_reconstruction"}:
+                    input_fields = obs["masked_grid"]
+                    input_names = list(target_names)
+                elif task in {"sparse_inverse", "sparse_forward"}:
+                    input_fields = obs["masked_grid"]
+                    input_names = observation_names
         else:
             metadata.setdefault("requested_sensor_mode", "none")
             metadata.setdefault("effective_sensor_mode", "none")
             metadata.setdefault("time_varying_sensor_valid", True)
+
+        # Coordinates are identical for every sample. Deferred datasets expand
+        # this one shared grid during collation instead of retaining B copies.
+        coords = make_coordinate_grid(
+            tuple(target_fields.shape[2:]),
+            batch_size=1 if deferred_dynamic_sensors else target_fields.shape[0],
+        )
 
         metadata["input_shape"] = tuple(input_fields.shape)
         metadata["target_shape"] = tuple(target_fields.shape)
@@ -452,6 +596,7 @@ class PDEDataRegistry:
         load_full_trajectory: bool = True,
         experiment_mode: str = "debug",
         strict_size: bool = False,
+        build_voronoi_grid: bool = True,
     ) -> Dataset:
         if data_loading_mode not in {"eager", "lazy"}:
             raise ValueError(f"data_loading_mode must be eager or lazy, got {data_loading_mode!r}")
@@ -489,6 +634,7 @@ class PDEDataRegistry:
             noise_level=noise_level,
             seed=seed,
             experiment_mode=experiment_mode,
+            build_voronoi_grid=build_voronoi_grid,
         )
         return PDEBatchDataset(batch)
 
@@ -615,7 +761,7 @@ class PDEDataRegistry:
                 "scalar_param_mode": scalar_param_mode,
                 "data_loading_mode": "eager",
                 "load_full_trajectory": True,
-                "loaded_full_trajectory": bool(x.ndim == 5),
+                "loaded_full_trajectory": bool(x.ndim == 5 or str(meta.get("canonical_layout", "")).upper() == "NCTX"),
                 "pde_params": pde_params,
                 "pde_params_available": sorted(pde_params),
                 "sample_indices": sample_indices,
@@ -650,10 +796,10 @@ class PDEDataRegistry:
             target = full
             initial = metadata.get("initial_1d")
             if initial is None:
-                input_fields = full[:, :, :1, :].repeat(1, 1, full.shape[-2], 1)
+                input_fields = full[:, :, :1, :].expand(-1, -1, full.shape[-2], -1)
             else:
                 init = initial.to(full.device, full.dtype).reshape(full.shape[0], 1, 1, full.shape[-1])
-                input_fields = init.repeat(1, 1, full.shape[-2], 1)
+                input_fields = init.expand(-1, -1, full.shape[-2], -1)
             if task == "sparse_inverse":
                 raise ValueError(
                     "Burger sparse_inverse is not defined in the sensor-only protocol; "
@@ -851,24 +997,48 @@ class PDEBatchDataset(Dataset):
             seed=int(item.metadata.get("sensor_seed", 0)),
             noise_level=float(item.metadata.get("noise_level", 0.0)),
             sensor_budget_mode=str(item.metadata.get("sensor_budget_mode", "per_time")),
-            time_dim=0 if (mode == "time_varying" and item.pde_name == "burger" and source.ndim == 4) else None,
+            time_dim=0
+            if item.pde_name == "burger" and source.ndim == 4
+            else None,
             sample_ids=[sample_id],
             split=item.split,
             epoch=self.epoch,
+            build_voronoi_grid=bool(item.metadata.get("build_voronoi_grid", True)),
         )
+        deferred_layout_id = None
+        if item.metadata.get("deferred_dynamic_sensors"):
+            deferred_layout_id = _deferred_sensor_layout_id(
+                tuple(int(size) for size in source.shape[1:]),
+                num_sensors=int(item.metadata.get("num_sensors", 500)),
+                seed=int(item.metadata.get("sensor_seed", 0)),
+                split=item.split,
+                sample_id=sample_id,
+                epoch=self.epoch,
+                sensor_budget_mode=str(item.metadata.get("sensor_budget_mode", "per_time")),
+            )
         item.mask = obs["mask"]
         item.obs_values = obs["obs_values"]
         item.obs_coords = obs["obs_coords"]
         item.input_fields = obs["masked_grid"].float()
-        item.metadata.update(
-            {
-                "masked_grid": obs["masked_grid"],
-                "voronoi_grid": obs["voronoi_grid"],
-                "mask_id": obs["mask_id"],
-                "mask_ids": list(obs.get("mask_ids", [])),
-                "sensor_epoch": self.epoch if item.split == "train" else 0,
-            }
-        )
+        observation_metadata = {
+            "masked_grid": obs["masked_grid"],
+            "mask_id": deferred_layout_id or obs["mask_id"],
+            "mask_ids": (
+                [deferred_layout_id]
+                if deferred_layout_id
+                else list(obs.get("mask_ids", []))
+            ),
+            "mask_tensor_sha1": obs["mask_id"],
+            "num_observations_total": int(obs["num_observations_total"]),
+            "num_sensors_per_time": obs["num_sensors_per_time"],
+            "input_shape": tuple(item.input_fields.shape),
+            "sensor_epoch": self.epoch if item.split == "train" else 0,
+        }
+        if isinstance(obs.get("voronoi_grid"), torch.Tensor):
+            observation_metadata["voronoi_grid"] = obs["voronoi_grid"]
+        else:
+            item.metadata.pop("voronoi_grid", None)
+        item.metadata.update(observation_metadata)
         return item
 
 
@@ -930,9 +1100,13 @@ def pde_collate(items: list[PDEBatch]) -> PDEBatch:
             for mask_id in batch.metadata.get("mask_ids", [batch.metadata.get("mask_id", "")])
             if mask_id
         ]
-        metadata["mask_id"] = hashlib.sha1(
-            mask.detach().cpu().contiguous().numpy().tobytes()
-        ).hexdigest()[:16]
+        mask_tensor_sha1 = hashlib.sha1(mask.detach().cpu().contiguous().numpy().tobytes()).hexdigest()[:16]
+        metadata["mask_tensor_sha1"] = mask_tensor_sha1
+        metadata["mask_id"] = (
+            _aggregate_layout_id(metadata["mask_ids"])
+            if metadata.get("deferred_dynamic_sensors")
+            else mask_tensor_sha1
+        )
     elif mask is not None and any(not torch.equal(mask, b.mask) for b in items[1:] if b.mask is not None):
         raise ValueError("Cannot collate different shared masks; use batch-aware [B,C,*grid] masks")
     return PDEBatch(
@@ -958,7 +1132,11 @@ def pde_collate(items: list[PDEBatch]) -> PDEBatch:
 
 
 def _batch_has_full_trajectory(batch: PDEBatch) -> bool:
+    if bool(batch.metadata.get("loaded_full_trajectory", False)):
+        return True
     if batch.full_tensor.ndim == 5:
+        return True
+    if str(batch.metadata.get("canonical_layout", "")).upper() == "NCTX":
         return True
     return isinstance(batch.metadata.get("full_trajectory"), torch.Tensor)
 
@@ -1555,6 +1733,8 @@ def _load_burger(
         "final_time": 1.0,
         "nu": 0.01,
         "split": split,
+        "load_full_trajectory": bool(load_full_trajectory),
+        "loaded_full_trajectory": True,
     }
     if initials:
         meta["initial_1d"] = torch.cat(initials, dim=0)

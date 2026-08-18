@@ -22,18 +22,27 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.experiments.provenance import cohort_id, cohort_signature, summary_validation_reasons
+from scripts.experiments.provenance import (
+    HistoricalExperimentError,
+    cohort_id,
+    cohort_signature,
+    reject_historical_experiment_path,
+    summary_validation_reasons,
+)
 
 
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_ROOT", ROOT / "outputs"))
-MATRIX = OUTPUT_ROOT / "experiment_plan_v2" / "matrices" / "experiment_plan_v2.jsonl"
-OUT_XLSX = OUTPUT_ROOT / "experiment_plan_v2_summary.xlsx"
+CORRECTED_NAMESPACE = "experiment_plan_v2_corrected"
+MATRIX = OUTPUT_ROOT / CORRECTED_NAMESPACE / "matrices" / f"{CORRECTED_NAMESPACE}.jsonl"
+OUT_XLSX = OUTPUT_ROOT / f"{CORRECTED_NAMESPACE}_summary.xlsx"
+IMMUTABLE_HISTORICAL_WORKBOOK = ROOT / "outputs" / "experiment_plan_v2_summary.xlsx"
 
 PROVENANCE_COLUMNS = [
     "publishable",
     "validation_status",
     "cohort_id",
     "status",
+    "matrix_schema_version",
     "summary_schema_version",
     "execution_mode",
     "eval_only",
@@ -43,6 +52,7 @@ PROVENANCE_COLUMNS = [
     "run_id",
     "run_fingerprint",
     "config_content_sha256",
+    "experiment_config_sha256",
     "config_hash",
     "config_path",
     "commit_hash",
@@ -54,6 +64,7 @@ PROVENANCE_COLUMNS = [
     "data_manifest_sha256",
     "data_manifest_path",
     "data_manifest_hash",
+    "data_root",
     "file_paths_summary",
     "experiment_mode",
     "dry_run",
@@ -71,6 +82,7 @@ DESIGN_COLUMNS = [
     "sensor_seed",
     "train_size",
     "train_requested_size",
+    "train_size_requested",
     "effective_train_size",
     "train_size_loaded_for_fit",
     "val_size",
@@ -78,12 +90,14 @@ DESIGN_COLUMNS = [
     "val_split_source",
     "val_from_train_offset",
     "test_size",
+    "test_requested_size",
     "train_shards",
     "batch_size",
     "epochs",
     "device",
     "num_sensors",
     "requested_sensor_mode",
+    "sensor_budget_mode_requested",
     "effective_sensor_mode",
     "sensor_mode",
     "mask_id",
@@ -91,6 +105,19 @@ DESIGN_COLUMNS = [
     "split_mask_manifest",
     "noise_level",
     "scalar_param_mode",
+    "scalar_param_mode_requested",
+    "data_loading_mode_requested",
+    "effective_data_loading_mode",
+    "num_workers",
+    "pin_memory_requested",
+    "persistent_workers_requested",
+    "prefetch_factor_requested",
+    "dataloader_num_workers",
+    "dataloader_pin_memory",
+    "dataloader_persistent_workers",
+    "dataloader_prefetch_factor",
+    "load_full_trajectory",
+    "loaded_full_trajectory",
     "steps",
     "refine_steps",
     "particles",
@@ -282,6 +309,9 @@ def _quarantine_record(
         "observed_run_id": summary.get("run_id"),
         "observed_run_fingerprint": summary.get("run_fingerprint"),
         "observed_config_content_sha256": summary.get("config_content_sha256"),
+        "observed_experiment_config_sha256": summary.get(
+            "experiment_config_sha256"
+        ),
         "observed_data_manifest_sha256": summary.get("data_manifest_sha256"),
         "observed_data_manifest_path": summary.get("data_manifest_path"),
         "observed_config_hash": summary.get("config_hash"),
@@ -353,6 +383,57 @@ def _archive_existing_publication(output: Path, quarantine_output: Path) -> str:
     return str(archived)
 
 
+def _is_immutable_historical_workbook(path: Path) -> bool:
+    return path.expanduser().resolve() == IMMUTABLE_HISTORICAL_WORKBOOK.expanduser().resolve()
+
+
+def _prepare_blocked_publication(
+    output: Path,
+    quarantine_output: Path,
+    manifest: dict[str, Any],
+) -> None:
+    """Archive stale corrected output while leaving historical evidence in place."""
+    if _is_immutable_historical_workbook(output):
+        manifest["immutable_historical_workbook_preserved"] = str(output)
+        return
+    archived = _archive_existing_publication(output, quarantine_output)
+    if archived:
+        manifest["previous_publication_quarantined_as"] = archived
+
+
+def _require_mutable_publication_target(output: Path) -> None:
+    if _is_immutable_historical_workbook(output):
+        raise ExportValidationError(
+            "refusing to overwrite immutable historical workbook "
+            f"{output}; publish the corrected cohort to {OUT_XLSX}"
+        )
+
+
+def _require_safe_artifact_targets(
+    output: Path,
+    quarantine_output: Path,
+    quarantine_jsonl: Path,
+) -> None:
+    targets = {
+        "output": output,
+        "quarantine-output": quarantine_output,
+        "quarantine-jsonl": quarantine_jsonl,
+    }
+    resolved = {name: path.expanduser().resolve() for name, path in targets.items()}
+    if len(set(resolved.values())) != len(resolved):
+        raise ExportValidationError("output and quarantine artifact paths must be different")
+    for name in ("quarantine-output", "quarantine-jsonl"):
+        if _is_immutable_historical_workbook(targets[name]):
+            raise ExportValidationError(
+                f"refusing to overwrite immutable historical workbook {targets[name]} as {name}"
+            )
+    for name, target in targets.items():
+        try:
+            reject_historical_experiment_path(target, field=name)
+        except HistoricalExperimentError as exc:
+            raise ExportValidationError(str(exc)) from exc
+
+
 def export_results(
     rows: list[dict[str, Any]],
     *,
@@ -364,6 +445,7 @@ def export_results(
     output = Path(output)
     quarantine_output = Path(quarantine_output)
     quarantine_jsonl = Path(quarantine_jsonl)
+    _require_safe_artifact_targets(output, quarantine_output, quarantine_jsonl)
     collection = collect_results(rows)
     manifest: dict[str, Any] = {
         "matrix": str(matrix_path),
@@ -376,9 +458,7 @@ def export_results(
     if collection.quarantine:
         manifest["publication_blocked"] = True
         manifest["block_reason"] = "legacy_or_mismatched_summaries"
-        archived = _archive_existing_publication(output, quarantine_output)
-        if archived:
-            manifest["previous_publication_quarantined_as"] = archived
+        _prepare_blocked_publication(output, quarantine_output, manifest)
         _write_quarantine(
             quarantine_output,
             quarantine_jsonl,
@@ -392,9 +472,7 @@ def export_results(
     if not collection.records:
         manifest["publication_blocked"] = True
         manifest["block_reason"] = "no_validated_summaries"
-        archived = _archive_existing_publication(output, quarantine_output)
-        if archived:
-            manifest["previous_publication_quarantined_as"] = archived
+        _prepare_blocked_publication(output, quarantine_output, manifest)
         _write_quarantine(quarantine_output, quarantine_jsonl, [], [], manifest)
         raise ExportValidationError("No provenance-validated summary.json files found.")
 
@@ -413,12 +491,11 @@ def export_results(
         manifest["publication_blocked"] = True
         manifest["block_reason"] = "mixed_provenance_cohorts"
         manifest["cohort_signatures"] = [cohort_signature(record) for record in collection.records]
-        archived = _archive_existing_publication(output, quarantine_output)
-        if archived:
-            manifest["previous_publication_quarantined_as"] = archived
+        _prepare_blocked_publication(output, quarantine_output, manifest)
         _write_quarantine(quarantine_output, quarantine_jsonl, mixed, collection.records, manifest)
         raise
 
+    _require_mutable_publication_target(output)
     manifest.update({"publication_blocked": False, "cohort_id": cohort})
     dataframe = _dataframe(collection.records, COLUMNS)
     output.parent.mkdir(parents=True, exist_ok=True)

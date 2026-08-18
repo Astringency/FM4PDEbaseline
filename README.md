@@ -45,13 +45,38 @@ Set the data root and output root first:
 export DATA_ROOT=/path/to/PDEdata
 export OUT_ROOT=outputs/baselines_large
 export DEVICE=cuda
+export DATA_MANIFEST_DIR=outputs/data_protocol
 ```
 
-Build matrices:
+Formal matrices are built only from a complete, passing data report that is
+bound to the exact experiment YAML. Verify every design first; editing a YAML
+after verification invalidates its report and requires another full pass:
+
+```bash
+for matrix in \
+  sanity_main main_results sensor_count_ablation noise_ablation \
+  sensor_mode_ablation time_varying_sensor_ablation \
+  runtime_budget_ablation train_size_ablation
+do
+  python scripts/verify_data_protocol.py \
+    --config "configs/experiments/${matrix}.yaml" \
+    --data-root "$DATA_ROOT" \
+    --output-dir "${DATA_MANIFEST_DIR}/${matrix}/full" \
+    --full
+done
+```
+
+The reports land at
+`$DATA_MANIFEST_DIR/<matrix>/full/data_protocol_report.json`. Build the matrices
+only after every report above passes:
 
 ```bash
 bash scripts/experiments/00_build_matrices.sh
 ```
+
+The historical `experiment_plan_v2` matrix and its outputs are audit evidence;
+do not rebuild, rerun, move, or overwrite them. Corrected protocol-v2 work uses
+the separate `experiment_plan_v2_corrected` namespace.
 
 Run the small sanity matrix:
 
@@ -90,7 +115,8 @@ bash scripts/experiments/08_status.sh
 
 Baseline runs save reusable model checkpoints by default. Each run writes
 `<output_dir>/<run_prefix>.pt`, and records the path in `summary.json` and the
-result tables as `checkpoint_path`. Disable this only when metrics are enough:
+result tables as `checkpoint_path`. Formal amortized runs require this artifact
+for provenance validation. Only non-formal smoke/debug runs may disable it:
 
 ```bash
 python -m baselines.run ... --no-save-checkpoint

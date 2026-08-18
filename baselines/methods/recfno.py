@@ -14,12 +14,13 @@ class RecFNOBaseline(BaselineModel):
 
     def build(self, config, data_spec):
         super().build(config, data_spec)
+        input_channels = int(data_spec["input_channels"])
         target_channels = int(data_spec["target_channels"])
-        # The vendored RecFNO VoronoiFNO2d is trained on the four-channel
-        # representation [Voronoi-filled field, observation mask, coordinates].
+        # The vendored RecFNO VoronoiFNO2d is trained on the representation
+        # [Voronoi-filled observed field, observation mask, coordinates].
         # Keep that representation for the local fallback as well so changing
         # the backend does not silently change the task input.
-        in_channels = target_channels + target_channels + 2
+        in_channels = input_channels + input_channels + 2
         required_representation = "voronoi_mask_coords"
         configured_representation = self.config.get("input_representation")
         legacy_embedding = self.config.get("embedding")
@@ -51,7 +52,7 @@ class RecFNOBaseline(BaselineModel):
                     "recfno",
                     "recfno",
                     fallback_used=False,
-                    implementation_mode_effective="official",
+                    implementation_mode_effective="adapted",
                     implementation_source="vendored_recfno_voronoifno2d_component_with_unified_training",
                     official_import_success=True,
                     official_reimplementation_success=False,
@@ -105,14 +106,28 @@ class RecFNOBaseline(BaselineModel):
         base = batch.metadata.get("voronoi_grid")
         if not isinstance(base, torch.Tensor):
             raise ValueError("RecFNO requires batch.metadata['voronoi_grid']; zero-masked input fallback is not allowed")
+        expected_channels = int(self.data_spec["input_channels"])
+        if base.shape[1] != expected_channels:
+            raise ValueError(
+                f"RecFNO Voronoi input has {base.shape[1]} channels, expected {expected_channels} observed channels"
+            )
         mask = batch.mask
         if mask is None:
             raise ValueError("RecFNO requires an explicit observation mask")
-        if mask.ndim == base.ndim and mask.shape[0] == base.shape[0]:
+        if tuple(mask.shape) == tuple(base.shape):
             # Per-sample masks already carry the batch dimension.
             mask_grid = mask.to(base.device, base.dtype)
+        elif tuple(mask.shape) == tuple(base.shape[1:]):
+            mask_grid = mask.unsqueeze(0).expand(base.shape[0], *mask.shape).to(base.device, base.dtype)
         else:
-            mask_grid = mask.unsqueeze(0).repeat(base.shape[0], 1, 1, 1).to(base.device, base.dtype)
+            raise ValueError(
+                f"RecFNO mask shape {tuple(mask.shape)} must match input with or without batch "
+                f"({tuple(base.shape)} or {tuple(base.shape[1:])})"
+            )
+        if mask_grid.shape[1] != expected_channels:
+            raise ValueError(
+                f"RecFNO observation mask has {mask_grid.shape[1]} channels, expected {expected_channels}"
+            )
         x = torch.cat([base, mask_grid, grid_channels(base)], dim=1)
         return self.net(x)
 

@@ -685,6 +685,7 @@ def run_audit(
 
     config_path = Path(config_path).resolve()
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    ordered_samples = _ordered_sample_rows(samples)
     report = {
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
@@ -701,11 +702,44 @@ def run_audit(
         "chunk_size": options.chunk_size,
         "cache_enabled": options.use_cache,
         "pdes": selected_pdes,
+        "sample_manifest_record_count": len(ordered_samples),
+        "sample_manifest_sha256": _sample_manifest_sha256(ordered_samples),
         "status": "pass" if all(item["status"] == "pass" for item in pde_results) else "fail",
         "errors": errors,
         "results": pde_results,
     }
     return report, samples
+
+
+def _ordered_sample_rows(samples: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    fields = (
+        "pde",
+        "split",
+        "source_kind",
+        "ordinal",
+        "sample_index",
+        "global_sample_id",
+        "field_sha256",
+        "content_sha256",
+    )
+    rows = [{field: sample.get(field, "") for field in fields} for sample in samples]
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row["pde"]),
+            str(row["split"]),
+            int(row["ordinal"]),
+            str(row["global_sample_id"]),
+        ),
+    )
+
+
+def _sample_manifest_sha256(samples: Sequence[Mapping[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for row in _ordered_sample_rows(samples):
+        digest.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def write_outputs(output_dir: Path, report: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]) -> dict[str, str]:
@@ -758,9 +792,8 @@ def write_outputs(output_dir: Path, report: Mapping[str, Any], samples: Sequence
     ) as csv_handle:
         writer = csv.DictWriter(csv_handle, fieldnames=sample_fields, extrasaction="ignore")
         writer.writeheader()
-        for sample in samples:
-            row = {field: sample.get(field, "") for field in sample_fields}
-            jsonl.write(json.dumps(row, sort_keys=True) + "\n")
+        for row in _ordered_sample_rows(samples):
+            jsonl.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
             writer.writerow(row)
     return {
         "report_json": str(report_path),

@@ -17,8 +17,9 @@ class VoronoiCNNBaseline(BaselineModel):
 
     def build(self, config, data_spec):
         super().build(config, data_spec)
+        input_channels = int(data_spec["input_channels"])
         target_channels = int(data_spec["target_channels"])
-        architecture_in_channels = target_channels + target_channels
+        architecture_in_channels = input_channels + input_channels
         adapted_in_channels = architecture_in_channels + 2
         backend = str(self.config.get("official_backend", "auto")).lower()
         implementation_mode = requested_implementation_mode(self.config)
@@ -86,7 +87,19 @@ class VoronoiCNNBaseline(BaselineModel):
         return run_supervised_fit(self, train_loader, val_loader)
 
     def predict(self, batch: PDEBatch):
+        if batch.metadata.get("deferred_dynamic_sensors") and (
+            batch.mask is None or not isinstance(batch.metadata.get("voronoi_grid"), torch.Tensor)
+        ):
+            raise ValueError(
+                "VoronoiCNN received an unmaterialized random_per_sample batch; access it through "
+                "PDEBatchDataset so observations are generated per item"
+            )
         vor = batch.metadata.get("voronoi_grid", batch.input_fields)
+        expected_channels = int(self.data_spec["input_channels"])
+        if vor.shape[1] != expected_channels:
+            raise ValueError(
+                f"VoronoiCNN input has {vor.shape[1]} channels, expected {expected_channels} observed channels"
+            )
         mask = batch.mask
         if mask is None:
             mask_grid = torch.ones_like(vor)
@@ -98,6 +111,10 @@ class VoronoiCNNBaseline(BaselineModel):
             raise ValueError(
                 f"VoronoiCNN mask shape {tuple(mask.shape)} must match input with or without batch "
                 f"({tuple(vor.shape)} or {tuple(vor.shape[1:])})"
+            )
+        if mask_grid.shape[1] != expected_channels:
+            raise ValueError(
+                f"VoronoiCNN observation mask has {mask_grid.shape[1]} channels, expected {expected_channels}"
             )
         parts = [vor, mask_grid]
         if self.include_coords:

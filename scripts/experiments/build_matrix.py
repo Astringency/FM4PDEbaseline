@@ -5,7 +5,9 @@ import argparse
 import csv
 import json
 import os
+import re
 import shlex
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -32,11 +34,15 @@ from scripts.experiments.provenance import (
     DEFAULT_SENSOR_PROTOCOL_VERSION,
     DEFAULT_TASK_PROTOCOL_VERSION,
     FINGERPRINT_FIELDS,
+    HISTORICAL_EXPERIMENT_NAMESPACE,
+    HistoricalExperimentError,
     MATRIX_SCHEMA_VERSION,
     SUMMARY_SCHEMA_VERSION,
     repository_revision,
+    reject_historical_experiment_path,
     run_fingerprint,
     sha256_file,
+    validate_full_data_manifest,
 )
 
 
@@ -98,6 +104,33 @@ VALID_ABLATION_FACTORS = {
     "runtime_budget",
     "train_size",
 }
+FORMAL_DESIGN_OVERRIDE_ENV = (
+    "SEEDS",
+    "TRAIN_SIZE",
+    "TRAIN_SIZES",
+    "VAL_SIZE",
+    "TEST_SIZE",
+    "TRAIN_SHARDS",
+    "SENSOR_COUNTS",
+    "SENSOR_MODES",
+    "NOISE_LEVELS",
+    "SENSOR_SEED",
+    "BATCH_SIZE",
+    "EPOCHS",
+    "DEVICE",
+    "SCALAR_PARAM_MODE",
+    "NUM_WORKERS",
+    "PIN_MEMORY",
+    "PERSISTENT_WORKERS",
+    "PREFETCH_FACTOR",
+    "PINN_STEPS",
+    "PDEOPT_STEPS",
+    "VAR4D_STEPS",
+    "PCBNN_STEPS",
+    "VIVID_REFINE_STEPS",
+    "PCBNN_PARTICLES",
+    "FULL_ABLATION_ALL",
+)
 FACTOR_TO_VARIED_FIELDS = {
     "sensor_count": {"num_sensors"},
     "noise_level": {"noise_level"},
@@ -145,6 +178,7 @@ MATRIX_FIELDS = [
     "train_shards",
     "num_sensors",
     "sensor_mode",
+    "sensor_budget_mode",
     "noise_level",
     "scalar_param_mode",
     "data_loading_mode",
@@ -162,6 +196,7 @@ MATRIX_FIELDS = [
     "commit_hash",
     "config",
     "config_content_sha256",
+    "experiment_config_sha256",
     "checkpoint_path",
     "checkpoint_sha256",
     "output_dir",
@@ -179,6 +214,7 @@ SUMMARY_DESIGN_FIELDS = [
     "train_size",
     "num_sensors",
     "sensor_mode",
+    "sensor_budget_mode",
     "noise_level",
     "steps",
     "refine_steps",
@@ -213,26 +249,26 @@ def load_config(path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def load_data_manifest_binding(path: str | Path) -> tuple[str, str]:
+def load_data_manifest_binding(
+    path: str | Path,
+    *,
+    experiment_config_path: str | Path | None = None,
+    expected_pdes: list[str] | None = None,
+) -> tuple[str, str]:
     """Validate a full data-protocol report and return absolute path + SHA-256."""
-    manifest_path = Path(path).expanduser().resolve()
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"data manifest not found: {manifest_path}")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"data manifest is not readable JSON: {manifest_path}") from exc
-    if not isinstance(manifest, dict):
-        raise ValueError(f"data manifest must be a JSON object: {manifest_path}")
-    if manifest.get("status") != "pass":
-        raise ValueError(
-            f"data manifest must have status='pass', got {manifest.get('status')!r}: {manifest_path}"
-        )
-    if manifest.get("mode") != "full":
-        raise ValueError(
-            f"data manifest must have mode='full', got {manifest.get('mode')!r}: {manifest_path}"
-        )
-    return str(manifest_path), sha256_file(manifest_path)
+    expected_config_sha256 = (
+        sha256_file(experiment_config_path, root=ROOT)
+        if experiment_config_path is not None
+        else ""
+    )
+    _manifest, manifest_path, manifest_sha256 = validate_full_data_manifest(
+        path,
+        expected_experiment_config_sha256=expected_config_sha256,
+        expected_pdes=expected_pdes,
+        expected_verifier_sha256=sha256_file(ROOT / "scripts" / "verify_data_protocol.py"),
+        verify_source_signatures=True,
+    )
+    return manifest_path, manifest_sha256
 
 
 def build_matrix(
@@ -243,8 +279,11 @@ def build_matrix(
     main_table_only: bool | None = None,
     emit_progress: bool = False,
     data_manifest: str | Path | None = None,
+    experiment_config_path: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     output_root = Path(output_root)
+    _reject_historical_matrix_target(output_root, matrix_name)
+    _validate_output_root_revision_safety(output_root)
     experiment_kind = _experiment_kind(cfg)
     ablation_factor = _ablation_factor(cfg, experiment_kind)
     comparison_track = _comparison_track(cfg)
@@ -259,8 +298,22 @@ def build_matrix(
     skipped: dict[tuple[Any, ...], dict[str, Any]] = {}
     global_defaults = _global_defaults(cfg)
     commit_hash = repository_revision(ROOT)
+    experiment_config_sha256 = (
+        sha256_file(experiment_config_path, root=ROOT)
+        if experiment_config_path is not None
+        else ""
+    )
     if data_manifest:
-        data_manifest_path, data_manifest_sha256 = load_data_manifest_binding(data_manifest)
+        _reject_formal_design_environment_overrides()
+        if experiment_config_path is None:
+            raise ValueError(
+                "data_manifest requires experiment_config_path so the full report can be bound to the exact design YAML"
+            )
+        data_manifest_path, data_manifest_sha256 = load_data_manifest_binding(
+            data_manifest,
+            experiment_config_path=experiment_config_path,
+            expected_pdes=_configured_manifest_pdes(cfg),
+        )
     else:
         # Direct construction remains useful for capability/design inspection.
         # Such formal rows cannot be executed or published until rebuilt from
@@ -329,6 +382,7 @@ def build_matrix(
                                 global_defaults,
                                 output_root,
                                 commit_hash,
+                                experiment_config_sha256,
                                 data_manifest_path,
                                 data_manifest_sha256,
                             )
@@ -397,6 +451,7 @@ def build_matrix(
                                     global_defaults,
                                     output_root,
                                     commit_hash,
+                                    experiment_config_sha256,
                                     data_manifest_path,
                                     data_manifest_sha256,
                                 )
@@ -428,6 +483,7 @@ def build_matrix(
                                             noise_level=float(noise_level),
                                             budget=budget,
                                             commit_hash=commit_hash,
+                                            experiment_config_sha256=experiment_config_sha256,
                                             data_manifest_path=data_manifest_path,
                                             data_manifest_sha256=data_manifest_sha256,
                                         )
@@ -442,14 +498,91 @@ def build_matrix(
         experiment_kind,
         ablation_factor,
         comparison_track,
+        experiment_config_sha256,
         data_manifest_path,
         data_manifest_sha256,
     )
     return rows, skipped_rows, summary
 
 
+def _validate_output_root_revision_safety(output_root: str | Path) -> None:
+    """Reject in-repository outputs that would invalidate their own revision."""
+    resolved_root = Path(output_root).expanduser().resolve()
+    repository_root = ROOT.resolve()
+    try:
+        relative = resolved_root.relative_to(repository_root)
+    except ValueError:
+        return
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "--", str(relative)],
+        cwd=repository_root,
+        check=False,
+    )
+    if ignored.returncode != 0:
+        raise ValueError(
+            "output_root is inside the repository but is not git-ignored; writing the matrix "
+            "would change commit_hash immediately. Use an ignored outputs/ path or an external directory: "
+            f"{resolved_root}"
+        )
+
+
+def _reject_historical_matrix_target(
+    output_root: str | Path, matrix_name: str
+) -> None:
+    """Protect the original v2 matrix namespace before any build or write."""
+    reject_historical_experiment_path(output_root, field="matrix output_root")
+    if (
+        str(matrix_name) in {"", ".", ".."}
+        or re.fullmatch(r"[A-Za-z0-9_.-]+", str(matrix_name)) is None
+    ):
+        raise ValueError(
+            "matrix_name must be a safe basename containing only letters, digits, '.', '_', or '-': "
+            f"{matrix_name!r}"
+        )
+    if str(matrix_name) == HISTORICAL_EXPERIMENT_NAMESPACE:
+        raise HistoricalExperimentError(
+            f"refusing to rebuild historical matrix {matrix_name!r}; "
+            "use experiment_plan_v2_corrected and preserve the original evidence"
+        )
+
+
+def _reject_formal_design_environment_overrides() -> None:
+    """Formal matrices must describe the reviewed YAML, not shell state."""
+    active = {
+        name: os.environ[name]
+        for name in FORMAL_DESIGN_OVERRIDE_ENV
+        if os.environ.get(name) not in {None, ""}
+    }
+    if active:
+        raise ValueError(
+            "formal matrix generation forbids design environment overrides; "
+            f"update the experiment YAML instead: {sorted(active)}"
+        )
+
+
+def _configured_manifest_pdes(cfg: dict[str, Any]) -> list[str]:
+    pdes: list[str] = []
+
+    def add(values: Any) -> None:
+        if values is None or (isinstance(values, str) and values.lower() == "all"):
+            return
+        for value in ([values] if isinstance(values, str) else values):
+            name = str(value)
+            if name not in pdes:
+                pdes.append(name)
+
+    add(cfg.get("pdes"))
+    for group in (cfg.get("task_group_overrides", {}) or {}).values():
+        if isinstance(group, dict):
+            add(group.get("pdes"))
+    if not pdes:
+        raise ValueError("formal experiment config must declare an explicit PDE cohort")
+    return pdes
+
+
 def write_outputs(rows: list[dict[str, Any]], skipped_rows: list[dict[str, Any]], summary: dict[str, Any], output_root: str | Path, matrix_name: str) -> None:
     output_root = Path(output_root)
+    _reject_historical_matrix_target(output_root, matrix_name)
     matrix_dir = output_root / "matrices"
     matrix_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = matrix_dir / f"{matrix_name}.jsonl"
@@ -758,6 +891,7 @@ def _make_run_row(
     noise_level: float,
     budget: dict[str, int],
     commit_hash: str,
+    experiment_config_sha256: str,
     data_manifest_path: str,
     data_manifest_sha256: str,
 ) -> dict[str, Any]:
@@ -821,6 +955,11 @@ def _make_run_row(
         "train_shards": train_shards,
         "num_sensors": int(num_sensors),
         "sensor_mode": sensor_mode,
+        "sensor_budget_mode": str(
+            group_cfg.get("sensor_budget_mode", cfg.get("sensor_budget_mode", "per_time"))
+            if task.startswith("sparse")
+            else "none"
+        ),
         "noise_level": float(noise_level),
         "scalar_param_mode": scalar_param_mode,
         "data_loading_mode": defaults["data_loading_mode"],
@@ -838,6 +977,7 @@ def _make_run_row(
         "commit_hash": commit_hash,
         "config": config_path,
         "config_content_sha256": sha256_file(config_path, root=ROOT),
+        "experiment_config_sha256": experiment_config_sha256,
         "checkpoint_path": "",
         "checkpoint_sha256": "",
         "output_dir": "",
@@ -987,6 +1127,7 @@ def _skipped_matrix_row(
     defaults: dict[str, Any],
     output_root: Path,
     commit_hash: str,
+    experiment_config_sha256: str,
     data_manifest_path: str,
     data_manifest_sha256: str,
 ) -> dict[str, Any]:
@@ -1042,6 +1183,7 @@ def _skipped_matrix_row(
             "commit_hash": commit_hash,
             "config": defaults["config"],
             "config_content_sha256": "",
+            "experiment_config_sha256": experiment_config_sha256,
             "checkpoint_path": "",
             "checkpoint_sha256": "",
             "output_dir": str(output_root / "skipped" / _safe_name(skip["task_group"])),
@@ -1078,6 +1220,7 @@ def _summary(
     experiment_kind: str,
     ablation_factor: str,
     comparison_track: str,
+    experiment_config_sha256: str,
     data_manifest_path: str,
     data_manifest_sha256: str,
 ) -> dict[str, Any]:
@@ -1099,6 +1242,7 @@ def _summary(
         "experiment_kind": experiment_kind,
         "ablation_factor": ablation_factor,
         "comparison_track": comparison_track,
+        "experiment_config_sha256": experiment_config_sha256,
         "data_manifest_sha256": data_manifest_sha256,
         "data_manifest_path": data_manifest_path,
         "run_count": len(active_rows),
@@ -1271,6 +1415,7 @@ def main(argv: list[str] | None = None) -> None:
         main_table_only=main_table_only,
         emit_progress=True,
         data_manifest=args.data_manifest or None,
+        experiment_config_path=args.config,
     )
     write_outputs(rows, skipped, summary, args.output_root, matrix_name)
     output_paths = _output_paths(args.output_root, matrix_name)

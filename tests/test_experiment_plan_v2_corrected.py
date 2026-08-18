@@ -4,6 +4,8 @@ from pathlib import Path
 
 import yaml
 
+from scripts.experiments.build_matrix import build_matrix
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ORIGINAL = ROOT / "configs/experiments/experiment_plan_v2.yaml"
@@ -39,4 +41,32 @@ def test_corrected_plan_excludes_invalid_sparse_rows():
         "recfno",
         "senseiver",
         "voronoicnn",
+    }
+    assert groups["sparse_solution_main_amortized"]["load_full_trajectory"] is True
+    assert groups["sparse_solution_main_amortized"]["sensor_budget_mode"] == "total"
+    assert "burger" not in groups["sparse_forward_main_amortized"]["pdes"]
+    assert "burger" not in groups["sparse_forward_main_physics"]["pdes"]
+
+
+def test_corrected_plan_expands_the_full_three_seed_cohort(tmp_path: Path):
+    corrected = _load(CORRECTED)
+
+    assert corrected["seeds"] == [1, 2, 3]
+
+    rows, skipped, summary = build_matrix(
+        corrected,
+        tmp_path / "experiment_plan_v2_corrected",
+        "experiment_plan_v2_corrected",
+    )
+
+    assert len(rows) == summary["run_count"] == 213
+    assert len(skipped) == summary["skipped_combo_count"] == 4
+    assert summary["skipped_expanded_count"] == 12
+    assert summary["by_task_group"] == {
+        "full_forward_main": 45,
+        "full_inverse_main": 15,
+        "sparse_forward_main_amortized": 36,
+        "sparse_forward_main_physics": 18,
+        "sparse_inverse_main": 54,
+        "sparse_solution_main_amortized": 45,
     }

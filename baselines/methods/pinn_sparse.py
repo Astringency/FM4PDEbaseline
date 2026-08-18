@@ -17,12 +17,20 @@ from .shared import NeuralField
 STATIC_SPARSE_INVERSE_PDES = {"poisson", "helmholtz", "darcy", "steady_heat_conduction"}
 
 
+def _synchronized_perf_counter(batch: PDEBatch) -> float:
+    if batch.input_fields.device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(batch.input_fields.device)
+    return time.perf_counter()
+
+
 class PINNSparseBaseline(BaselineModel):
     name = "pinn_sparse"
 
     def build(self, config, data_spec):
         super().build(config, data_spec)
         self.coord_dim = len(tuple(data_spec["target_shape"])[2:])
+        self.task = str(data_spec.get("task", ""))
+        self.input_channels = int(data_spec["input_channels"])
         self.target_channels = int(data_spec["target_channels"])
         self.hidden = int(self.config.get("hidden", 64))
         self.depth = int(self.config.get("depth", 4))
@@ -62,8 +70,20 @@ class PINNSparseBaseline(BaselineModel):
         return self
 
     def parameter_count(self) -> int:
-        proto = self._new_field(self.coord_dim, self.target_channels)
-        return int(sum(p.numel() for p in proto.parameters() if p.requires_grad))
+        channel_counts = [self.target_channels]
+        if self.task in {"sparse_inverse", "sparse_forward"}:
+            # Both protocols optimize an unknown/source field and a solution
+            # field per test sample. Report the complete optimized model, not
+            # only the tensor returned to the evaluator.
+            channel_counts.append(self.input_channels)
+        return int(
+            sum(
+                parameter.numel()
+                for channels in channel_counts
+                for parameter in self._new_field(self.coord_dim, channels).parameters()
+                if parameter.requires_grad
+            )
+        )
 
     def parameter_storage_count(self) -> int:
         return self.parameter_count()
@@ -81,7 +101,7 @@ class PINNSparseBaseline(BaselineModel):
                 "PINN-Sparse is disabled for the sensor-only sparse_solution protocol because its PDE objective "
                 "requires hidden source/coefficient/initial fields. Use a separately named equal-context protocol."
             )
-        start = time.perf_counter()
+        start = _synchronized_perf_counter(batch)
         preds = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
@@ -119,14 +139,14 @@ class PINNSparseBaseline(BaselineModel):
                     optimizer.step()
             with torch.no_grad():
                 preds.append(model(coords).T.reshape_as(target))
-        batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
         return torch.cat(preds, dim=0).detach()
 
     def _predict_sparse_inverse(self, batch: PDEBatch):
         pde = batch.pde_name.lower()
         if pde not in STATIC_SPARSE_INVERSE_PDES:
             raise NotImplementedError(f"PINN-Sparse sparse_inverse is only enabled for static PDEs, got {batch.pde_name}")
-        start = time.perf_counter()
+        start = _synchronized_perf_counter(batch)
         preds = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
@@ -162,14 +182,14 @@ class PINNSparseBaseline(BaselineModel):
                     optimizer.step()
             with torch.no_grad():
                 preds.append(unknown(coords).T.reshape(unknown_target_shape))
-        batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
         return torch.cat(preds, dim=0).detach()
 
     def _predict_sparse_forward(self, batch: PDEBatch):
         pde = batch.pde_name.lower()
         if pde not in STATIC_SPARSE_INVERSE_PDES:
             raise NotImplementedError(f"PINN-Sparse sparse_forward is only enabled for static PDEs, got {batch.pde_name}")
-        start = time.perf_counter()
+        start = _synchronized_perf_counter(batch)
         preds = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
@@ -205,7 +225,7 @@ class PINNSparseBaseline(BaselineModel):
                     optimizer.step()
             with torch.no_grad():
                 preds.append(solution(coords).T.reshape(solution_target_shape))
-        batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
         return torch.cat(preds, dim=0).detach()
 
     def _new_field(self, coord_dim: int, out_channels: int) -> nn.Module:
