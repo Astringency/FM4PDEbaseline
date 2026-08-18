@@ -511,13 +511,13 @@ def resolve_capability(
                     pde,
                     task,
                     sensor_mode,
-                    "official_adapter",
-                    "official",
+                    "adapted",
+                    "adapted_allowed",
                     family,
-                    "PC-BNN sparse/noisy flow reconstruction assumptions match the 2D three-channel shallow-water field setting",
-                    "Use the direct official Net when importable, or the explicit official-aligned Net/SVGD/physics-constrained reimplementation.",
-                    official_aligned_allowed=True,
-                    eligible_implementation_modes=("official", "official_aligned"),
+                    "the official PC-BNN outputs incompressible-flow (u,v,p), not shallow-water state channels",
+                    "Do not treat channel-count coincidence as official task alignment.",
+                    eligible=False,
+                    unified_comparison_eligible=False,
                 )
             return _cap(
                 baseline,
@@ -542,10 +542,10 @@ def resolve_capability(
                     "adapted",
                     "adapted_allowed",
                     family,
-                    "PC-BNN uses a disclosed joint source/solution particle posterior with sparse observations and a PDE residual",
-                    "Generic scalar-PDE PC-BNN adaptation; report separately from the matched official shallow-water setting.",
+                    "PC-BNN-adapted preserves the official Swish particle architecture, hierarchical priors, SVGD, observation likelihood, and physics likelihood behind a static-PDE task adapter",
+                    "Report explicitly as PC-BNN-adapted; it is eligible for the unified adapted comparison but not an official-native reproduction.",
                     eligible=False,
-                    unified_comparison_eligible=False,
+                    unified_comparison_eligible=True,
                 )
             return _cap(
                 baseline,

@@ -1,23 +1,18 @@
 from __future__ import annotations
 
 import time
-import warnings
+import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import physics_loss_metric
 
 from .base import BaselineModel, LossPlateauStopper, record_optimization_status
-from .official import (
-    OfficialImportError,
-    get_pc_bnn_net_class,
-    get_pc_bnn_official_aligned_status,
-    official_source_info,
-    requested_implementation_mode,
-    wrap_official_adapter_error,
-)
+from .official import official_source_info
 from .pinn_sparse import (
     STATIC_SPARSE_INVERSE_PDES,
     _physics_weight_metadata,
@@ -28,7 +23,49 @@ from .pinn_sparse import (
     sparse_inverse_observation_loss,
     sparse_inverse_physics_loss,
 )
-from .shared import NeuralField
+@dataclass(frozen=True)
+class PCBNNPosteriorResult:
+    mean: torch.Tensor
+    std: torch.Tensor
+    samples: torch.Tensor
+    noise_precision: list[float]
+    statuses: list[dict]
+
+
+class _SparseTaskAdapter:
+    """Task seam between the PC-BNN posterior engine and FM4PDE semantics."""
+
+    def observation_loss(self, unknown: torch.Tensor, solution: torch.Tensor, batch: PDEBatch, item: int) -> torch.Tensor:
+        raise NotImplementedError
+
+    def result(self, unknown: torch.Tensor, solution: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def physics_loss(
+        self,
+        unknown: torch.Tensor,
+        solution: torch.Tensor,
+        batch: PDEBatch,
+        item: int,
+        config: dict,
+    ) -> torch.Tensor:
+        return sparse_inverse_physics_loss(unknown, solution, batch, item, config)
+
+
+class _SparseForwardAdapter(_SparseTaskAdapter):
+    def observation_loss(self, unknown, solution, batch, item):
+        return sparse_forward_observation_loss(unknown, batch, item=item)
+
+    def result(self, unknown, solution):
+        return solution
+
+
+class _SparseInverseAdapter(_SparseTaskAdapter):
+    def observation_loss(self, unknown, solution, batch, item):
+        return sparse_inverse_observation_loss(solution, batch, item=item)
+
+    def result(self, unknown, solution):
+        return unknown
 
 
 class PCBNNBaseline(BaselineModel):
@@ -37,96 +74,37 @@ class PCBNNBaseline(BaselineModel):
     def build(self, config, data_spec):
         super().build(config, data_spec)
         self.particles = int(self.config.get("particles", 3))
+        if self.particles <= 0:
+            raise ValueError("PC-BNN requires at least one posterior particle")
         self.coord_dim = len(tuple(data_spec["target_shape"])[2:])
         self.target_channels = int(data_spec["target_channels"])
         self.hidden = int(self.config.get("hidden", 64))
-        self.depth = int(self.config.get("depth", 4))
-        self.official_net_cls = None
-        self.official_aligned = False
-        backend = str(self.config.get("official_backend", "auto")).lower()
-        implementation_mode = requested_implementation_mode(self.config)
-        fallback_reason = ""
-        matched_official_setting = _pc_bnn_official_setting(data_spec)
-        if implementation_mode == "official" and backend not in {"local", "none"}:
-            if not matched_official_setting:
-                raise OfficialImportError("strict official PC-BNN requires 2D three-channel shallow-water sparse reconstruction")
-            try:
-                self.official_net_cls = get_pc_bnn_net_class()
-            except Exception as exc:
-                raise wrap_official_adapter_error("PC-BNN Net", exc) from exc
-            self.set_backend(
-                "pc_bnn",
-                "pc_bnn",
-                fallback_used=False,
-                implementation_mode_effective="official",
-                implementation_source="pc_bnn_official_net_svgd_adapter",
-                official_import_success=True,
-                official_reimplementation_success=False,
-                official_alignment_level="exact_code",
-                official_alignment_notes="Uses the vendored official PC-BNN Net class with the local SVGD/physics adapter.",
-                adapter_status="official_code_adapter",
-                **official_source_info("pc_bnn"),
-            )
-        elif matched_official_setting and implementation_mode in {"official_aligned", "official_or_skip", "auto"} and backend in {"auto", "pc_bnn", "official"}:
-            try:
-                if implementation_mode in {"official_or_skip", "auto"}:
-                    try:
-                        self.official_net_cls = get_pc_bnn_net_class()
-                        self.set_backend(
-                            "pc_bnn",
-                            "pc_bnn",
-                            fallback_used=False,
-                            implementation_mode_effective="official",
-                            implementation_source="pc_bnn_official_net_svgd_adapter",
-                            official_import_success=True,
-                            official_reimplementation_success=False,
-                            official_alignment_level="exact_code",
-                            official_alignment_notes="Uses the vendored official PC-BNN Net class with the local SVGD/physics adapter.",
-                            adapter_status="official_code_adapter",
-                            **official_source_info("pc_bnn"),
-                        )
-                        return self
-                    except Exception as exc:
-                        fallback_reason = f"direct official PC-BNN Net unavailable; using official-aligned reimplementation: {wrap_official_adapter_error('PC-BNN Net', exc)}"
-                get_pc_bnn_official_aligned_status()
-            except Exception as exc:
-                raise wrap_official_adapter_error("PC-BNN official-aligned", exc) from exc
-            self.official_net_cls = OfficialAlignedPCBNNNet
-            self.official_aligned = True
-            self.set_backend(
-                "pc_bnn_official_aligned",
-                "pc_bnn",
-                fallback_used=False,
-                warning=fallback_reason,
-                implementation_mode_effective="official_aligned",
-                implementation_source="pc_bnn_official_aligned_reimplementation",
-                official_import_success=False,
-                official_reimplementation_success=True,
-                official_alignment_level="objective",
-                official_alignment_notes=(
-                    "Uses the official PC-BNN sparse/noisy flow setting: coordinate-to-(u,v,p)-style "
-                    "Swish MLP particles, SVGD posterior updates, observation likelihood, and physics-constrained residual loss."
-                ),
-                adapter_status="official_aligned_pcbnn_reimplementation",
-                **official_source_info("pc_bnn"),
-            )
-        elif implementation_mode != "adapted" and backend in {"auto", "pc_bnn", "official"}:
-            fallback_reason = "official-aligned PC-BNN supports only matched 2D three-channel shallow-water sparse reconstruction"
-        if self.official_net_cls is None:
-            requested_local = backend in {"local", "none"} or implementation_mode == "adapted"
-            self.set_backend(
-                "local",
-                "local" if requested_local else ("official" if backend == "official" else backend),
-                fallback_used=not requested_local,
-                warning=fallback_reason,
-                implementation_mode_effective="adapted",
-                implementation_source="local_svgd_particle_field",
-                official_import_success=False,
-                official_reimplementation_success=False,
-                official_alignment_level="local",
-                official_alignment_notes="Generic local SVGD neural field; supplement/debug only.",
-                adapter_status="local_generic_svgd_pcbnn" if requested_local else "fallback_generic_svgd_pcbnn",
-            )
+        # The official network has three Swish hidden layers.  Task adaptation
+        # changes only the output width needed for (a,u).
+        self.depth = 3
+        task = str(data_spec.get("task", ""))
+        adapter_status = (
+            "pc_bnn_adapted_static_pde"
+            if task in {"sparse_forward", "sparse_inverse"}
+            else "pc_bnn_adapted_reconstruction"
+        )
+        self.set_backend(
+            "pc_bnn_adapted",
+            "pc_bnn",
+            fallback_used=False,
+            implementation_mode_effective="adapted",
+            implementation_source="official_pcbnn_posterior_with_fm4pde_task_adapter",
+            official_import_success=False,
+            official_reimplementation_success=False,
+            official_alignment_level="algorithm",
+            official_alignment_notes=(
+                "Preserves the official three-layer Swish particle architecture, Student-t weight prior, "
+                "Gamma noise-precision prior, SVGD update, observation likelihood, and physics likelihood; "
+                "the output fields and PDE residual are adapted to FM4PDE static tasks."
+            ),
+            adapter_status=adapter_status,
+            **official_source_info("pc_bnn"),
+        )
         return self
 
     def parameter_count(self) -> int:
@@ -166,12 +144,17 @@ class PCBNNBaseline(BaselineModel):
                 thetas = []
                 for particle in particles:
                     pred = particle(coords).T.reshape_as(target)
-                    loss = lam_obs * observation_loss_from_batch(pred, batch, item=item)
+                    obs = observation_loss_from_batch(pred, batch, item=item)
                     meta = _single_meta(batch, item)
                     meta.update(_physics_weight_metadata(self.config))
                     physics_value = _select_physics_loss(physics_loss_metric(pred, batch.pde_name, meta), self.config, pred)
-                    if torch.isfinite(physics_value):
-                        loss = loss + physics_value
+                    loss = _negative_log_posterior(
+                        particle,
+                        lam_obs * obs,
+                        physics_value,
+                        _observation_count(batch, item),
+                        self.config,
+                    )
                     grad = torch.autograd.grad(loss, tuple(particle.parameters()), retain_graph=False, create_graph=False)
                     losses.append(loss.detach())
                     grads.append(torch.cat([g.detach().reshape(-1) for g in grad]))
@@ -191,10 +174,11 @@ class PCBNNBaseline(BaselineModel):
                     preds.append(particle(coords).T.reshape_as(target))
             stack = torch.stack(preds, dim=0)
             all_means.append(stack.mean(dim=0))
-            all_stds.append(stack.std(dim=0))
+            all_stds.append(stack.std(dim=0, unbiased=False))
         mean = torch.cat(all_means, dim=0)
         std = torch.cat(all_stds, dim=0)
         batch.metadata["predictive_std"] = std
+        batch.metadata["pc_bnn_posterior_objective"] = _POSTERIOR_OBJECTIVE
         batch.metadata["posterior_particles"] = int(self.particles)
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         record_optimization_status(batch, statuses)
@@ -206,8 +190,13 @@ class PCBNNBaseline(BaselineModel):
                 f"PC-BNN {batch.task} is only enabled for static PDEs, got {batch.pde_name}"
             )
         start = time.perf_counter()
+        adapter: _SparseTaskAdapter = (
+            _SparseInverseAdapter() if batch.task == "sparse_inverse" else _SparseForwardAdapter()
+        )
         means: list[torch.Tensor] = []
         stds: list[torch.Tensor] = []
+        posterior_samples: list[torch.Tensor] = []
+        noise_precisions: list[float] = []
         statuses: list[dict] = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
@@ -237,17 +226,17 @@ class PCBNNBaseline(BaselineModel):
                 losses: list[torch.Tensor] = []
                 for particle in particles:
                     joint = particle(coords).T.reshape(1, unknown_channels + solution_channels, *unknown_shape[2:])
-                    unknown = joint[:, :unknown_channels]
+                    unknown = _transform_unknown(joint[:, :unknown_channels], batch.pde_name, self.config)
                     solution = joint[:, unknown_channels:]
-                    obs = (
-                        sparse_inverse_observation_loss(solution, batch, item=item)
-                        if batch.task == "sparse_inverse"
-                        else sparse_forward_observation_loss(unknown, batch, item=item)
+                    obs = adapter.observation_loss(unknown, solution, batch, item)
+                    physics = adapter.physics_loss(unknown, solution, batch, item, self.config)
+                    loss = _negative_log_posterior(
+                        particle,
+                        lam_obs * obs,
+                        physics,
+                        _observation_count(batch, item),
+                        self.config,
                     )
-                    loss = lam_obs * obs
-                    physics = sparse_inverse_physics_loss(unknown, solution, batch, item, self.config)
-                    if torch.isfinite(physics):
-                        loss = loss + physics
                     losses.append(loss.detach())
                     grad = torch.autograd.grad(loss, tuple(particle.parameters()), retain_graph=False, create_graph=False)
                     grads.append(torch.cat([value.detach().reshape(-1) for value in grad]))
@@ -257,6 +246,7 @@ class PCBNNBaseline(BaselineModel):
                 with torch.no_grad():
                     for particle, update in zip(particles, updates):
                         _assign_flat_params(particle, _flatten_params(particle) - lr * update)
+                        particle.clamp_noise_precision()
                 if stopper.update(torch.stack(losses).mean()):
                     break
             statuses.append(stopper.status())
@@ -264,31 +254,44 @@ class PCBNNBaseline(BaselineModel):
             with torch.no_grad():
                 for particle in particles:
                     joint = particle(coords).T.reshape(1, unknown_channels + solution_channels, *unknown_shape[2:])
-                    predictions.append(
-                        joint[:, :unknown_channels]
-                        if batch.task == "sparse_inverse"
-                        else joint[:, unknown_channels:]
-                    )
+                    unknown = _transform_unknown(joint[:, :unknown_channels], batch.pde_name, self.config)
+                    solution = joint[:, unknown_channels:]
+                    predictions.append(adapter.result(unknown, solution))
             stack = torch.stack(predictions, dim=0)
             means.append(stack.mean(dim=0))
-            stds.append(stack.std(dim=0))
+            stds.append(stack.std(dim=0, unbiased=False))
+            posterior_samples.append(stack.squeeze(1))
+            noise_precisions.append(
+                float(torch.stack([particle.log_beta.exp() for particle in particles]).mean().detach().cpu())
+            )
         mean = torch.cat(means, dim=0)
         batch.metadata["predictive_std"] = torch.cat(stds, dim=0)
+        batch.metadata["posterior_samples"] = torch.stack(posterior_samples, dim=0)
+        batch.metadata["posterior_noise_precision"] = noise_precisions
         batch.metadata["posterior_particles"] = int(self.particles)
         batch.metadata["pc_bnn_joint_field_posterior"] = True
+        batch.metadata["pc_bnn_posterior_objective"] = _POSTERIOR_OBJECTIVE
+        batch.metadata["pc_bnn_task_adapter"] = type(adapter).__name__
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         record_optimization_status(batch, statuses)
         return mean
 
     def _new_particle(self, coord_dim: int, out_channels: int) -> nn.Module:
-        if self.official_net_cls is not None and coord_dim == 2 and out_channels == 3:
-            return self.official_net_cls(coord_dim, self.hidden)
-        return NeuralField(coord_dim, out_channels, hidden=self.hidden, depth=self.depth)
+        return PCBNNParticle(
+            coord_dim,
+            self.hidden,
+            out_channels,
+            initial_noise_precision=float(self.config.get("initial_noise_precision", 100.0)),
+        )
 
 
-class OfficialAlignedPCBNNNet(nn.Module):
-    def __init__(self, n_feature: int, n_hidden: int) -> None:
+class PCBNNParticle(nn.Module):
+    """Official PC-BNN Swish MLP with an adapted output width and noise posterior."""
+
+    def __init__(self, n_feature: int, n_hidden: int, out_channels: int, *, initial_noise_precision: float) -> None:
         super().__init__()
+        if initial_noise_precision <= 0:
+            raise ValueError("initial_noise_precision must be positive")
         self.features = nn.Sequential(
             nn.Linear(n_feature, n_hidden),
             _Swish(),
@@ -296,11 +299,15 @@ class OfficialAlignedPCBNNNet(nn.Module):
             _Swish(),
             nn.Linear(n_hidden, n_hidden),
             _Swish(),
-            nn.Linear(n_hidden, 3),
+            nn.Linear(n_hidden, out_channels),
         )
+        self.log_beta = nn.Parameter(torch.tensor(math.log(initial_noise_precision), dtype=torch.float32))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.features(x)
+
+    def clamp_noise_precision(self) -> None:
+        self.log_beta.clamp_(min=-12.0, max=20.0)
 
 
 class _Swish(nn.Module):
@@ -308,12 +315,57 @@ class _Swish(nn.Module):
         return x * torch.sigmoid(x)
 
 
-def _pc_bnn_official_setting(data_spec: dict) -> bool:
-    pde = str(data_spec.get("pde", "")).lower()
-    target_shape = tuple(data_spec.get("target_shape", ()))
-    target_channels = int(data_spec.get("target_channels", 0) or 0)
-    coord_dim = max(len(target_shape) - 2, 0)
-    return pde == "shallow_water" and coord_dim == 2 and target_channels == 3
+_POSTERIOR_OBJECTIVE = "gaussian_observation+student_t_weight_prior+gamma_noise_precision+pde_likelihood"
+
+
+def _negative_log_posterior(
+    particle: PCBNNParticle,
+    observation_mse: torch.Tensor,
+    physics_loss: torch.Tensor,
+    observation_count: int,
+    config: dict,
+) -> torch.Tensor:
+    """Negative log posterior following the official PC-BNN hierarchy.
+
+    The observation term uses the learned Gaussian precision.  The weight
+    prior is the Student-t marginal induced by the official Gamma hierarchy,
+    and ``log_beta`` retains the official Gamma prior.  PDE-specific residuals
+    are supplied by the task Adapter rather than embedded in the engine.
+    """
+    count = max(int(observation_count), 1)
+    log_beta = particle.log_beta
+    beta = log_beta.exp()
+    observation_nll = 0.5 * beta * float(count) * observation_mse - 0.5 * float(count) * log_beta
+
+    weight_shape = float(config.get("weight_prior_shape", 1.0))
+    weight_rate = max(float(config.get("weight_prior_rate", 0.05)), 1e-12)
+    weight_prior = torch.zeros((), device=log_beta.device, dtype=log_beta.dtype)
+    for parameter in particle.features.parameters():
+        weight_prior = weight_prior + torch.log1p(0.5 / weight_rate * parameter.pow(2)).sum()
+    weight_prior = (weight_shape + 0.5) * weight_prior
+
+    beta_shape = float(config.get("beta_prior_shape", 2.0))
+    beta_rate = float(config.get("beta_prior_rate", 1e-6))
+    beta_prior = beta_rate * beta - (beta_shape - 1.0) * log_beta
+    prior_weight = float(config.get("prior_weight", 1e-4))
+    physics = physics_loss if torch.isfinite(physics_loss) else torch.zeros_like(observation_nll)
+    return observation_nll + physics + prior_weight * (weight_prior + beta_prior)
+
+
+def _observation_count(batch: PDEBatch, item: int) -> int:
+    if batch.obs_values is not None:
+        return int(batch.obs_values[item].numel())
+    if batch.mask is not None:
+        mask = batch.mask[item] if batch.mask.ndim == batch.input_fields.ndim else batch.mask
+        return int(mask.sum().item())
+    return int(batch.input_fields[item].numel())
+
+
+def _transform_unknown(unknown: torch.Tensor, pde_name: str, config: dict) -> torch.Tensor:
+    if str(pde_name).lower() == "darcy":
+        floor = float(config.get("coefficient_floor", 1e-6))
+        return F.softplus(unknown) + floor
+    return unknown
 
 
 def _flatten_params(model: torch.nn.Module) -> torch.Tensor:

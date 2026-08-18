@@ -138,6 +138,23 @@ model = load_baseline_checkpoint("outputs/.../run_id.pt", map_location="cpu")
 model.eval()
 ```
 
+Every evaluation also stores one safe, reloadable tensor dictionary per test
+sample under `<output_dir>/samples/`, together with `manifest.jsonl` checksums
+and a multipage `samples.pdf`. The artifacts contain input, target, prediction,
+observations, masks, per-sample metrics, and (when available) predictive
+standard deviations and PC-BNN posterior particles. Reload or redraw them with:
+
+```python
+from baselines.common.sample_artifacts import load_evaluation_sample
+
+sample = load_evaluation_sample("outputs/.../samples/sample_000000.pt")
+```
+
+```bash
+python scripts/plot_sample_artifacts.py outputs/.../samples/manifest.jsonl \
+  --output outputs/.../samples_reloaded.pdf
+```
+
 Retry failed runs:
 
 ```bash

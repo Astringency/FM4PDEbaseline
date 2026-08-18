@@ -112,13 +112,19 @@ method_by_baseline:
     optimizer: adam
   pc_bnn:
     normalize: false
-    implementation_mode: official_aligned
-    official_backend: pc_bnn
+    implementation_mode: adapted
+    official_backend: local
     hidden: 128
-    depth: 5
+    depth: 3
     particles: 8
     steps: 500
     lr: 0.001
+    beta_prior_shape: 2.0
+    beta_prior_rate: 1.0e-6
+    weight_prior_shape: 1.0
+    weight_prior_rate: 0.05
+    prior_weight: 1.0e-4
+    initial_noise_precision: 100.0
   pde_opt:
     normalize: false
     steps: 500

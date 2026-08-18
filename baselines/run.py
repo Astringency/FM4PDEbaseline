@@ -29,6 +29,7 @@ from baselines.common.metrics import (
     obs_mse,
     physics_loss_metric,
 )
+from baselines.common.sample_artifacts import EvaluationArtifactWriter
 from baselines.methods.deeponet import DeepONetBaseline
 from baselines.methods.fno import FNOBaseline
 from baselines.methods.ifno import IFNOBaseline
@@ -195,6 +196,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--eval-only", action="store_true", help="Skip training; load checkpoint and run test evaluation only.")
     parser.add_argument("--checkpoint", default="", help="Path to checkpoint .pt file for --eval-only mode.")
     parser.add_argument("--checkpoint-sha256", default="", help="Expected SHA-256 of --checkpoint for a strict eval-only run.")
+    parser.add_argument(
+        "--save-sample-artifacts",
+        dest="save_sample_artifacts",
+        action="store_true",
+        default=True,
+        help="Save one reloadable .pt artifact for every evaluated test sample (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-save-sample-artifacts",
+        dest="save_sample_artifacts",
+        action="store_false",
+        help="Disable per-sample artifacts in non-paper diagnostic runs.",
+    )
+    parser.add_argument(
+        "--plot-sample-pdf",
+        dest="plot_sample_pdf",
+        action="store_true",
+        default=True,
+        help="Render evaluated samples into a multipage PDF (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-plot-sample-pdf",
+        dest="plot_sample_pdf",
+        action="store_false",
+        help="Disable PDF rendering in non-paper diagnostic runs.",
+    )
     return parser.parse_args(argv)
 
 
@@ -739,6 +766,10 @@ def _validate_mode(args: argparse.Namespace) -> None:
         raise ValueError("--dry-run is restricted to smoke/debug modes")
     if args.synthetic_data and args.experiment_mode == "paper":
         raise ValueError("--synthetic-data is restricted to smoke/debug modes")
+    if args.experiment_mode == "paper" and not bool(args.save_sample_artifacts):
+        raise ValueError("paper mode requires --save-sample-artifacts")
+    if args.experiment_mode == "paper" and not bool(args.plot_sample_pdf):
+        raise ValueError("paper mode requires --plot-sample-pdf")
 
 
 def _resolve_physics_metric_mode(args: argparse.Namespace, cfg: dict[str, Any]) -> str:
@@ -1246,7 +1277,7 @@ def _evaluate_full_test_loader(
     normalization_fields: dict[str, Any],
     memory_fields: dict[str, float],
     config_hash: str,
-) -> tuple[list[dict[str, Any]], dict[str, float]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     model.eval()
     sensor_seed = int(getattr(args, "sensor_seed", args.seed))
     source_train_seed = int(getattr(args, "source_train_seed", args.seed))
@@ -1259,6 +1290,23 @@ def _evaluate_full_test_loader(
     reported_train_size = 0 if per_instance else int(split_info["effective_train_size"])
     checkpoint_sha256 = _file_sha256(Path(checkpoint_path)) if checkpoint_path else ""
     checkpoint_provenance = dict(getattr(model, "provenance", {}) or {})
+    artifact_writer: EvaluationArtifactWriter | None = None
+    if bool(getattr(args, "save_sample_artifacts", True)):
+        artifact_name = f"{_run_file_prefix(args)}_samples" if str(getattr(args, "run_id", "")) else "samples"
+        artifact_writer = EvaluationArtifactWriter(
+            out_dir / artifact_name,
+            run_metadata={
+                "run_id": str(getattr(args, "run_id", "")),
+                "run_fingerprint": str(getattr(args, "run_fingerprint", "")),
+                "baseline": str(args.baseline),
+                "pde": str(args.pde),
+                "task": str(args.task),
+                "seed": int(args.seed),
+                "sensor_seed": sensor_seed,
+            },
+            pdf_path=(out_dir / f"{artifact_name}.pdf") if bool(getattr(args, "plot_sample_pdf", True)) else None,
+        )
+        artifact_writer.__enter__()
     provenance_fields = {
         "matrix_schema_version": int(getattr(args, "matrix_schema_version", MATRIX_SCHEMA_VERSION)),
         "summary_schema_version": int(getattr(args, "summary_schema_version", 2)),
@@ -1437,13 +1485,59 @@ def _evaluate_full_test_loader(
                 row[values_key] = json.dumps(metric_payload[values_key])
         if tuple(pred_cpu.shape) != tuple(target.shape):
             raise RuntimeError(f"Prediction shape {tuple(pred_cpu.shape)} != target shape {tuple(target.shape)}")
+        if artifact_writer is not None:
+            sample_metrics: list[dict[str, Any]] = []
+            for item in range(batch_n):
+                values = {
+                    "relative_l2_solution": rel_values[item],
+                    "relative_l2_input_or_coeff": input_or_coeff_values[item],
+                    "mse": mse_values[item],
+                    "mae": mae_values[item],
+                }
+                for key in (
+                    "obs_mse",
+                    "obs_mse_clean",
+                    "obs_mse_noisy",
+                    "pde_residual",
+                    "bc_residual",
+                    "ic_residual",
+                    "physics_loss",
+                ):
+                    per_sample_values = metric_payload.get(f"{key}_values")
+                    values[key] = (
+                        per_sample_values[item]
+                        if isinstance(per_sample_values, list) and item < len(per_sample_values)
+                        else metric_payload.get(key, float("nan"))
+                    )
+                sample_metrics.append(values)
+            artifact_writer.write_batch(
+                batch,
+                pred_cpu,
+                predictive_std=(
+                    eval_batch.metadata.get("predictive_std")
+                    if isinstance(eval_batch.metadata.get("predictive_std"), torch.Tensor)
+                    else None
+                ),
+                posterior_samples=(
+                    eval_batch.metadata.get("posterior_samples")
+                    if isinstance(eval_batch.metadata.get("posterior_samples"), torch.Tensor)
+                    else None
+                ),
+                metrics=sample_metrics,
+                batch_index=batch_index,
+            )
         rows.append(row)
         append_result_jsonl(raw_path, _json_safe(row))
         inference_time_total += elapsed
         inference_optimization_time_total += inf_opt
+    artifact_fields: dict[str, Any] = {}
+    if artifact_writer is not None:
+        artifact_writer.__exit__(None, None, None)
+        artifact_fields = artifact_writer.summary
     return rows, {
         "inference_time_total": inference_time_total,
         "inference_optimization_time_total": inference_optimization_time_total,
+        **artifact_fields,
     }
 
 
@@ -1526,7 +1620,7 @@ def _mode_label(counts: Counter[str]) -> str:
 
 def _summarize_run(
     rows: list[dict[str, Any]],
-    eval_totals: dict[str, float],
+    eval_totals: dict[str, Any],
     args: argparse.Namespace,
     train_dataset: PDEBatchDataset,
     spec_dataset: PDEBatchDataset,
@@ -1660,6 +1754,11 @@ def _summarize_run(
         "fit_setup_time": float(split_info.get("fit_setup_time", 0.0) or 0.0),
         "test_time_optimization": per_instance,
         "amortized_training": not per_instance,
+        "sample_artifact_count": int(eval_totals.get("sample_artifact_count", 0) or 0),
+        "sample_artifact_schema_version": str(eval_totals.get("sample_artifact_schema_version", "")),
+        "sample_artifact_dir": str(eval_totals.get("sample_artifact_dir", "")),
+        "sample_manifest_path": str(eval_totals.get("sample_manifest_path", "")),
+        "sample_pdf_path": str(eval_totals.get("sample_pdf_path", "")),
         "config_hash": config_hash,
         **_train_history_fields(rows[0].get("train_history", "{}") if rows else {}),
         **normalization_fields,
@@ -1781,6 +1880,9 @@ def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
         "optimization_early_stopped",
         "optimization_status_per_sample",
         "pc_bnn_joint_field_posterior",
+        "pc_bnn_posterior_objective",
+        "pc_bnn_task_adapter",
+        "posterior_noise_precision",
     ):
         if key in src.metadata:
             dst.metadata[key] = src.metadata[key]

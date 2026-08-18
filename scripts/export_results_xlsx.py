@@ -121,6 +121,11 @@ DESIGN_COLUMNS = [
     "steps",
     "refine_steps",
     "particles",
+    "sample_artifact_count",
+    "sample_artifact_schema_version",
+    "sample_artifact_dir",
+    "sample_manifest_path",
+    "sample_pdf_path",
 ]
 
 METRIC_COLUMNS = [

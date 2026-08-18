@@ -67,15 +67,15 @@ def test_corrected_plan_expands_the_single_run_cohort(tmp_path: Path):
         "experiment_plan_v2_corrected",
     )
 
-    assert len(rows) == summary["run_count"] == 70
-    assert len(skipped) == summary["skipped_combo_count"] == 12
-    assert summary["skipped_expanded_count"] == 12
+    assert len(rows) == summary["run_count"] == 76
+    assert len(skipped) == summary["skipped_combo_count"] == 6
+    assert summary["skipped_expanded_count"] == 6
     assert summary["by_task_group"] == {
         "full_forward_main": 12,
         "full_inverse_main": 4,
         "sparse_forward_main_amortized": 12,
-        "sparse_forward_main_physics": 6,
-        "sparse_inverse_main": 18,
+        "sparse_forward_main_physics": 9,
+        "sparse_inverse_main": 21,
         "sparse_solution_burger_time_slices": 3,
         "sparse_solution_main_amortized": 15,
     }
