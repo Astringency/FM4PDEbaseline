@@ -28,8 +28,8 @@ class PCBNNPosteriorResult:
     mean: torch.Tensor
     std: torch.Tensor
     samples: torch.Tensor
-    noise_precision: list[float]
-    statuses: list[dict]
+    noise_precision: float
+    status: dict
 
 
 class _SparseTaskAdapter:
@@ -120,6 +120,8 @@ class PCBNNBaseline(BaselineModel):
         start = time.perf_counter()
         all_means = []
         all_stds = []
+        all_samples = []
+        noise_precisions = []
         statuses = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
@@ -165,19 +167,24 @@ class PCBNNBaseline(BaselineModel):
                 with torch.no_grad():
                     for particle, update in zip(particles, updates):
                         _assign_flat_params(particle, _flatten_params(particle) - lr * update)
+                        particle.clamp_noise_precision()
                 if stopper.update(torch.stack(losses).mean()):
                     break
-            statuses.append(stopper.status())
             preds = []
             with torch.no_grad():
                 for particle in particles:
                     preds.append(particle(coords).T.reshape_as(target))
-            stack = torch.stack(preds, dim=0)
-            all_means.append(stack.mean(dim=0))
-            all_stds.append(stack.std(dim=0, unbiased=False))
+            result = _posterior_result(preds, particles, stopper.status())
+            statuses.append(result.status)
+            all_means.append(result.mean)
+            all_stds.append(result.std)
+            all_samples.append(result.samples)
+            noise_precisions.append(result.noise_precision)
         mean = torch.cat(all_means, dim=0)
         std = torch.cat(all_stds, dim=0)
         batch.metadata["predictive_std"] = std
+        batch.metadata["posterior_samples"] = torch.stack(all_samples, dim=0)
+        batch.metadata["posterior_noise_precision"] = noise_precisions
         batch.metadata["pc_bnn_posterior_objective"] = _POSTERIOR_OBJECTIVE
         batch.metadata["posterior_particles"] = int(self.particles)
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
@@ -249,7 +256,6 @@ class PCBNNBaseline(BaselineModel):
                         particle.clamp_noise_precision()
                 if stopper.update(torch.stack(losses).mean()):
                     break
-            statuses.append(stopper.status())
             predictions: list[torch.Tensor] = []
             with torch.no_grad():
                 for particle in particles:
@@ -257,13 +263,12 @@ class PCBNNBaseline(BaselineModel):
                     unknown = _transform_unknown(joint[:, :unknown_channels], batch.pde_name, self.config)
                     solution = joint[:, unknown_channels:]
                     predictions.append(adapter.result(unknown, solution))
-            stack = torch.stack(predictions, dim=0)
-            means.append(stack.mean(dim=0))
-            stds.append(stack.std(dim=0, unbiased=False))
-            posterior_samples.append(stack.squeeze(1))
-            noise_precisions.append(
-                float(torch.stack([particle.log_beta.exp() for particle in particles]).mean().detach().cpu())
-            )
+            result = _posterior_result(predictions, particles, stopper.status())
+            statuses.append(result.status)
+            means.append(result.mean)
+            stds.append(result.std)
+            posterior_samples.append(result.samples)
+            noise_precisions.append(result.noise_precision)
         mean = torch.cat(means, dim=0)
         batch.metadata["predictive_std"] = torch.cat(stds, dim=0)
         batch.metadata["posterior_samples"] = torch.stack(posterior_samples, dim=0)
@@ -347,9 +352,8 @@ def _negative_log_posterior(
     beta_shape = float(config.get("beta_prior_shape", 2.0))
     beta_rate = float(config.get("beta_prior_rate", 1e-6))
     beta_prior = beta_rate * beta - (beta_shape - 1.0) * log_beta
-    prior_weight = float(config.get("prior_weight", 1e-4))
     physics = physics_loss if torch.isfinite(physics_loss) else torch.zeros_like(observation_nll)
-    return observation_nll + physics + prior_weight * (weight_prior + beta_prior)
+    return observation_nll + physics + weight_prior + beta_prior
 
 
 def _observation_count(batch: PDEBatch, item: int) -> int:
@@ -366,6 +370,24 @@ def _transform_unknown(unknown: torch.Tensor, pde_name: str, config: dict) -> to
         floor = float(config.get("coefficient_floor", 1e-6))
         return F.softplus(unknown) + floor
     return unknown
+
+
+def _posterior_result(
+    predictions: list[torch.Tensor],
+    particles: list[PCBNNParticle],
+    status: dict,
+) -> PCBNNPosteriorResult:
+    stack = torch.stack(predictions, dim=0)
+    precision = float(
+        torch.stack([particle.log_beta.exp() for particle in particles]).mean().detach().cpu()
+    )
+    return PCBNNPosteriorResult(
+        mean=stack.mean(dim=0),
+        std=stack.std(dim=0, unbiased=False),
+        samples=stack.squeeze(1),
+        noise_precision=precision,
+        status=status,
+    )
 
 
 def _flatten_params(model: torch.nn.Module) -> torch.Tensor:
@@ -385,7 +407,8 @@ def _svgd_descent_direction(theta: torch.Tensor, grad_loss: torch.Tensor) -> tor
     if particles == 1:
         return grad_loss
     sqdist = torch.cdist(theta, theta, p=2).pow(2)
-    median = torch.median(sqdist.detach())
+    pairwise = sqdist.detach()[torch.triu_indices(particles, particles, offset=1, device=theta.device).unbind()]
+    median = torch.median(pairwise)
     bandwidth = median / torch.log(torch.tensor(float(particles + 1), device=theta.device, dtype=theta.dtype))
     bandwidth = bandwidth.clamp_min(1e-6)
     kernel = torch.exp(-sqdist / bandwidth)
@@ -394,4 +417,7 @@ def _svgd_descent_direction(theta: torch.Tensor, grad_loss: torch.Tensor) -> tor
     for i in range(particles):
         diff = theta - theta[i]
         repulsive[i] = (2.0 / bandwidth) * (kernel[:, i].unsqueeze(1) * diff).mean(dim=0)
-    return attractive - repulsive
+    # ``repulsive`` points from particle i toward the other particles.  It is
+    # added to the descent direction because the caller subtracts the returned
+    # update; this moves particle i away from its neighbours.
+    return attractive + repulsive

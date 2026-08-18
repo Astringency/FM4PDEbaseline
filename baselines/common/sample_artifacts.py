@@ -34,28 +34,24 @@ class EvaluationArtifactWriter:
         self.manifest_path = self.artifact_dir / "manifest.jsonl"
         self.pdf_path = Path(pdf_path) if pdf_path is not None else None
         self.run_metadata = _safe_mapping(run_metadata)
-        self._manifest_handle = None
-        self._pdf: PdfPages | None = None
         self._sample_count = 0
+        self._finalized = False
+        self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.manifest_path.write_text("", encoding="utf-8")
 
     def __enter__(self) -> "EvaluationArtifactWriter":
-        self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        self._manifest_handle = self.manifest_path.open("w", encoding="utf-8")
-        if self.pdf_path is not None:
-            self.pdf_path.parent.mkdir(parents=True, exist_ok=True)
-            self._pdf = PdfPages(self.pdf_path)
-            info = self._pdf.infodict()
-            info["Title"] = "FM4PDE evaluation samples"
-            info["Subject"] = json.dumps(self.run_metadata, sort_keys=True)
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
-        if self._pdf is not None:
-            self._pdf.close()
-            self._pdf = None
-        if self._manifest_handle is not None:
-            self._manifest_handle.close()
-            self._manifest_handle = None
+        if exc_type is None:
+            self.finalize()
+
+    def finalize(self) -> None:
+        if self._finalized:
+            return
+        if self.pdf_path is not None:
+            render_sample_manifest_pdf(self.manifest_path, self.pdf_path)
+        self._finalized = True
 
     @property
     def summary(self) -> dict[str, Any]:
@@ -77,8 +73,8 @@ class EvaluationArtifactWriter:
         metrics: Sequence[Mapping[str, Any]] | None = None,
         batch_index: int,
     ) -> list[dict[str, Any]]:
-        if self._manifest_handle is None:
-            raise RuntimeError("EvaluationArtifactWriter must be used as a context manager")
+        if self._finalized:
+            raise RuntimeError("cannot write samples after EvaluationArtifactWriter.finalize()")
         batch_size = int(prediction.shape[0])
         if int(batch.target_fields.shape[0]) != batch_size:
             raise ValueError("prediction batch size must equal target batch size")
@@ -115,19 +111,21 @@ class EvaluationArtifactWriter:
                 "artifact_path": str(artifact_path.resolve()),
                 "artifact_sha256": _sha256(artifact_path),
             }
-            self._manifest_handle.write(json.dumps(record, sort_keys=True) + "\n")
-            self._manifest_handle.flush()
-            if self._pdf is not None:
-                figure = _sample_figure(payload)
-                self._pdf.savefig(figure, bbox_inches="tight")
-                figure.clear()
+            with self.manifest_path.open("a", encoding="utf-8") as manifest_handle:
+                manifest_handle.write(json.dumps(record, sort_keys=True) + "\n")
             records.append(record)
             self._sample_count += 1
         return records
 
 
-def load_evaluation_sample(path: str | Path) -> dict[str, Any]:
-    payload = torch.load(Path(path), map_location="cpu", weights_only=True)
+def load_evaluation_sample(path: str | Path, *, expected_sha256: str | None = None) -> dict[str, Any]:
+    artifact_path = Path(path)
+    expected = expected_sha256 or _manifest_checksum(artifact_path)
+    if not expected:
+        raise ValueError(f"No manifest checksum is available for evaluation sample: {artifact_path}")
+    if _sha256(artifact_path) != expected:
+        raise ValueError(f"Evaluation sample checksum mismatch: {artifact_path}")
+    payload = torch.load(artifact_path, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict) or payload.get("schema_version") != SAMPLE_ARTIFACT_SCHEMA_VERSION:
         raise ValueError(f"Unsupported evaluation sample artifact: {path}")
     return payload
@@ -145,7 +143,9 @@ def render_sample_manifest_pdf(manifest_path: str | Path, output_path: str | Pat
             artifact_path = Path(row["artifact_path"])
             if _sha256(artifact_path) != str(row.get("artifact_sha256", "")):
                 raise ValueError(f"Evaluation sample checksum mismatch: {artifact_path}")
-            figure = _sample_figure(load_evaluation_sample(artifact_path))
+            figure = _sample_figure(
+                load_evaluation_sample(artifact_path, expected_sha256=str(row.get("artifact_sha256", "")))
+            )
             pdf.savefig(figure, bbox_inches="tight")
             figure.clear()
     return output
@@ -317,3 +317,17 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _manifest_checksum(artifact_path: Path) -> str:
+    manifest = artifact_path.parent / "manifest.jsonl"
+    if not manifest.exists():
+        return ""
+    resolved = artifact_path.resolve()
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if Path(row.get("artifact_path", "")).resolve() == resolved:
+            return str(row.get("artifact_sha256", ""))
+    return ""

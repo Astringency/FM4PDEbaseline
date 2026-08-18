@@ -5,6 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from baselines.common.sample_artifacts import load_evaluation_sample
+
 
 def test_per_sample_physics_metric_values_and_summary_counts(tmp_path: Path):
     out = tmp_path / "metrics"
@@ -46,3 +50,29 @@ def test_per_sample_physics_metric_values_and_summary_counts(tmp_path: Path):
     assert summary["relative_l2_solution_n"] == 4
     assert summary["pde_residual_n"] == 4
     assert sum(json.loads(summary["residual_mode_counts"]).values()) == 4
+
+
+def test_per_batch_summary_still_persists_true_per_sample_physics_metrics(tmp_path: Path):
+    root = Path(__file__).resolve().parents[1]
+
+    def run(mode: str) -> Path:
+        out = tmp_path / mode
+        cmd = [
+            sys.executable, "-m", "baselines.run",
+            "--baseline", "fno", "--pde", "darcy", "--task", "forward",
+            "--experiment-mode", "debug", "--dry-run", "--synthetic-data",
+            "--physics-metric-mode", mode, "--synthetic-resolution", "8",
+            "--test-size", "2", "--train-size", "4", "--val-size", "0",
+            "--batch-size", "2", "--output-dir", str(out),
+        ]
+        subprocess.run(cmd, check=True, cwd=root)
+        return out
+
+    per_batch = run("per_batch")
+    per_sample = run("per_sample")
+
+    def artifact_physics(out: Path) -> list[float]:
+        rows = [json.loads(line) for line in (out / "samples" / "manifest.jsonl").read_text().splitlines()]
+        return [load_evaluation_sample(row["artifact_path"])["metrics"]["physics_loss"] for row in rows]
+
+    assert artifact_physics(per_batch) == pytest.approx(artifact_physics(per_sample))

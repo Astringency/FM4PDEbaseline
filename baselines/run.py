@@ -1306,7 +1306,6 @@ def _evaluate_full_test_loader(
             },
             pdf_path=(out_dir / f"{artifact_name}.pdf") if bool(getattr(args, "plot_sample_pdf", True)) else None,
         )
-        artifact_writer.__enter__()
     provenance_fields = {
         "matrix_schema_version": int(getattr(args, "matrix_schema_version", MATRIX_SCHEMA_VERSION)),
         "summary_schema_version": int(getattr(args, "summary_schema_version", 2)),
@@ -1363,6 +1362,11 @@ def _evaluate_full_test_loader(
         mse_values = _mse_values(pred_cpu, target)
         mae_values = _mae_values(pred_cpu, target)
         metric_payload = _batch_metric_payload(pred_cpu, target, batch, args)
+        artifact_metric_payload = (
+            _batch_metric_payload(pred_cpu, target, batch, args, force_per_sample=True)
+            if artifact_writer is not None and args.physics_metric_mode == "per_batch"
+            else metric_payload
+        )
         row = {
             "run_id": args.run_id,
             "run_name": args.run_name,
@@ -1503,11 +1507,11 @@ def _evaluate_full_test_loader(
                     "ic_residual",
                     "physics_loss",
                 ):
-                    per_sample_values = metric_payload.get(f"{key}_values")
+                    per_sample_values = artifact_metric_payload.get(f"{key}_values")
                     values[key] = (
                         per_sample_values[item]
                         if isinstance(per_sample_values, list) and item < len(per_sample_values)
-                        else metric_payload.get(key, float("nan"))
+                        else artifact_metric_payload.get(key, float("nan"))
                     )
                 sample_metrics.append(values)
             artifact_writer.write_batch(
@@ -1532,7 +1536,7 @@ def _evaluate_full_test_loader(
         inference_optimization_time_total += inf_opt
     artifact_fields: dict[str, Any] = {}
     if artifact_writer is not None:
-        artifact_writer.__exit__(None, None, None)
+        artifact_writer.finalize()
         artifact_fields = artifact_writer.summary
     return rows, {
         "inference_time_total": inference_time_total,
@@ -1541,8 +1545,15 @@ def _evaluate_full_test_loader(
     }
 
 
-def _batch_metric_payload(pred: torch.Tensor, target: torch.Tensor, batch: PDEBatch, args: argparse.Namespace) -> dict[str, Any]:
-    if args.physics_metric_mode == "per_batch":
+def _batch_metric_payload(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    batch: PDEBatch,
+    args: argparse.Namespace,
+    *,
+    force_per_sample: bool = False,
+) -> dict[str, Any]:
+    if args.physics_metric_mode == "per_batch" and not force_per_sample:
         physics_pred, physics_input = _joint_physics_views(pred, target, batch.metadata, batch.input_fields)
         metric_meta = {
             "input_fields": physics_input,

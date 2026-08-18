@@ -68,3 +68,34 @@ def test_pcbnn_adapted_static_tasks_return_calibratable_particle_artifacts(task)
     assert backend["adapter_status"] == "pc_bnn_adapted_static_pde"
     assert cap.unified_comparison_eligible is True
     assert paper_table_eligible(cap, backend_info=backend) is False
+
+
+def test_pcbnn_svgd_repulsion_increases_posterior_sample_diversity_without_field_gradients():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("poisson", n=1, resolution=4)
+    batch0 = registry.make_task(raw, "poisson", "sparse_forward", num_sensors=2, sensor_mode="fixed")
+    batch1 = registry.make_task(raw, "poisson", "sparse_forward", num_sensors=2, sensor_mode="fixed")
+    common = {
+        "implementation_mode": "adapted",
+        "official_backend": "local",
+        "particles": 2,
+        "hidden": 4,
+        "lr": 1e-3,
+        "lambda_obs": 0.0,
+        "lambda_int": 0.0,
+        "lambda_bc": 0.0,
+        "lambda_ic": 0.0,
+        "weight_prior_shape": -0.5,
+        "beta_prior_shape": 1.0,
+        "beta_prior_rate": 0.0,
+    }
+    torch.manual_seed(123)
+    PCBNNBaseline().build({**common, "steps": 0}, build_data_spec(batch0)).predict(batch0)
+    torch.manual_seed(123)
+    PCBNNBaseline().build({**common, "steps": 1}, build_data_spec(batch1)).predict(batch1)
+
+    before = batch0.metadata["posterior_samples"][0]
+    after = batch1.metadata["posterior_samples"][0]
+    before_distance = torch.linalg.vector_norm(before[0] - before[1])
+    after_distance = torch.linalg.vector_norm(after[0] - after[1])
+    assert after_distance > before_distance

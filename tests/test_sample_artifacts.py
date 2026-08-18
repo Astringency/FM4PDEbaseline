@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import torch
+import pytest
 
 from baselines.common.data_adapter import build_default_registry
 from baselines.common.sample_artifacts import (
@@ -60,3 +61,8 @@ def test_evaluation_artifacts_round_trip_every_sample_and_render_pdf(tmp_path: P
 
     regenerated = render_sample_manifest_pdf(writer.manifest_path, tmp_path / "regenerated.pdf")
     assert regenerated.read_bytes().startswith(b"%PDF")
+
+    artifact_path = Path(manifest[0]["artifact_path"])
+    artifact_path.write_bytes(artifact_path.read_bytes() + b"tampered")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        load_evaluation_sample(artifact_path)
