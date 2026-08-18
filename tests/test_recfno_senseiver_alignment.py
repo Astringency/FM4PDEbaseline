@@ -49,10 +49,10 @@ def test_recfno_official_component_receives_voronoi_mask_and_coordinates(monkeyp
 
     actual = model.net.last_input
     assert actual is not None
-    assert model.net.in_channels == 4
-    assert torch.equal(actual[:, :1], batch.metadata["voronoi_grid"])
-    assert torch.equal(actual[:, 1:2], batch.mask.unsqueeze(0).expand(batch.input_fields.shape[0], -1, -1, -1))
-    assert torch.equal(actual[:, 2:], grid_channels(batch.input_fields))
+    assert model.net.in_channels == 6
+    assert torch.equal(actual[:, :2], batch.metadata["voronoi_grid"])
+    assert torch.equal(actual[:, 2:4], batch.mask.unsqueeze(0).expand(batch.input_fields.shape[0], -1, -1, -1))
+    assert torch.equal(actual[:, 4:], grid_channels(batch.input_fields))
 
     backend = model.backend_metadata()
     assert backend["official_import_success"] is True
@@ -126,7 +126,9 @@ def test_senseiver_official_components_receive_official_fourier_features(monkeyp
     batch = _poisson_sparse_batch()
     sensor_indices = torch.tensor([0, 5, 15])
     batch.obs_coords = batch.coords[:, sensor_indices]
-    batch.obs_values = torch.tensor([[[10.0], [20.0], [30.0]], [[40.0], [50.0], [60.0]]])
+    batch.obs_values = torch.tensor(
+        [[[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]], [[40.0, 41.0], [50.0, 51.0], [60.0, 61.0]]]
+    )
     monkeypatch.setattr(
         senseiver_module,
         "get_senseiver_classes",
@@ -154,10 +156,10 @@ def test_senseiver_official_components_receive_official_fourier_features(monkeyp
 
     expected_grid = _official_senseiver_positional_grid((4, 4), bands=2)
     expected_sensor_features = expected_grid[sensor_indices].unsqueeze(0).expand(2, -1, -1)
-    assert model.official_encoder.init_kwargs["input_ch"] == 9
+    assert model.official_encoder.init_kwargs["input_ch"] == 10
     assert model.official_decoder.init_kwargs["ff_channels"] == 8
-    assert torch.equal(model.official_encoder.last_input[..., :1], batch.obs_values)
-    assert torch.allclose(model.official_encoder.last_input[..., 1:], expected_sensor_features)
+    assert torch.equal(model.official_encoder.last_input[..., :2], batch.obs_values)
+    assert torch.allclose(model.official_encoder.last_input[..., 2:], expected_sensor_features)
     assert torch.allclose(model.official_decoder.last_coords, expected_grid.unsqueeze(0).expand(2, -1, -1))
 
     backend = model.backend_metadata()

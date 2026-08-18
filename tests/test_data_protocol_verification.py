@@ -66,6 +66,27 @@ def test_bounded_audit_mirrors_train_tail_validation_and_is_disjoint(tiny_data_r
     assert all(sample["content_sha256"] for sample in samples)
 
 
+def test_independent_validation_still_counts_inside_the_configured_training_budget(tiny_data_root, tmp_path: Path):
+    train_path = tiny_data_root / "poisson/poisson_10000-128-128_1.mat"
+    train = scipy.io.loadmat(train_path)
+    scipy.io.savemat(
+        tiny_data_root / "poisson/poisson_val_10000-128-128.mat",
+        {"f_data": train["f_data"][-1:], "phi_data": train["phi_data"][-1:]},
+    )
+    config = _config()
+    report, _ = run_audit(
+        config,
+        config_path=_config_file(tmp_path, config),
+        data_root=tiny_data_root,
+        output_dir=tmp_path / "out",
+        options=ScanOptions(sample_limit=3, chunk_size=1, content_hashes=False),
+    )
+
+    selection = report["results"][0]["split_selection"]
+    assert selection["val_source"] == "independent_val"
+    assert selection["effective_train_count"] == 2
+
+
 def test_content_hash_detects_same_sample_under_different_global_ids(tiny_data_root, tmp_path: Path):
     train_path = tiny_data_root / "poisson/poisson_10000-128-128_1.mat"
     test_path = tiny_data_root / "poisson/poisson_test_10000-128-128.mat"

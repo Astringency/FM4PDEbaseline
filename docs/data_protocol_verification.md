@@ -15,6 +15,13 @@ total budget over the full `T x X` trajectory. Burger `sparse_forward` is
 excluded because its 1-D `u0(x)` source cannot share the 500-point 2-D sparse
 source protocol without duplicating observations across time.
 
+Protocol v3 additionally makes the document's task contract executable:
+Poisson/Helmholtz/Darcy/Navier--Stokes sparse reconstruction is
+`[O_a,O_u] -> [a,u]`, Navier--Stokes full/sparse operator tasks use `u(T)`
+rather than flattened future trajectories, and Burgers has both 500 scattered
+space-time observations and five complete time slices. The five-slice layouts
+are sampled per sample and refreshed per training epoch.
+
 Before a smoke run, perform a bounded read-only check (32 samples per split by
 default):
 
@@ -59,8 +66,10 @@ OUT_ROOT=outputs/main_results_verified \
 bash scripts/experiments/07_build_main_results_matrix.sh
 ```
 
-The verifier mirrors the runner's validation policy: it prefers an independent
-validation file, otherwise reserves the configured training tail. It reports
+The verifier mirrors the runner's validation policy: `train_size` is the total
+training/validation budget, so `50000` with `val_size=1000` always fits on
+49000 samples. It prefers an independent validation file and otherwise uses
+the final 1000 samples of that budget as a deterministic validation tail. It reports
 missing or duplicate global IDs, cross-split ID overlap, and (when hashing is
 enabled) cross-split field/content duplicates. `--full` fails if any configured
 split is only partially scanned.
@@ -94,7 +103,7 @@ python scripts/experiments/build_matrix.py \
   --data-manifest outputs/data_protocol/experiment_plan_v2_corrected/full/data_protocol_report.json
 ```
 
-The corrected design expands seeds `[1, 2, 3]` into 213 active rows. The
+The corrected design expands seeds `[1, 2, 3]` into 228 active rows. The
 remaining-run launcher defaults to this corrected matrix and namespace:
 
 ```bash

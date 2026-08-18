@@ -336,6 +336,61 @@ def test_burger_loader_reports_nctx_trajectory_even_when_request_flag_is_false(t
     assert raw["metadata"]["loaded_full_trajectory"] is True
 
 
+@pytest.mark.parametrize("pde", ["poisson", "helmholtz", "darcy", "nsnonbounded"])
+def test_sparse_solution_jointly_observes_and_reconstructs_input_and_terminal_solution(pde):
+    registry = build_default_registry()
+    raw = registry.synthetic_raw(pde, n=2, resolution=8, split="train")
+    batch = registry.make_task(
+        raw,
+        pde,
+        "sparse_solution",
+        num_sensors=5,
+        sensor_mode="fixed",
+        experiment_mode="paper",
+    )
+
+    assert batch.target_fields.shape[1] == 2
+    assert batch.input_fields.shape == batch.target_fields.shape
+    assert batch.obs_values.shape == (2, 5, 2)
+    assert len(batch.target_channel_names) == 2
+    assert batch.metadata["joint_reconstruction"] is True
+
+
+def test_navier_stokes_full_tasks_use_terminal_state_not_flattened_trajectory():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("nsnonbounded", n=2, resolution=8)
+    raw["full_tensor"][:, :, 0] = 1.0
+    raw["full_tensor"][:, :, -1] = 9.0
+
+    forward = registry.make_task(raw, "nsnonbounded", "forward")
+    inverse = registry.make_task(raw, "nsnonbounded", "inverse")
+
+    assert forward.input_fields.shape == forward.target_fields.shape == (2, 1, 8, 8)
+    assert torch.all(forward.input_fields == 1.0)
+    assert torch.all(forward.target_fields == 9.0)
+    assert torch.all(inverse.input_fields == 9.0)
+    assert torch.all(inverse.target_fields == 1.0)
+
+
+def test_burger_time_slice_mode_reconstructs_the_full_trajectory():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("burger", n=2, resolution=8, split="train")
+    batch = registry.make_task(
+        raw,
+        "burger",
+        "sparse_solution",
+        num_sensors=3,
+        sensor_mode="time_slices_per_sample",
+        experiment_mode="paper",
+    )
+    dataset = registry.make_dataset_from_batch(batch)
+    materialized = pde_collate([dataset[0], dataset[1]])
+
+    assert materialized.target_fields.shape == (2, 1, 8, 8)
+    assert materialized.obs_values.shape == (2, 24, 1)
+    assert materialized.metadata["num_observations_total"] == 24
+
+
 def test_missing_file_error_lists_pde_and_candidates(tmp_path):
     registry = build_default_registry()
     with pytest.raises(FileNotFoundError) as exc:

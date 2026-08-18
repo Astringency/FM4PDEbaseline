@@ -23,11 +23,12 @@ def test_corrected_plan_uses_separate_namespace_and_explicit_sensor_protocol():
     assert original["name"] == "experiment_plan_v2"
     assert corrected["name"] == "experiment_plan_v2_corrected"
     assert corrected["comparison_track"] == "unified_adapted"
-    assert corrected["sensor_protocol_version"] == "fm4pde-sensor-contract-v2"
+    assert corrected["task_protocol_version"] == "fm4pde-task-contract-v3"
+    assert corrected["sensor_protocol_version"] == "fm4pde-sensor-contract-v3"
 
     for name, group in corrected["task_group_overrides"].items():
         if str(group["task"]).startswith("sparse"):
-            assert group["sensor_mode"] == "random_per_sample", name
+            assert group["sensor_mode"] in {"random_per_sample", "time_slices_per_sample"}, name
 
 
 def test_corrected_plan_excludes_invalid_sparse_rows():
@@ -44,8 +45,15 @@ def test_corrected_plan_excludes_invalid_sparse_rows():
     }
     assert groups["sparse_solution_main_amortized"]["load_full_trajectory"] is True
     assert groups["sparse_solution_main_amortized"]["sensor_budget_mode"] == "total"
+    assert groups["full_forward_main"]["pdes"] == ["poisson", "helmholtz", "darcy", "nsnonbounded"]
+    assert groups["full_inverse_main"]["pdes"] == ["poisson", "helmholtz", "darcy", "nsnonbounded"]
+    assert groups["sparse_solution_burger_time_slices"]["pdes"] == ["burger"]
+    assert groups["sparse_solution_burger_time_slices"]["num_sensors"] == 5
+    assert groups["sparse_solution_burger_time_slices"]["sensor_mode"] == "time_slices_per_sample"
     assert "burger" not in groups["sparse_forward_main_amortized"]["pdes"]
     assert "burger" not in groups["sparse_forward_main_physics"]["pdes"]
+    assert "pc_bnn" in groups["sparse_inverse_main"]["baselines"]
+    assert "pc_bnn" in groups["sparse_forward_main_physics"]["baselines"]
 
 
 def test_corrected_plan_expands_the_full_three_seed_cohort(tmp_path: Path):
@@ -59,14 +67,15 @@ def test_corrected_plan_expands_the_full_three_seed_cohort(tmp_path: Path):
         "experiment_plan_v2_corrected",
     )
 
-    assert len(rows) == summary["run_count"] == 213
-    assert len(skipped) == summary["skipped_combo_count"] == 4
-    assert summary["skipped_expanded_count"] == 12
+    assert len(rows) == summary["run_count"] == 228
+    assert len(skipped) == summary["skipped_combo_count"] == 6
+    assert summary["skipped_expanded_count"] == 18
     assert summary["by_task_group"] == {
-        "full_forward_main": 45,
-        "full_inverse_main": 15,
+        "full_forward_main": 36,
+        "full_inverse_main": 12,
         "sparse_forward_main_amortized": 36,
-        "sparse_forward_main_physics": 18,
-        "sparse_inverse_main": 54,
+        "sparse_forward_main_physics": 27,
+        "sparse_inverse_main": 63,
+        "sparse_solution_burger_time_slices": 9,
         "sparse_solution_main_amortized": 45,
     }

@@ -532,7 +532,20 @@ def resolve_capability(
                 eligible=False,
                 unified_comparison_eligible=False,
             )
-        if family == "sparse_inverse":
+        if family in {"sparse_forward", "sparse_inverse"}:
+            if pde in STATIC_SPARSE_INVERSE_PDES:
+                return _cap(
+                    baseline,
+                    pde,
+                    task,
+                    sensor_mode,
+                    "adapted",
+                    "adapted_allowed",
+                    family,
+                    "PC-BNN uses a disclosed joint source/solution particle posterior with sparse observations and a PDE residual",
+                    "Generic scalar-PDE PC-BNN adaptation; report separately from the matched official shallow-water setting.",
+                    eligible=False,
+                )
             return _cap(
                 baseline,
                 pde,
@@ -541,7 +554,7 @@ def resolve_capability(
                 "unsupported",
                 "unsupported",
                 family,
-                "PC-BNN sparse inverse requires an explicit parameter posterior objective, not the generic field posterior here",
+                "PC-BNN sparse forward/inverse is enabled only for static PDEs with an explicit joint source/solution residual",
             )
         return _cap(
             baseline,
@@ -693,7 +706,7 @@ def iter_capability_matrix(
     pdes = list(pdes or ALL_PDES)
     baselines = list(baselines or ALL_BASELINES)
     tasks = list(tasks or ["forward", "inverse", "sparse_solution", "sparse_inverse"])
-    sensor_modes = list(sensor_modes or ["none", "random_per_sample", "grid", "fixed", "time_varying"])
+    sensor_modes = list(sensor_modes or ["none", "random_per_sample", "grid", "fixed", "time_varying", "time_slices_per_sample"])
     rows: list[Capability] = []
     for baseline in baselines:
         for pde in pdes:

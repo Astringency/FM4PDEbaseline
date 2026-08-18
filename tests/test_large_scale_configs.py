@@ -15,12 +15,6 @@ ALL_PDES = {
     "helmholtz",
     "nsnonbounded",
     "burger",
-    "reaction_diffusion",
-    "shallow_water",
-    "heat",
-    "wave",
-    "advection_diffusion",
-    "steady_heat_conduction",
 }
 
 
@@ -32,16 +26,23 @@ def test_main_results_config_covers_expected_pdes_and_resources():
     assert cfg["pin_memory"] is True
     assert cfg["persistent_workers"] is True
     assert cfg["prefetch_factor"] == 2
+    assert cfg["train_size"] == 50000
+    assert cfg["val_size"] == 1000
+    assert cfg["test_size"] == 1000
     assert "DiffusionPDE" not in cfg["pdes"]
-    assert "fm4pde" not in json.dumps(cfg).lower()
+    configured_baselines = {
+        baseline
+        for group in cfg["task_group_overrides"].values()
+        for baseline in group.get("baselines", [])
+    }
+    assert "fm4pde" not in configured_baselines
     resources = cfg["resources"]
     assert resources["amortized_default"]["batch_size"] == 16
     assert resources["amortized_default"]["epochs"] == 200
     assert resources["per_instance_default"]["batch_size"] == 1
     assert resources["pinn_sparse"]["steps"] == 1000
     assert resources["pc_bnn"]["particles"] == 8
-    assert resources["var4d"]["load_full_trajectory"] is True
-    assert resources["vivid"]["refine_steps"] == 300
+    assert resources["pde_opt"]["steps"] == 500
 
 
 def test_paper_baseline_config_uses_eager_multi_worker_loading():

@@ -99,7 +99,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-sensors", type=int, default=500)
     parser.add_argument(
         "--sensor-mode",
-        choices=["random", "random_per_sample", "fixed", "grid", "time_varying"],
+        choices=["random", "random_per_sample", "fixed", "grid", "time_varying", "time_slices_per_sample"],
         default="random_per_sample",
     )
     parser.add_argument("--sensor-budget-mode", choices=["per_time", "total"], default=None)
@@ -1110,13 +1110,17 @@ def _make_val_dataset_if_requested(
 ) -> tuple[PDEBatchDataset | None, dict[str, Any]]:
     split_info: dict[str, Any] = {
         "train_requested_size": int(train_size),
-        "effective_train_size": int(train_size),
+        "effective_train_size": int(train_size - val_size) if val_size > 0 else int(train_size),
         "val_requested_size": int(val_size),
         "val_split_source": "none",
         "val_from_train_offset": None,
     }
     if val_size <= 0:
         return None, split_info
+    if train_size <= val_size:
+        raise ValueError(
+            f"Cannot reserve val_size={val_size} inside train_size={train_size}; increase TRAIN_SIZE or reduce VAL_SIZE."
+        )
     if args.synthetic_data:
         val_dataset = _make_split_dataset(
             registry,
@@ -1141,8 +1145,6 @@ def _make_val_dataset_if_requested(
         split_info["val_split_source"] = str(val_dataset.batch.metadata.get("split_source", "independent_val"))
         return val_dataset, split_info
     except FileNotFoundError:
-        if train_size <= val_size:
-            raise ValueError(f"Cannot reserve val_size={val_size} from train_size={train_size}; reduce VAL_SIZE or provide an independent val file.")
         effective_train_size = int(train_size - val_size)
         split_info["effective_train_size"] = effective_train_size
         split_info["val_split_source"] = "deterministic_train_subset"
@@ -1299,12 +1301,17 @@ def _evaluate_full_test_loader(
         pred_cpu, target = _align(pred_cpu, target)
         inf_opt = float(batch.metadata.get("inference_optimization_time", 0.0) or 0.0)
         batch_n = int(target.shape[0])
-        rel_values = (
-            [float("nan")] * int(target.shape[0])
-            if args.task in {"inverse", "sparse_inverse"}
-            else _relative_l2_values(pred_cpu, target)
-        )
-        input_or_coeff_values = _relative_l2_input_or_coeff_values(args.task, pred_cpu, target)
+        if args.task in {"sparse_solution", "sparse_reconstruction"} and batch.metadata.get("joint_reconstruction"):
+            rel_values, input_or_coeff_values = _joint_reconstruction_relative_l2_values(
+                pred_cpu, target, batch.metadata
+            )
+        else:
+            rel_values = (
+                [float("nan")] * int(target.shape[0])
+                if args.task in {"inverse", "sparse_inverse"}
+                else _relative_l2_values(pred_cpu, target)
+            )
+            input_or_coeff_values = _relative_l2_input_or_coeff_values(args.task, pred_cpu, target)
         mse_values = _mse_values(pred_cpu, target)
         mae_values = _mae_values(pred_cpu, target)
         metric_payload = _batch_metric_payload(pred_cpu, target, batch, args)
@@ -1400,6 +1407,8 @@ def _evaluate_full_test_loader(
             "amortized_training": not per_instance,
             "inference_time": elapsed,
             "inference_optimization_time": inf_opt,
+            "optimization_steps_completed": int(batch.metadata.get("optimization_steps_completed", 0) or 0),
+            "optimization_early_stopped": bool(batch.metadata.get("optimization_early_stopped", False)),
             "num_params": int(model.parameter_count() if hasattr(model, "parameter_count") else num_parameters(model)),
             "num_params_storage": int(
                 model.parameter_storage_count()
@@ -1440,13 +1449,14 @@ def _evaluate_full_test_loader(
 
 def _batch_metric_payload(pred: torch.Tensor, target: torch.Tensor, batch: PDEBatch, args: argparse.Namespace) -> dict[str, Any]:
     if args.physics_metric_mode == "per_batch":
+        physics_pred, physics_input = _joint_physics_views(pred, target, batch.metadata, batch.input_fields)
         metric_meta = {
-            "input_fields": batch.input_fields,
+            "input_fields": physics_input,
             "full_tensor": batch.full_tensor,
             "task": batch.task,
             **batch.metadata,
         }
-        physics_metrics = physics_loss_metric(pred, args.pde, dict(metric_meta))
+        physics_metrics = physics_loss_metric(physics_pred, args.pde, dict(metric_meta))
         mode = str(physics_metrics["mode"])
         clean = _obs_mse_clean(pred, target, batch)
         noisy = _obs_mse_noisy(pred, batch)
@@ -1476,13 +1486,16 @@ def _batch_metric_payload(pred: torch.Tensor, target: torch.Tensor, batch: PDEBa
         item_batch = slice_pde_batch(batch, item)
         pred_i = pred[item : item + 1]
         target_i = target[item : item + 1]
+        physics_pred_i, physics_input_i = _joint_physics_views(
+            pred_i, target_i, item_batch.metadata, item_batch.input_fields
+        )
         meta_i = {
-            "input_fields": item_batch.input_fields,
+            "input_fields": physics_input_i,
             "full_tensor": item_batch.full_tensor,
             "task": item_batch.task,
             **item_batch.metadata,
         }
-        physics_metrics = physics_loss_metric(pred_i, args.pde, dict(meta_i))
+        physics_metrics = physics_loss_metric(physics_pred_i, args.pde, dict(meta_i))
         clean = _obs_mse_clean(pred_i, target_i, item_batch)
         noisy = _obs_mse_noisy(pred_i, item_batch)
         values["obs_mse"].append(clean)
@@ -1642,6 +1655,8 @@ def _summarize_run(
         "inference_time_per_sample": eval_totals["inference_time_total"] / max(len(test_dataset), 1),
         "inference_optimization_time_total": eval_totals["inference_optimization_time_total"],
         "inference_optimization_time_per_sample": eval_totals["inference_optimization_time_total"] / max(len(test_dataset), 1),
+        "optimization_steps_completed_total": int(sum(int(row.get("optimization_steps_completed", 0) or 0) for row in rows)),
+        "optimization_early_stopped_batches": int(sum(bool(row.get("optimization_early_stopped", False)) for row in rows)),
         "fit_setup_time": float(split_info.get("fit_setup_time", 0.0) or 0.0),
         "test_time_optimization": per_instance,
         "amortized_training": not per_instance,
@@ -1762,6 +1777,10 @@ def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
         "learned_state_injection_mode",
         "learned_state_shape",
         "optimized_state_shape",
+        "optimization_steps_completed",
+        "optimization_early_stopped",
+        "optimization_status_per_sample",
+        "pc_bnn_joint_field_posterior",
     ):
         if key in src.metadata:
             dst.metadata[key] = src.metadata[key]
@@ -1806,6 +1825,32 @@ def _relative_l2_input_or_coeff_values(task: str, pred: torch.Tensor, target: to
     if task in {"inverse", "sparse_inverse"}:
         return _relative_l2_values(pred, target)
     return [float("nan")] * int(target.shape[0])
+
+
+def _joint_reconstruction_relative_l2_values(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    metadata: dict[str, Any],
+) -> tuple[list[float], list[float]]:
+    input_channels = int(metadata.get("joint_input_channels", 0) or 0)
+    if not metadata.get("joint_reconstruction") or input_channels <= 0 or target.shape[1] <= input_channels:
+        return _relative_l2_values(pred, target), [float("nan")] * int(target.shape[0])
+    return (
+        _relative_l2_values(pred[:, input_channels:], target[:, input_channels:]),
+        _relative_l2_values(pred[:, :input_channels], target[:, :input_channels]),
+    )
+
+
+def _joint_physics_views(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    metadata: dict[str, Any],
+    fallback_input: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    input_channels = int(metadata.get("joint_input_channels", 0) or 0)
+    if not metadata.get("joint_reconstruction") or input_channels <= 0 or pred.shape[1] <= input_channels:
+        return pred, fallback_input
+    return pred[:, input_channels:], target[:, :input_channels]
 
 
 def _obs_mse_clean(pred: torch.Tensor, target: torch.Tensor, batch: PDEBatch) -> float:

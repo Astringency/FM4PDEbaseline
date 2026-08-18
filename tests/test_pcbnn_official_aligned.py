@@ -4,6 +4,7 @@ from baselines.capabilities import paper_table_eligible, resolve_capability
 from baselines.common.data_adapter import build_default_registry
 from baselines.methods.pc_bnn import PCBNNBaseline
 from baselines.run import _backend_info, build_data_spec
+import pytest
 
 
 def _sparse_batch(pde: str):
@@ -34,3 +35,24 @@ def test_pcbnn_scalar_pde_remains_supplement_only():
     assert cap.support_status == "adapted"
     assert "generic_svgd" in backend["adapter_status"]
     assert paper_table_eligible(cap, backend_info=backend) is False
+
+
+@pytest.mark.parametrize("task", ["sparse_forward", "sparse_inverse"])
+def test_pcbnn_scalar_sparse_forward_and_inverse_optimize_joint_pde_fields(task):
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("poisson", n=1, resolution=8)
+    batch = registry.make_task(raw, "poisson", task, num_sensors=4, sensor_mode="fixed", seed=1)
+    cfg = {
+        "implementation_mode": "adapted",
+        "official_backend": "local",
+        "particles": 2,
+        "steps": 1,
+        "hidden": 8,
+        "depth": 2,
+    }
+    model = PCBNNBaseline().build(cfg, build_data_spec(batch))
+
+    pred = model.predict(batch)
+
+    assert pred.shape == batch.target_fields.shape
+    assert batch.metadata["pc_bnn_joint_field_posterior"] is True

@@ -16,6 +16,13 @@ The framework covers:
 FM4PDE internal ablations and DiffusionPDE comparisons are outside this external
 baseline matrix.
 
+The formal `main_results` matrix follows `docs/baseline_exp.md`: full forward
+and inverse use terminal-state contracts on Poisson, Helmholtz, Darcy, and
+Navier--Stokes; sparse reconstruction jointly observes/reconstructs input and
+solution fields; and Burgers additionally has a five-complete-time-slice mode.
+The current formal protocol identifiers are `fm4pde-task-contract-v3` and
+`fm4pde-sensor-contract-v3`; older checkpoints are not compatible.
+
 ## Layout
 
 ```text

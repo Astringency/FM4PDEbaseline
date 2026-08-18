@@ -1,23 +1,15 @@
 name: main_results
 experiment_kind: main
+comparison_track: unified_adapted
 main_table_only: true
 config: baselines/configs/paper.yaml
-pdes:
-  - darcy
-  - poisson
-  - helmholtz
-  - nsnonbounded
-  - burger
-  - reaction_diffusion
-  - shallow_water
-  - heat
-  - wave
-  - advection_diffusion
-  - steady_heat_conduction
+task_protocol_version: fm4pde-task-contract-v3
+sensor_protocol_version: fm4pde-sensor-contract-v3
+pdes: [poisson, helmholtz, darcy, burger, nsnonbounded]
 seeds: [1, 2, 3]
 train_size: 50000
 val_size: 1000
-test_size: 10000
+test_size: 1000
 train_shards: 5
 data_loading_mode: eager
 num_workers: 4
@@ -28,49 +20,64 @@ device: cuda
 task_groups:
   - full_forward_main
   - full_inverse_main
-  - sparse_solution_main_amortized
-  - sparse_solution_main_physics
   - sparse_inverse_main
-  - time_varying_da_main
+  - sparse_solution_main_amortized
+  - sparse_solution_burger_time_slices
+  - sparse_forward_main_amortized
+  - sparse_forward_main_physics
 task_group_overrides:
   full_forward_main:
     task: forward
+    pdes: [poisson, helmholtz, darcy, nsnonbounded]
     baselines: [fno, deeponet, ifno]
     num_sensors: 0
     sensor_mode: none
     noise_level: 0.0
   full_inverse_main:
     task: inverse
-    baselines: [fno, deeponet, ifno]
+    pdes: [poisson, helmholtz, darcy, nsnonbounded]
+    baselines: [ifno]
     num_sensors: 0
     sensor_mode: none
+    noise_level: 0.0
+  sparse_inverse_main:
+    task: sparse_inverse
+    pdes: [poisson, helmholtz, darcy, nsnonbounded]
+    baselines: [recfno, senseiver, voronoicnn, pinn_sparse, pde_opt, pc_bnn]
+    num_sensors: 500
+    sensor_mode: random_per_sample
     noise_level: 0.0
   sparse_solution_main_amortized:
     task: sparse_solution
     baselines: [recfno, senseiver, voronoicnn]
     num_sensors: 500
     sensor_mode: random_per_sample
-    noise_level: 0.0
-  sparse_solution_main_physics:
-    task: sparse_solution
-    baselines: [pinn_sparse, pc_bnn, pde_opt]
-    num_sensors: 500
-    sensor_mode: random_per_sample
-    noise_level: 0.0
-  sparse_inverse_main:
-    task: sparse_inverse
-    baselines: [pinn_sparse, pde_opt]
-    num_sensors: 500
-    sensor_mode: random_per_sample
-    noise_level: 0.0
-  time_varying_da_main:
-    task: sparse_solution
-    pdes: [nsnonbounded, burger, reaction_diffusion, shallow_water]
-    baselines: [senseiver, var4d, vivid]
-    num_sensors: 500
-    sensor_mode: time_varying
+    sensor_budget_mode: total
     noise_level: 0.0
     load_full_trajectory: true
+  sparse_solution_burger_time_slices:
+    task: sparse_solution
+    pdes: [burger]
+    baselines: [recfno, senseiver, voronoicnn]
+    num_sensors: 5
+    sensor_mode: time_slices_per_sample
+    sensor_budget_mode: total
+    noise_level: 0.0
+    load_full_trajectory: true
+  sparse_forward_main_amortized:
+    task: sparse_forward
+    pdes: [poisson, helmholtz, darcy, nsnonbounded]
+    baselines: [recfno, senseiver, voronoicnn]
+    num_sensors: 500
+    sensor_mode: random_per_sample
+    noise_level: 0.0
+  sparse_forward_main_physics:
+    task: sparse_forward
+    pdes: [poisson, helmholtz, darcy, nsnonbounded]
+    baselines: [pinn_sparse, pde_opt, pc_bnn]
+    num_sensors: 500
+    sensor_mode: random_per_sample
+    noise_level: 0.0
 resources:
   amortized_default:
     batch_size: 16
@@ -90,11 +97,3 @@ resources:
   pde_opt:
     batch_size: 1
     steps: 500
-  var4d:
-    batch_size: 1
-    steps: 500
-    load_full_trajectory: true
-  vivid:
-    batch_size: 1
-    refine_steps: 300
-    load_full_trajectory: true

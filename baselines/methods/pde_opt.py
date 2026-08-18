@@ -5,7 +5,7 @@ import torch
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import physics_loss_metric
 
-from .base import BaselineModel
+from .base import BaselineModel, record_optimization_status, run_per_instance_optimizer
 from .pinn_sparse import (
     STATIC_SPARSE_INVERSE_PDES,
     _synchronized_perf_counter,
@@ -59,24 +59,21 @@ class PDEOptBaseline(BaselineModel):
         lam_obs = float(self.config.get("lambda_obs", 1.0))
         lam_reg = float(self.config.get("lambda_reg", 1e-5))
         opt_name = str(self.config.get("optimizer", "adam")).lower()
-        if opt_name == "lbfgs":
-            opt = torch.optim.LBFGS([pred], lr=float(self.config.get("lr", 1.0)), max_iter=steps)
+        opt = (
+            torch.optim.LBFGS([pred], lr=float(self.config.get("lr", 1.0)), max_iter=steps)
+            if opt_name == "lbfgs"
+            else torch.optim.Adam([pred], lr=float(self.config.get("lr", 5e-2)))
+        )
 
-            def closure():
-                opt.zero_grad(set_to_none=True)
-                loss = self._objective(pred, batch, lam_obs, lam_reg)
-                loss.backward()
-                return loss
+        def closure():
+            opt.zero_grad(set_to_none=True)
+            loss = self._objective(pred, batch, lam_obs, lam_reg)
+            loss.backward()
+            return loss
 
-            opt.step(closure)
-        else:
-            opt = torch.optim.Adam([pred], lr=float(self.config.get("lr", 5e-2)))
-            for _ in range(steps):
-                opt.zero_grad(set_to_none=True)
-                loss = self._objective(pred, batch, lam_obs, lam_reg)
-                loss.backward()
-                opt.step()
+        status = run_per_instance_optimizer(opt, closure, steps, self.config)
         batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
+        record_optimization_status(batch, [status])
         return pred.detach()
 
     def _predict_sparse_inverse(self, batch: PDEBatch):
@@ -94,24 +91,17 @@ class PDEOptBaseline(BaselineModel):
         lam_reg = float(self.config.get("lambda_reg", 1e-5))
         opt_name = str(self.config.get("optimizer", "adam")).lower()
         params = [unknown, solution]
-        if opt_name == "lbfgs":
-            opt = torch.optim.LBFGS(params, lr=lr, max_iter=steps)
+        opt = torch.optim.LBFGS(params, lr=lr, max_iter=steps) if opt_name == "lbfgs" else torch.optim.Adam(params, lr=lr)
 
-            def closure():
-                opt.zero_grad(set_to_none=True)
-                loss = self._sparse_inverse_objective(unknown, solution, batch, lam_obs, lam_reg)
-                loss.backward()
-                return loss
+        def closure():
+            opt.zero_grad(set_to_none=True)
+            loss = self._sparse_inverse_objective(unknown, solution, batch, lam_obs, lam_reg)
+            loss.backward()
+            return loss
 
-            opt.step(closure)
-        else:
-            opt = torch.optim.Adam(params, lr=lr)
-            for _ in range(steps):
-                opt.zero_grad(set_to_none=True)
-                loss = self._sparse_inverse_objective(unknown, solution, batch, lam_obs, lam_reg)
-                loss.backward()
-                opt.step()
+        status = run_per_instance_optimizer(opt, closure, steps, self.config)
         batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
+        record_optimization_status(batch, [status])
         return unknown.detach()
 
     def _predict_sparse_forward(self, batch: PDEBatch):
@@ -129,24 +119,17 @@ class PDEOptBaseline(BaselineModel):
         lam_reg = float(self.config.get("lambda_reg", 1e-5))
         opt_name = str(self.config.get("optimizer", "adam")).lower()
         params = [unknown, solution]
-        if opt_name == "lbfgs":
-            opt = torch.optim.LBFGS(params, lr=lr, max_iter=steps)
+        opt = torch.optim.LBFGS(params, lr=lr, max_iter=steps) if opt_name == "lbfgs" else torch.optim.Adam(params, lr=lr)
 
-            def closure():
-                opt.zero_grad(set_to_none=True)
-                loss = self._sparse_forward_objective(unknown, solution, batch, lam_obs, lam_reg)
-                loss.backward()
-                return loss
+        def closure():
+            opt.zero_grad(set_to_none=True)
+            loss = self._sparse_forward_objective(unknown, solution, batch, lam_obs, lam_reg)
+            loss.backward()
+            return loss
 
-            opt.step(closure)
-        else:
-            opt = torch.optim.Adam(params, lr=lr)
-            for _ in range(steps):
-                opt.zero_grad(set_to_none=True)
-                loss = self._sparse_forward_objective(unknown, solution, batch, lam_obs, lam_reg)
-                loss.backward()
-                opt.step()
+        status = run_per_instance_optimizer(opt, closure, steps, self.config)
         batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
+        record_optimization_status(batch, [status])
         return solution.detach()
 
     def _objective(self, pred, batch, lam_obs, lam_reg):

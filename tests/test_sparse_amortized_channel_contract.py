@@ -50,7 +50,7 @@ METHODS = {
 
 @pytest.mark.parametrize("task", ["sparse_forward", "sparse_inverse"])
 @pytest.mark.parametrize("method_name", list(METHODS))
-def test_ns_full_trajectory_sparse_methods_support_unequal_input_and_target_channels(method_name, task):
+def test_ns_terminal_state_sparse_methods_support_the_endpoint_contract(method_name, task):
     registry = build_default_registry()
     raw = registry.synthetic_raw("nsnonbounded", n=2, resolution=4, split="train")
     batch = registry.make_task(
@@ -69,5 +69,5 @@ def test_ns_full_trajectory_sparse_methods_support_unequal_input_and_target_chan
 
     prediction = model.predict(materialized)
 
-    assert materialized.input_fields.shape[1] != materialized.target_fields.shape[1]
+    assert materialized.input_fields.shape[1] == materialized.target_fields.shape[1] == 1
     assert prediction.shape == materialized.target_fields.shape

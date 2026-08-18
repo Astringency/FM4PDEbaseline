@@ -10,7 +10,7 @@ import torch.nn as nn
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import NotImplementedWarning, physics_loss_metric
 
-from .base import BaselineModel
+from .base import BaselineModel, record_optimization_status, run_per_instance_optimizer
 from .official import OfficialImportError, get_deepxde_fnn_class, official_source_info, requested_implementation_mode
 from .shared import NeuralField
 
@@ -103,6 +103,7 @@ class PINNSparseBaseline(BaselineModel):
             )
         start = _synchronized_perf_counter(batch)
         preds = []
+        statuses = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
         lam_obs = float(self.config.get("lambda_obs", 1.0))
@@ -131,15 +132,11 @@ class PINNSparseBaseline(BaselineModel):
                 loss.backward()
                 return loss
 
-            if opt_name == "lbfgs":
-                optimizer.step(closure)
-            else:
-                for _ in range(max(steps, 0)):
-                    closure()
-                    optimizer.step()
+            statuses.append(run_per_instance_optimizer(optimizer, closure, steps, self.config))
             with torch.no_grad():
                 preds.append(model(coords).T.reshape_as(target))
         batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
+        record_optimization_status(batch, statuses)
         return torch.cat(preds, dim=0).detach()
 
     def _predict_sparse_inverse(self, batch: PDEBatch):
@@ -148,6 +145,7 @@ class PINNSparseBaseline(BaselineModel):
             raise NotImplementedError(f"PINN-Sparse sparse_inverse is only enabled for static PDEs, got {batch.pde_name}")
         start = _synchronized_perf_counter(batch)
         preds = []
+        statuses = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
         lam_obs = float(self.config.get("lambda_obs", 1.0))
@@ -174,15 +172,11 @@ class PINNSparseBaseline(BaselineModel):
                 loss.backward()
                 return loss
 
-            if opt_name == "lbfgs":
-                optimizer.step(closure)
-            else:
-                for _ in range(max(steps, 0)):
-                    closure()
-                    optimizer.step()
+            statuses.append(run_per_instance_optimizer(optimizer, closure, steps, self.config))
             with torch.no_grad():
                 preds.append(unknown(coords).T.reshape(unknown_target_shape))
         batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
+        record_optimization_status(batch, statuses)
         return torch.cat(preds, dim=0).detach()
 
     def _predict_sparse_forward(self, batch: PDEBatch):
@@ -191,6 +185,7 @@ class PINNSparseBaseline(BaselineModel):
             raise NotImplementedError(f"PINN-Sparse sparse_forward is only enabled for static PDEs, got {batch.pde_name}")
         start = _synchronized_perf_counter(batch)
         preds = []
+        statuses = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
         lam_obs = float(self.config.get("lambda_obs", 1.0))
@@ -217,15 +212,11 @@ class PINNSparseBaseline(BaselineModel):
                 loss.backward()
                 return loss
 
-            if opt_name == "lbfgs":
-                optimizer.step(closure)
-            else:
-                for _ in range(max(steps, 0)):
-                    closure()
-                    optimizer.step()
+            statuses.append(run_per_instance_optimizer(optimizer, closure, steps, self.config))
             with torch.no_grad():
                 preds.append(solution(coords).T.reshape(solution_target_shape))
         batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
+        record_optimization_status(batch, statuses)
         return torch.cat(preds, dim=0).detach()
 
     def _new_field(self, coord_dim: int, out_channels: int) -> nn.Module:

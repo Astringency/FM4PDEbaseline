@@ -9,7 +9,7 @@ import torch.nn as nn
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import physics_loss_metric
 
-from .base import BaselineModel
+from .base import BaselineModel, LossPlateauStopper, record_optimization_status
 from .official import (
     OfficialImportError,
     get_pc_bnn_net_class,
@@ -18,7 +18,16 @@ from .official import (
     requested_implementation_mode,
     wrap_official_adapter_error,
 )
-from .pinn_sparse import _physics_weight_metadata, _select_physics_loss, _single_meta, observation_loss_from_batch
+from .pinn_sparse import (
+    STATIC_SPARSE_INVERSE_PDES,
+    _physics_weight_metadata,
+    _select_physics_loss,
+    _single_meta,
+    observation_loss_from_batch,
+    sparse_forward_observation_loss,
+    sparse_inverse_observation_loss,
+    sparse_inverse_physics_loss,
+)
 from .shared import NeuralField
 
 
@@ -128,9 +137,12 @@ class PCBNNBaseline(BaselineModel):
         return {"status": "per_instance_svgd_particles_no_amortized_fit"}
 
     def predict(self, batch: PDEBatch):
+        if batch.task in {"sparse_forward", "sparse_inverse"}:
+            return self._predict_joint_sparse(batch)
         start = time.perf_counter()
         all_means = []
         all_stds = []
+        statuses = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
         hidden = self.hidden
@@ -147,6 +159,7 @@ class PCBNNBaseline(BaselineModel):
                 torch.manual_seed(int(self.config.get("seed", 0)) + particle_id)
                 for param in particle.parameters():
                     param.data.add_(torch.randn_like(param) * float(self.config.get("init_std", 1e-2)))
+            stopper = LossPlateauStopper(self.config)
             for _ in range(max(steps, 0)):
                 losses = []
                 grads = []
@@ -169,6 +182,9 @@ class PCBNNBaseline(BaselineModel):
                 with torch.no_grad():
                     for particle, update in zip(particles, updates):
                         _assign_flat_params(particle, _flatten_params(particle) - lr * update)
+                if stopper.update(torch.stack(losses).mean()):
+                    break
+            statuses.append(stopper.status())
             preds = []
             with torch.no_grad():
                 for particle in particles:
@@ -181,6 +197,87 @@ class PCBNNBaseline(BaselineModel):
         batch.metadata["predictive_std"] = std
         batch.metadata["posterior_particles"] = int(self.particles)
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        record_optimization_status(batch, statuses)
+        return mean
+
+    def _predict_joint_sparse(self, batch: PDEBatch) -> torch.Tensor:
+        if batch.pde_name.lower() not in STATIC_SPARSE_INVERSE_PDES:
+            raise NotImplementedError(
+                f"PC-BNN {batch.task} is only enabled for static PDEs, got {batch.pde_name}"
+            )
+        start = time.perf_counter()
+        means: list[torch.Tensor] = []
+        stds: list[torch.Tensor] = []
+        statuses: list[dict] = []
+        steps = int(self.config.get("steps", 2))
+        lr = float(self.config.get("lr", 1e-2))
+        lam_obs = float(self.config.get("lambda_obs", 1.0))
+        for item in range(batch.target_fields.shape[0]):
+            coords = batch.coords[item].to(batch.target_fields.device, batch.target_fields.dtype)
+            if batch.task == "sparse_inverse":
+                unknown_shape = batch.target_fields[item : item + 1].shape
+                solution_shape = batch.input_fields[item : item + 1].shape
+            else:
+                unknown_shape = batch.input_fields[item : item + 1].shape
+                solution_shape = batch.target_fields[item : item + 1].shape
+            unknown_channels = int(unknown_shape[1])
+            solution_channels = int(solution_shape[1])
+            particles = [
+                self._new_particle(coords.shape[-1], unknown_channels + solution_channels).to(batch.target_fields.device)
+                for _ in range(self.particles)
+            ]
+            for particle_id, particle in enumerate(particles):
+                torch.manual_seed(int(self.config.get("seed", 0)) + particle_id)
+                for param in particle.parameters():
+                    param.data.add_(torch.randn_like(param) * float(self.config.get("init_std", 1e-2)))
+            stopper = LossPlateauStopper(self.config)
+            for _ in range(max(steps, 0)):
+                grads: list[torch.Tensor] = []
+                thetas: list[torch.Tensor] = []
+                losses: list[torch.Tensor] = []
+                for particle in particles:
+                    joint = particle(coords).T.reshape(1, unknown_channels + solution_channels, *unknown_shape[2:])
+                    unknown = joint[:, :unknown_channels]
+                    solution = joint[:, unknown_channels:]
+                    obs = (
+                        sparse_inverse_observation_loss(solution, batch, item=item)
+                        if batch.task == "sparse_inverse"
+                        else sparse_forward_observation_loss(unknown, batch, item=item)
+                    )
+                    loss = lam_obs * obs
+                    physics = sparse_inverse_physics_loss(unknown, solution, batch, item, self.config)
+                    if torch.isfinite(physics):
+                        loss = loss + physics
+                    losses.append(loss.detach())
+                    grad = torch.autograd.grad(loss, tuple(particle.parameters()), retain_graph=False, create_graph=False)
+                    grads.append(torch.cat([value.detach().reshape(-1) for value in grad]))
+                    thetas.append(_flatten_params(particle))
+                theta = torch.stack(thetas)
+                updates = _svgd_descent_direction(theta, torch.stack(grads))
+                with torch.no_grad():
+                    for particle, update in zip(particles, updates):
+                        _assign_flat_params(particle, _flatten_params(particle) - lr * update)
+                if stopper.update(torch.stack(losses).mean()):
+                    break
+            statuses.append(stopper.status())
+            predictions: list[torch.Tensor] = []
+            with torch.no_grad():
+                for particle in particles:
+                    joint = particle(coords).T.reshape(1, unknown_channels + solution_channels, *unknown_shape[2:])
+                    predictions.append(
+                        joint[:, :unknown_channels]
+                        if batch.task == "sparse_inverse"
+                        else joint[:, unknown_channels:]
+                    )
+            stack = torch.stack(predictions, dim=0)
+            means.append(stack.mean(dim=0))
+            stds.append(stack.std(dim=0))
+        mean = torch.cat(means, dim=0)
+        batch.metadata["predictive_std"] = torch.cat(stds, dim=0)
+        batch.metadata["posterior_particles"] = int(self.particles)
+        batch.metadata["pc_bnn_joint_field_posterior"] = True
+        batch.metadata["inference_optimization_time"] = time.perf_counter() - start
+        record_optimization_status(batch, statuses)
         return mean
 
     def _new_particle(self, coord_dim: int, out_channels: int) -> nn.Module:

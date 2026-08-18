@@ -101,3 +101,23 @@ def test_random_per_sample_validation_mask_does_not_depend_on_epoch():
     epoch_zero = build_observation_tensors(target, epoch=0, **common)
     epoch_late = build_observation_tensors(target, epoch=99, **common)
     assert torch.equal(epoch_zero["mask"], epoch_late["mask"])
+
+
+def test_time_slices_per_sample_selects_complete_slices_and_changes_by_training_epoch():
+    target = torch.randn(2, 1, 8, 6)
+    common = {
+        "num_sensors": 3,
+        "mode": "time_slices_per_sample",
+        "seed": 9,
+        "time_dim": 0,
+        "sample_ids": ["burger:train:0", "burger:train:1"],
+        "split": "train",
+    }
+
+    first = build_observation_tensors(target, epoch=0, **common)
+    second = build_observation_tensors(target, epoch=1, **common)
+
+    assert first["num_observations_total"] == 18
+    assert sorted(first["num_sensors_per_time"]) == [0, 0, 0, 0, 0, 6, 6, 6]
+    assert not torch.equal(first["mask"][0], first["mask"][1])
+    assert not torch.equal(first["mask"], second["mask"])

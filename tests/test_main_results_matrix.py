@@ -17,14 +17,15 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
 
     assert summary["experiment_kind"] == "main"
     assert summary["ablation_factor"] == ""
-    assert summary["run_count"] == 360
+    assert summary["run_count"] == 228
     assert summary["by_task_group"] == {
-        "full_forward_main": 99,
-        "full_inverse_main": 99,
-        "sparse_inverse_main": 24,
-        "sparse_solution_main_amortized": 99,
-        "sparse_solution_main_physics": 3,
-        "time_varying_da_main": 36,
+        "full_forward_main": 36,
+        "full_inverse_main": 12,
+        "sparse_inverse_main": 63,
+        "sparse_solution_main_amortized": 45,
+        "sparse_solution_burger_time_slices": 9,
+        "sparse_forward_main_amortized": 36,
+        "sparse_forward_main_physics": 27,
     }
     run_ids = [row["run_id"] for row in rows]
     assert len(run_ids) == len(set(run_ids))
@@ -38,62 +39,58 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
         "full_forward_main",
         "full_inverse_main",
         "sparse_solution_main_amortized",
-        "sparse_solution_main_physics",
+        "sparse_solution_burger_time_slices",
+        "sparse_forward_main_amortized",
+        "sparse_forward_main_physics",
         "sparse_inverse_main",
-        "time_varying_da_main",
     }
-    assert len(skipped) == 46
+    assert len(skipped) == 6
     inverse_rows = [row for row in rows if row["task_group"] == "full_inverse_main"]
-    assert {row["baseline"] for row in inverse_rows} == {"fno", "deeponet", "ifno"}
+    assert {row["baseline"] for row in inverse_rows} == {"ifno"}
     assert {row["capability_status"] for row in inverse_rows} == {"adapted"}
     unsupported_skips = [row for row in skipped if row["task_group"] == "sparse_inverse_main"]
-    assert all(row["baseline"] in {"pinn_sparse", "pde_opt"} for row in unsupported_skips)
+    assert all(row["baseline"] in {"pinn_sparse", "pde_opt", "pc_bnn"} for row in unsupported_skips)
     assert all(
         "time-dependent sparse inverse" in row["reason"] or "Burger sparse_inverse is excluded" in row["reason"]
+        or "enabled only for static PDEs" in row["reason"]
         for row in unsupported_skips
     )
-    pcbnn_skips = [row for row in skipped if row["task_group"] == "sparse_solution_main_physics" and row["baseline"] == "pc_bnn"]
-    assert len(pcbnn_skips) == 10
-    assert all("PC-BNN" in row["reason"] for row in pcbnn_skips)
 
 
-def test_main_results_sparse_inverse_uses_physics_baselines_only(tmp_path: Path, monkeypatch):
+def test_main_results_sparse_inverse_uses_all_requested_baselines(tmp_path: Path, monkeypatch):
     for key in MATRIX_ENV:
         monkeypatch.delenv(key, raising=False)
     cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
     rows, _skipped, _summary = build_matrix(cfg, tmp_path / "main_results", "main_results")
     sparse_inverse = [row for row in rows if row["task_group"] == "sparse_inverse_main"]
-    assert {row["baseline"] for row in sparse_inverse} == {"pinn_sparse", "pde_opt"}
-    assert {row["pde"] for row in sparse_inverse} == {"poisson", "helmholtz", "darcy", "steady_heat_conduction"}
+    assert {row["baseline"] for row in sparse_inverse} == {
+        "recfno", "senseiver", "voronoicnn", "pinn_sparse", "pde_opt", "pc_bnn"
+    }
+    assert {row["pde"] for row in sparse_inverse} == {"poisson", "helmholtz", "darcy", "nsnonbounded"}
 
 
-def test_main_results_includes_time_varying_da_main(tmp_path: Path, monkeypatch):
+def test_main_results_includes_burger_complete_time_slice_mode(tmp_path: Path, monkeypatch):
     for key in MATRIX_ENV:
         monkeypatch.delenv(key, raising=False)
     cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
     rows, _skipped, _summary = build_matrix(cfg, tmp_path / "main_results", "main_results")
-    tv_rows = [row for row in rows if row["task_group"] == "time_varying_da_main"]
+    tv_rows = [row for row in rows if row["task_group"] == "sparse_solution_burger_time_slices"]
     assert tv_rows
-    assert {row["baseline"] for row in tv_rows} == {"senseiver", "var4d", "vivid"}
-    assert {row["pde"] for row in tv_rows} == {"nsnonbounded", "burger", "reaction_diffusion", "shallow_water"}
+    assert {row["baseline"] for row in tv_rows} == {"recfno", "senseiver", "voronoicnn"}
+    assert {row["pde"] for row in tv_rows} == {"burger"}
     assert {row["task"] for row in tv_rows} == {"sparse_solution"}
-    assert {row["sensor_mode"] for row in tv_rows} == {"time_varying"}
+    assert {row["sensor_mode"] for row in tv_rows} == {"time_slices_per_sample"}
+    assert {row["num_sensors"] for row in tv_rows} == {5}
     assert {row["load_full_trajectory"] for row in tv_rows} == {True}
 
 
-def test_main_results_includes_only_matched_pcbnn_sparse_reconstruction(tmp_path: Path, monkeypatch):
+def test_main_results_includes_scalar_pcbnn_sparse_forward_and_inverse(tmp_path: Path, monkeypatch):
     for key in MATRIX_ENV:
         monkeypatch.delenv(key, raising=False)
     cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
     rows, skipped, _summary = build_matrix(cfg, tmp_path / "main_results", "main_results")
-    pcbnn_rows = [row for row in rows if row["task_group"] == "sparse_solution_main_physics" and row["baseline"] == "pc_bnn"]
+    pcbnn_rows = [row for row in rows if row["baseline"] == "pc_bnn"]
     assert pcbnn_rows
-    assert {row["pde"] for row in pcbnn_rows} == {"shallow_water"}
-    assert {row["task"] for row in pcbnn_rows} == {"sparse_solution"}
-    skipped_pdes = {
-        row["pde"]
-        for row in skipped
-        if row["task_group"] == "sparse_solution_main_physics" and row["baseline"] == "pc_bnn"
-    }
-    assert "shallow_water" not in skipped_pdes
-    assert {"darcy", "poisson", "helmholtz"}.issubset(skipped_pdes)
+    assert {row["pde"] for row in pcbnn_rows} == {"darcy", "poisson", "helmholtz"}
+    assert {row["task"] for row in pcbnn_rows} == {"sparse_forward", "sparse_inverse"}
+    assert all(row["pde"] == "nsnonbounded" for row in skipped if row["baseline"] == "pc_bnn")

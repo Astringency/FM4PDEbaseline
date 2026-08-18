@@ -18,8 +18,9 @@ from typing import Any, Iterable, Mapping
 
 MATRIX_SCHEMA_VERSION = 2
 SUMMARY_SCHEMA_VERSION = 2
-DEFAULT_TASK_PROTOCOL_VERSION = "fm4pde-task-contract-v2"
-DEFAULT_SENSOR_PROTOCOL_VERSION = "fm4pde-sensor-contract-v2"
+DEFAULT_TASK_PROTOCOL_VERSION = "fm4pde-task-contract-v3"
+DEFAULT_SENSOR_PROTOCOL_VERSION = "fm4pde-sensor-contract-v3"
+FORMAL_TASK_PROTOCOL_VERSIONS = {"fm4pde-task-contract-v2", DEFAULT_TASK_PROTOCOL_VERSION}
 DATA_MANIFEST_REPORT_SCHEMA_VERSION = "fm4pde-data-protocol-report-v1"
 DATA_MANIFEST_CONTENT_HASH_CONTRACT = "full_tensor+sample_indexed_physical_metadata-v1"
 
@@ -608,8 +609,8 @@ def run_fingerprint(row: Mapping[str, Any]) -> str:
 
 
 def requires_full_data_manifest(task_protocol_version: Any) -> bool:
-    """Return whether a task protocol is the formal v2 paper contract."""
-    return str(task_protocol_version) == DEFAULT_TASK_PROTOCOL_VERSION
+    """Return whether a task protocol is a formal paper contract."""
+    return str(task_protocol_version) in FORMAL_TASK_PROTOCOL_VERSIONS
 
 
 def summary_validation_reasons(row: Mapping[str, Any], summary: Mapping[str, Any]) -> list[str]:

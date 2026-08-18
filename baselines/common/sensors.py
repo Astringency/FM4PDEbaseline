@@ -8,7 +8,14 @@ from typing import Any, Literal, Sequence
 import torch
 
 
-SensorMode = Literal["random", "random_per_sample", "fixed", "grid", "time_varying"]
+SensorMode = Literal[
+    "random",
+    "random_per_sample",
+    "fixed",
+    "grid",
+    "time_varying",
+    "time_slices_per_sample",
+]
 SensorBudgetMode = Literal["per_time", "total"]
 
 
@@ -79,6 +86,16 @@ def make_sensor_mask(
         mesh = torch.meshgrid(*indices, indexing="ij")
         flat = torch.stack([m.reshape(-1) for m in mesh], dim=-1)[:num]
         base[tuple(flat[:, d] for d in range(flat.shape[1]))] = 1.0
+    elif mode == "time_slices_per_sample":
+        if time_dim is None:
+            raise ValueError("time_slices_per_sample requires an explicit time_dim")
+        if time_dim < 0 or time_dim >= len(obs_shape):
+            raise ValueError(f"time_dim={time_dim} incompatible with observation shape {obs_shape}")
+        selected = torch.randperm(obs_shape[time_dim], generator=generator)[: min(num, obs_shape[time_dim])]
+        for time_index in selected.tolist():
+            sl = [slice(None)] * len(obs_shape)
+            sl[time_dim] = int(time_index)
+            base[tuple(sl)] = 1.0
     elif mode == "time_varying":
         if time_dim is None:
             time_dim = 0
@@ -184,7 +201,7 @@ def build_observation_tensors(
 ) -> dict[str, Any]:
     if time_dim is None and target_fields.ndim == 5:
         time_dim = 0
-    if mode == "random_per_sample":
+    if mode in {"random_per_sample", "time_slices_per_sample"}:
         if sample_ids is None:
             sample_ids = list(range(int(target_fields.shape[0])))
         if len(sample_ids) != int(target_fields.shape[0]):
@@ -216,7 +233,7 @@ def build_observation_tensors(
         ).to(target_fields.device)
         masked_grid = target_fields * mask.unsqueeze(0)
     obs_values, obs_coords = extract_observations(target_fields, mask)
-    if mode == "random_per_sample" and noise_level:
+    if mode in {"random_per_sample", "time_slices_per_sample"} and noise_level:
         assert sample_ids is not None
         obs_values = torch.cat(
             [

@@ -214,7 +214,11 @@ def _probe_validation_source(
             load_full_trajectory=load_full_trajectory,
             strict_size=False,
         )
-        return "independent_val", None, train_size
+        if train_size <= val_size:
+            raise ValueError(
+                f"{pde}: cannot include val_size={val_size} inside train_size={train_size}"
+            )
+        return "independent_val", None, train_size - val_size
     except FileNotFoundError:
         if train_size <= val_size:
             raise ValueError(

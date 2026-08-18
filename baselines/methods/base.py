@@ -253,6 +253,66 @@ def _default_alignment_level(effective_mode: str) -> str:
     return "local"
 
 
+class LossPlateauStopper:
+    """Shared convergence rule for per-instance optimization baselines."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.enabled = bool(config.get("early_stopping", False))
+        self.patience = max(1, int(config.get("early_stopping_patience", 20)))
+        self.min_delta = float(config.get("early_stopping_min_delta", 1e-4))
+        self.min_steps = max(1, int(config.get("min_optimization_steps", 1)))
+        self.best: float | None = None
+        self.no_improve = 0
+        self.completed_steps = 0
+        self.early_stopped = False
+
+    def update(self, loss: torch.Tensor | float) -> bool:
+        value = float(loss.detach().cpu()) if isinstance(loss, torch.Tensor) else float(loss)
+        self.completed_steps += 1
+        if self.best is None or value < self.best - self.min_delta:
+            self.best = value
+            self.no_improve = 0
+        else:
+            self.no_improve += 1
+        self.early_stopped = (
+            self.enabled
+            and self.completed_steps >= self.min_steps
+            and self.no_improve >= self.patience
+        )
+        return self.early_stopped
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "completed_steps": int(self.completed_steps),
+            "early_stopped": bool(self.early_stopped),
+            "best_loss": self.best,
+            "min_delta": self.min_delta,
+            "patience": self.patience,
+        }
+
+
+def run_per_instance_optimizer(optimizer, closure, steps: int, config: dict[str, Any]) -> dict[str, Any]:
+    stopper = LossPlateauStopper(config)
+    if isinstance(optimizer, torch.optim.LBFGS):
+        loss = optimizer.step(closure)
+        stopper.update(loss)
+        return stopper.status()
+    for _ in range(max(int(steps), 0)):
+        loss = closure()
+        optimizer.step()
+        if stopper.update(loss):
+            break
+    return stopper.status()
+
+
+def record_optimization_status(batch: PDEBatch, statuses: list[dict[str, Any]]) -> None:
+    if not statuses:
+        return
+    batch.metadata["optimization_steps_completed"] = int(sum(int(s["completed_steps"]) for s in statuses))
+    batch.metadata["optimization_early_stopped"] = bool(all(bool(s["early_stopped"]) for s in statuses))
+    batch.metadata["optimization_status_per_sample"] = statuses
+
+
 def snapshot_state_dict(model: nn.Module) -> OrderedDict[str, Any]:
     """Take a CPU snapshot of a possibly non-standard state_dict."""
     snapshot: OrderedDict[str, Any] = OrderedDict()

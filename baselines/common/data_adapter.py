@@ -195,6 +195,7 @@ def _deferred_sensor_layout_ids(
     seed: int,
     split: str,
     sensor_budget_mode: str,
+    sensor_mode: str = "random_per_sample",
 ) -> list[str]:
     """Record deterministic epoch-zero layout identities without materializing masks."""
     shape = tuple(int(size) for size in observation_source.shape[1:])
@@ -208,6 +209,7 @@ def _deferred_sensor_layout_ids(
             sample_id=sample_id,
             epoch=0,
             sensor_budget_mode=sensor_budget_mode,
+            sensor_mode=sensor_mode,
         )
         for sample_id in sample_ids
     ]
@@ -222,10 +224,11 @@ def _deferred_sensor_layout_id(
     sample_id: str | int,
     epoch: int,
     sensor_budget_mode: str,
+    sensor_mode: str = "random_per_sample",
 ) -> str:
     effective_epoch = int(epoch) if str(split).lower() == "train" else 0
     payload = (
-        f"fm4pde-sensor-contract-v2|random_per_sample|{int(seed)}|{str(split).lower()}|"
+        f"fm4pde-sensor-contract-v3|{sensor_mode}|{int(seed)}|{str(split).lower()}|"
         f"{sample_id}|{effective_epoch}|{shape}|{int(num_sensors)}|{sensor_budget_mode}"
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
@@ -405,6 +408,28 @@ class PDEDataRegistry:
                 target_fields = trajectory_target
                 target_names = trajectory_names
         original_input_fields = input_fields
+        joint_static_or_terminal = (
+            task in {"sparse_solution", "sparse_reconstruction"}
+            and spec.name in {"poisson", "helmholtz", "darcy", "nsnonbounded"}
+            and input_fields.ndim == target_fields.ndim
+        )
+        if joint_static_or_terminal:
+            if tuple(input_fields.shape[2:]) != tuple(target_fields.shape[2:]):
+                raise ValueError(
+                    f"joint sparse reconstruction requires matching grids, got input={tuple(input_fields.shape)} "
+                    f"and solution={tuple(target_fields.shape)} for {spec.name}"
+                )
+            input_channels = int(input_fields.shape[1])
+            target_fields = torch.cat([input_fields, target_fields], dim=1)
+            target_names = [*input_names, *target_names]
+            metadata["joint_reconstruction"] = True
+            metadata["joint_input_channels"] = input_channels
+            metadata["joint_solution_channels"] = int(target_fields.shape[1] - input_channels)
+        elif task in {"sparse_solution", "sparse_reconstruction"} and spec.name == "burger":
+            # Burgers' T x X reconstruction already contains a=u(t=0).
+            metadata["joint_reconstruction"] = True
+            metadata["joint_input_channels"] = 1
+            metadata["joint_solution_channels"] = 1
         metadata["original_input_fields"] = original_input_fields
         metadata["background_fields"] = _background_fields_for_task(full, spec, metadata, original_input_fields)
         mask = obs_values = obs_coords = None
@@ -430,10 +455,12 @@ class PDEDataRegistry:
                 metadata["observation_source_fields"] = observation_source
                 metadata["observation_source_channel_names"] = observation_names
             has_time_axis = observation_source.ndim == 5 or (spec.name == "burger" and observation_source.ndim == 4)
-            time_varying_valid = not (requested_sensor_mode == "time_varying") or has_time_axis
-            if requested_sensor_mode == "time_varying" and not time_varying_valid:
+            temporal_sensor_mode = requested_sensor_mode in {"time_varying", "time_slices_per_sample"}
+            time_varying_valid = not temporal_sensor_mode or has_time_axis
+            if temporal_sensor_mode and not time_varying_valid:
                 message = (
-                    "sensor_mode='time_varying' requires task observation fields shaped [B,C,T,H,W] or Burgers [B,C,T,X]; "
+                    f"sensor_mode={requested_sensor_mode!r} requires task observation fields shaped "
+                    "[B,C,T,H,W] or Burgers [B,C,T,X]; "
                     f"got {tuple(observation_source.shape)} for {spec.name}/{task}."
                 )
                 if experiment_mode == "paper":
@@ -442,7 +469,7 @@ class PDEDataRegistry:
                 effective_sensor_mode = "fixed"
             sensor_count = int(num_sensors or 500)
             split_name = str(canonical.get("split", metadata.get("split", "")))
-            deferred_dynamic_sensors = effective_sensor_mode == "random_per_sample" and _should_defer_dynamic_sensors(
+            deferred_dynamic_sensors = effective_sensor_mode in {"random_per_sample", "time_slices_per_sample"} and _should_defer_dynamic_sensors(
                 observation_source,
                 experiment_mode=experiment_mode,
             )
@@ -459,7 +486,16 @@ class PDEDataRegistry:
                     seed=seed,
                     split=split_name,
                     sensor_budget_mode=sensor_budget_mode,
+                    sensor_mode=effective_sensor_mode,
                 )
+                if effective_sensor_mode == "time_slices_per_sample":
+                    time_count = int(observation_source.shape[2])
+                    spatial_count = int(np.prod(observation_source.shape[3:]))
+                    deferred_observation_total = min(sensor_count, time_count) * spatial_count
+                    deferred_sensors_per_time: int | list[int] = []
+                else:
+                    deferred_observation_total = min(sensor_count, int(np.prod(observation_source.shape[2:])))
+                    deferred_sensors_per_time = deferred_observation_total
                 metadata.update(
                     {
                         "requested_sensor_mode": requested_sensor_mode,
@@ -468,8 +504,8 @@ class PDEDataRegistry:
                         "time_varying_sensor_valid": bool(time_varying_valid),
                         "num_sensors": sensor_count,
                         "sensor_budget_mode": str(sensor_budget_mode),
-                        "num_observations_total": min(sensor_count, int(np.prod(observation_source.shape[2:]))),
-                        "num_sensors_per_time": min(sensor_count, int(np.prod(observation_source.shape[2:]))),
+                        "num_observations_total": deferred_observation_total,
+                        "num_sensors_per_time": deferred_sensors_per_time,
                         "noise_level": float(noise_level),
                         "mask_id": _aggregate_layout_id(mask_ids),
                         "mask_ids": mask_ids,
@@ -812,8 +848,8 @@ class PDEDataRegistry:
         if full.ndim == 5:
             if name == "nsnonbounded":
                 inp = full[:, :, 0]
-                target = full[:, :, 1:].reshape(full.shape[0], -1, full.shape[-2], full.shape[-1])
-                target_names = [f"w_t{i}" for i in range(1, full.shape[2])]
+                target = full[:, :, -1]
+                target_names = ["w_T"]
             elif name in {"reaction_diffusion", "shallow_water"}:
                 input_idx = int(metadata.get("input_time_index", 0))
                 inp = full[:, :, input_idx]
@@ -954,7 +990,7 @@ class PDEBatchDataset(Dataset):
         # the first epoch.
         self._epoch_state = torch.zeros((), dtype=torch.int64).share_memory_()
         self._dynamic_observation_source: torch.Tensor | None = None
-        if batch.metadata.get("effective_sensor_mode") == "random_per_sample":
+        if batch.metadata.get("effective_sensor_mode") in {"random_per_sample", "time_slices_per_sample"}:
             if batch.task in {"sparse_inverse", "sparse_forward"}:
                 source = batch.metadata.get("observation_source_fields")
                 if not isinstance(source, torch.Tensor):
@@ -1015,6 +1051,7 @@ class PDEBatchDataset(Dataset):
                 sample_id=sample_id,
                 epoch=self.epoch,
                 sensor_budget_mode=str(item.metadata.get("sensor_budget_mode", "per_time")),
+                sensor_mode=mode,
             )
         item.mask = obs["mask"]
         item.obs_values = obs["obs_values"]

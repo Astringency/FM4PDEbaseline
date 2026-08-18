@@ -22,6 +22,11 @@ def test_static_sparse_inverse_physics_baselines_supported():
     for pde in ("poisson", "darcy", "helmholtz", "steady_heat_conduction"):
         assert resolve_capability("pinn_sparse", pde, "sparse_inverse", "random").implementation_required == "canonical_math"
         assert resolve_capability("pde_opt", pde, "sparse_inverse", "random").support_status == "native"
+        assert resolve_capability("pc_bnn", pde, "sparse_inverse", "random").support_status == "adapted"
+        assert resolve_capability("pc_bnn", pde, "sparse_forward", "random").support_status == "adapted"
+
+    assert resolve_capability("pc_bnn", "nsnonbounded", "sparse_inverse", "random").support_status == "unsupported"
+    assert resolve_capability("pc_bnn", "nsnonbounded", "sparse_forward", "random").support_status == "unsupported"
 
 
 def test_endpoint_da_is_surrogate_not_main():

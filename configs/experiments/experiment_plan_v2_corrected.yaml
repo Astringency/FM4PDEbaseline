@@ -3,8 +3,8 @@ experiment_kind: main
 comparison_track: unified_adapted
 main_table_only: true
 config: baselines/configs/paper.yaml
-task_protocol_version: fm4pde-task-contract-v2
-sensor_protocol_version: fm4pde-sensor-contract-v2
+task_protocol_version: fm4pde-task-contract-v3
+sensor_protocol_version: fm4pde-sensor-contract-v3
 # This is a new namespace. The historical experiment_plan_v2 config and
 # outputs remain immutable audit evidence and must not be overwritten.
 pdes:
@@ -29,17 +29,20 @@ task_groups:
   - full_inverse_main
   - sparse_inverse_main
   - sparse_solution_main_amortized
+  - sparse_solution_burger_time_slices
   - sparse_forward_main_amortized
   - sparse_forward_main_physics
 task_group_overrides:
   full_forward_main:
     task: forward
+    pdes: [poisson, helmholtz, darcy, nsnonbounded]
     baselines: [fno, deeponet, ifno]
     num_sensors: 0
     sensor_mode: none
     noise_level: 0.0
   full_inverse_main:
     task: inverse
+    pdes: [poisson, helmholtz, darcy, nsnonbounded]
     baselines: [ifno]
     num_sensors: 0
     sensor_mode: none
@@ -49,7 +52,7 @@ task_group_overrides:
     # Burger sparse inverse is intentionally absent. Burger full inverse is
     # the explicit u(T) -> u(0) contract above.
     pdes: [poisson, helmholtz, darcy, nsnonbounded]
-    baselines: [pinn_sparse, pde_opt, recfno, senseiver, voronoicnn]
+    baselines: [pinn_sparse, pde_opt, pc_bnn, recfno, senseiver, voronoicnn]
     num_sensors: 500
     sensor_mode: random_per_sample
     noise_level: 0.0
@@ -60,6 +63,15 @@ task_group_overrides:
     sensor_mode: random_per_sample
     # For Burger this is 500 observations over the complete T x X trajectory,
     # not 500 observations at every time step.
+    sensor_budget_mode: total
+    noise_level: 0.0
+    load_full_trajectory: true
+  sparse_solution_burger_time_slices:
+    task: sparse_solution
+    pdes: [burger]
+    baselines: [recfno, senseiver, voronoicnn]
+    num_sensors: 5
+    sensor_mode: time_slices_per_sample
     sensor_budget_mode: total
     noise_level: 0.0
     load_full_trajectory: true
@@ -76,7 +88,7 @@ task_group_overrides:
   sparse_forward_main_physics:
     task: sparse_forward
     pdes: [poisson, helmholtz, darcy, nsnonbounded]
-    baselines: [pinn_sparse, pde_opt]
+    baselines: [pinn_sparse, pde_opt, pc_bnn]
     num_sensors: 500
     sensor_mode: random_per_sample
     noise_level: 0.0
