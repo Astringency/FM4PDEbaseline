@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -77,8 +78,18 @@ def test_aggregate_script_finds_results_files(tmp_path: Path):
         "residual_mode_counts": "{}",
     }
     (result_dir / "results_summary.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
-    env = {**os.environ, "OUT_ROOT": str(out_root)}
-    subprocess.run(["bash", "scripts/experiments/06_aggregate_main_results.sh"], cwd=ROOT, env=env, check=True)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "baselines.aggregate_results",
+            str(result_dir),
+            "--output-dir",
+            str(out_root / "aggregate" / "main_results"),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
     assert (out_root / "aggregate" / "main_results" / "summary.csv").exists()
     all_summary = json.loads((out_root / "aggregate" / "main_results" / "summary.json").read_text(encoding="utf-8"))
     assert any(row["pde"] == "heat" and row["baseline"] == "fno" for row in all_summary)

@@ -48,7 +48,7 @@ def test_run_one_generates_paper_sparse_command_without_debug_flags(tmp_path: Pa
     index = next(i for i, row in enumerate(rows) if row["task"] == "sparse_solution")
     env = {**os.environ, "PRINT_COMMAND_ONLY": "1", "DATA_ROOT": str(tmp_path / "PDEdata")}
     result = subprocess.run(
-        ["bash", "scripts/experiments/05_run_one.sh", str(out / "matrices" / "sanity_main.jsonl"), str(index)],
+        [sys.executable, "scripts/experiments/run_one.py", str(out / "matrices" / "sanity_main.jsonl"), str(index)],
         cwd=ROOT,
         env=env,
         check=True,
@@ -88,7 +88,7 @@ def test_run_one_generates_load_full_trajectory_for_time_varying(tmp_path: Path)
     )
     env = {**os.environ, "PRINT_COMMAND_ONLY": "1", "DATA_ROOT": str(tmp_path / "PDEdata")}
     result = subprocess.run(
-        ["bash", "scripts/experiments/05_run_one.sh", str(out / "matrices" / "time_varying_sensor_ablation.jsonl"), "0"],
+        [sys.executable, "scripts/experiments/run_one.py", str(out / "matrices" / "time_varying_sensor_ablation.jsonl"), "0"],
         cwd=ROOT,
         env=env,
         check=True,
@@ -100,16 +100,16 @@ def test_run_one_generates_load_full_trajectory_for_time_varying(tmp_path: Path)
 
 
 def test_2gpu_parallel_launcher_preserves_fingerprinted_row_and_uses_existing_runner():
-    text = (ROOT / "scripts/experiments/08_run_matrix_2gpu_parallel.sh").read_text(encoding="utf-8")
+    text = (ROOT / "scripts/run_experiments.py").read_text(encoding="utf-8")
     for token in [
         "CUDA_VISIBLE_DEVICES",
-        "unset ALLOW_ROW_OVERRIDE DEVICE",
-        "05_run_one.sh",
-        "xargs",
-        "JOBS_PER_GPU",
+        'env.pop("ALLOW_ROW_OVERRIDE", None)',
+        "run_one.py",
+        "ThreadPoolExecutor",
+        "jobs-per-gpu",
     ]:
         assert token in text
-    for forbidden in ["export ALLOW_ROW_OVERRIDE=1", "NUM_WORKERS_PER_RUN", "export NUM_WORKERS="]:
+    for forbidden in ["ALLOW_ROW_OVERRIDE=1", "NUM_WORKERS_PER_RUN"]:
         assert forbidden not in text
 
 

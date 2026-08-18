@@ -18,12 +18,11 @@ def _rows(name: str, tmp_path: Path, monkeypatch) -> list[dict]:
 
 
 def test_00_build_matrices_does_not_default_to_full_all():
-    text = (ROOT / "scripts" / "experiments" / "00_build_matrices.sh").read_text(encoding="utf-8")
+    text = (ROOT / "scripts" / "build_experiment_matrix.py").read_text(encoding="utf-8")
     assert "full_all" not in text
     assert "core" not in text
     assert "time_varying)" not in text
     assert "main_results" in text
-    assert "sensor_count_ablation" in text
 
 
 def test_main_results_has_no_sparse_factor_cartesian_product(tmp_path: Path, monkeypatch):

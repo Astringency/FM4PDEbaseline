@@ -95,13 +95,8 @@ def test_aggregate_results_mean_std_ci_nan_and_residual_counts():
 
 def test_experiment_scripts_do_not_default_to_debug_data_flags():
     root = Path(__file__).resolve().parents[1]
-    paper_scripts = [
-        root / "scripts/experiments/01_run_sanity_main.sh",
-        root / "scripts/experiments/02_run_main_results_local.sh",
-        root / "scripts/experiments/04_run_ablation_local.sh",
-        root / "scripts/experiments/05_run_one.sh",
-    ]
-    forbidden = ["--prefer-test", "--synthetic-data", "--dry-run"]
+    paper_scripts = [root / "scripts/run_experiments.py"]
+    forbidden = ["--prefer-test", "--synthetic-data", "--allow-synthetic-fallback"]
     for script in paper_scripts:
         text = script.read_text(encoding="utf-8")
         for token in forbidden:

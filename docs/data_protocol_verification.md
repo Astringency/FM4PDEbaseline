@@ -49,21 +49,23 @@ therefore expects one report per config under `DATA_MANIFEST_DIR`:
 outputs/data_protocol/<config-name>/full/data_protocol_report.json
 ```
 
-After running `--full` separately for every config listed by
-`scripts/experiments/00_build_matrices.sh`, build them with:
+After running `--full` separately for each experiment config, build each matrix
+with the unified generator:
 
 ```bash
-DATA_MANIFEST_DIR=outputs/data_protocol \
-OUT_ROOT=outputs/baselines_large \
-bash scripts/experiments/00_build_matrices.sh
+python scripts/build_experiment_matrix.py \
+  --config configs/experiments/main_results.yaml \
+  --output-root outputs/baselines_large \
+  --data-manifest outputs/data_protocol/main_results/full/data_protocol_report.json
 ```
 
-For the dedicated two-GPU main-results flow, pass its exact report explicitly:
+The same exact report is used for two-GPU execution; GPU selection belongs to
+the runner rather than the matrix generator:
 
 ```bash
-DATA_MANIFEST=outputs/data_protocol/main_results/full/data_protocol_report.json \
-OUT_ROOT=outputs/main_results_verified \
-bash scripts/experiments/07_build_main_results_matrix.sh
+python scripts/run_experiments.py \
+  outputs/baselines_large/matrices/main_results.jsonl \
+  --data-root /path/to/PDEdata --gpus 0,1 --jobs-per-gpu 2
 ```
 
 The verifier mirrors the runner's validation policy: `train_size` is the total
@@ -95,7 +97,7 @@ After a full data-protocol pass, generate the corrected unified/adapted matrix
 in its own output root:
 
 ```bash
-python scripts/experiments/build_matrix.py \
+python scripts/build_experiment_matrix.py \
   --config configs/experiments/experiment_plan_v2_corrected.yaml \
   --output-root outputs/experiment_plan_v2_corrected \
   --matrix-name experiment_plan_v2_corrected \
@@ -103,19 +105,23 @@ python scripts/experiments/build_matrix.py \
   --data-manifest outputs/data_protocol/experiment_plan_v2_corrected/full/data_protocol_report.json
 ```
 
-The corrected design runs seed `[1]` once per experiment, producing 76 active rows. The
-remaining-run launcher defaults to this corrected matrix and namespace:
+The corrected design runs seed `[1]` once per experiment, producing 76 active
+rows. Inspect and run it with the unified runner:
 
 ```bash
-python scripts/run_remaining_plan_v2.py --dry-run
-python scripts/run_remaining_plan_v2.py
+python scripts/run_experiments.py \
+  outputs/experiment_plan_v2_corrected/matrices/experiment_plan_v2_corrected.jsonl \
+  --data-root /path/to/PDEdata --gpus 0,1 --dry-run
+python scripts/run_experiments.py \
+  outputs/experiment_plan_v2_corrected/matrices/experiment_plan_v2_corrected.jsonl \
+  --data-root /path/to/PDEdata --gpus 0,1
 ```
 
 It fails closed if given the historical `experiment_plan_v2` matrix or a row
 whose artifacts live in that namespace. It never moves historical artifacts;
 those remain immutable audit evidence.
 
-Run a matrix row by zero-based index with `scripts/experiments/run_one.py`.
+Select a matrix row by zero-based index with `scripts/run_experiments.py`.
 Every row is bound to the full config SHA-256, the full data-protocol report
 SHA-256, and the exact repository revision; changing code, config, or report
 requires regenerating the matrix. Formal paper runs fail before data loading if
@@ -123,9 +129,9 @@ the full-report SHA is missing. A row is complete only after its schema-v2
 `summary.json` passes the same identity checks.
 
 ```bash
-python scripts/experiments/run_one.py \
+python scripts/run_experiments.py \
   outputs/experiment_plan_v2_corrected/matrices/experiment_plan_v2_corrected.jsonl \
-  0
+  --data-root /path/to/PDEdata --indices 0
 ```
 
 The `official_native` track is deliberately separate and fail-closed. At this
@@ -134,7 +140,7 @@ and evaluation recipe, so this command produces skipped evidence rather than
 mislabeling component reuse as an official reproduction:
 
 ```bash
-python scripts/experiments/build_matrix.py \
+python scripts/build_experiment_matrix.py \
   --config configs/experiments/experiment_plan_v2_corrected.yaml \
   --output-root outputs/experiment_plan_v2_official_native \
   --matrix-name experiment_plan_v2_official_native \
@@ -147,7 +153,7 @@ eval-only-mismatched, or mixed-revision rows block publication and are written
 to a quarantine workbook instead:
 
 ```bash
-python scripts/export_results_xlsx.py \
-  --matrix outputs/experiment_plan_v2_corrected/matrices/experiment_plan_v2_corrected.jsonl \
-  --output outputs/experiment_plan_v2_corrected_summary.xlsx
+python scripts/collect_results.py \
+  outputs/experiment_plan_v2_corrected/matrices/experiment_plan_v2_corrected.jsonl \
+  --output-dir outputs/experiment_plan_v2_corrected/aggregate
 ```

@@ -1,213 +1,171 @@
 # FM4PDE Baseline
 
-This repository runs and audits external baseline experiments for FM4PDE. The
-active entry points are the matrix-based scripts under `scripts/experiments/`;
-older per-task shell interfaces have been removed.
-
-## Scope
-
-The framework covers:
-
-- full-grid supervised operator learning
-- sparse sensor field reconstruction
-- static sparse inverse problems
-- time-varying data assimilation
-
-FM4PDE internal ablations and DiffusionPDE comparisons are outside this external
-baseline matrix.
-
-The formal `main_results` matrix follows `docs/baseline_exp.md`: full forward
-and inverse use terminal-state contracts on Poisson, Helmholtz, Darcy, and
-Navier--Stokes; sparse reconstruction jointly observes/reconstructs input and
-solution fields; and Burgers additionally has a five-complete-time-slice mode.
-The current formal protocol identifiers are `fm4pde-task-contract-v3` and
-`fm4pde-sensor-contract-v3`; older checkpoints are not compatible.
+This repository implements the external baseline experiments defined in
+`docs/baseline_exp.md`. The formal `main_results` design currently expands to
+76 runnable experiments and 6 explicitly skipped unsupported combinations.
 
 ## Layout
 
 ```text
-baselines/                  baseline framework code
-  capabilities.py           baseline/task/PDE capability registry
-  experiment_matrix.py      capability checks and skip rows
-  run.py                    single-run baseline runner
-  aggregate_results.py      result aggregation
-  common/                   data, sensors, physics residuals, metrics
-  methods/                  baseline wrappers
-  configs/                  runner method configs
-
-configs/experiments/        matrix configs for main and ablation experiments
-scripts/experiments/        matrix build, run, status, retry, aggregation scripts
-tests/                      pytest coverage
-offical/                    vendored official source snapshots
-outputs/                    generated outputs and checked-in fixtures
+baselines/                         training, evaluation, metrics, artifacts
+configs/experiments/               declarative main/ablation designs
+scripts/build_experiment_matrix.py public matrix generator
+scripts/run_experiments.py         public local runner, resume, status, retry
+scripts/collect_results.py         public CSV/JSON/XLSX/PDF result collector
+scripts/experiments/               internal matrix/provenance/single-row modules
+scripts/verify_data_protocol.py    data audit required before formal runs
+tests/                             pytest coverage
+outputs/                           generated outputs and audit fixtures
 ```
 
-Do not edit `offical/` unless intentionally updating the vendored snapshots.
+The numbered shell launchers were removed. Use only the three public Python
+entry points above for experiments. `offical/` contains vendored source
+snapshots and must not be edited unless those snapshots are intentionally
+updated.
 
-## Active Experiment Flow
+## Run the formal 76-experiment matrix
 
-Set the data root and output root first:
+Set paths once:
 
 ```bash
 export DATA_ROOT=/path/to/PDEdata
-export OUT_ROOT=outputs/baselines_large
-export DEVICE=cuda
-export DATA_MANIFEST_DIR=outputs/data_protocol
+export OUT_ROOT=outputs/main_results
+export DATA_REPORT="$OUT_ROOT/data_protocol/full/data_protocol_report.json"
 ```
 
-Formal matrices are built only from a complete, passing data report that is
-bound to the exact experiment YAML. Verify every design first; editing a YAML
-after verification invalidates its report and requires another full pass:
+1. Verify the exact data/config contract. A changed YAML invalidates the old
+report, so rerun this command after editing the experiment design.
 
 ```bash
-for matrix in \
-  sanity_main main_results sensor_count_ablation noise_ablation \
-  sensor_mode_ablation time_varying_sensor_ablation \
-  runtime_budget_ablation train_size_ablation
-do
-  python scripts/verify_data_protocol.py \
-    --config "configs/experiments/${matrix}.yaml" \
-    --data-root "$DATA_ROOT" \
-    --output-dir "${DATA_MANIFEST_DIR}/${matrix}/full" \
-    --full
-done
+python scripts/verify_data_protocol.py \
+  --config configs/experiments/main_results.yaml \
+  --data-root "$DATA_ROOT" \
+  --output-dir "$OUT_ROOT/data_protocol/full" \
+  --full
 ```
 
-The reports land at
-`$DATA_MANIFEST_DIR/<matrix>/full/data_protocol_report.json`. Build the matrices
-only after every report above passes:
+2. Generate the matrix. `main_results.yaml` and matrix name `main_results` are
+the defaults.
 
 ```bash
-bash scripts/experiments/00_build_matrices.sh
+python scripts/build_experiment_matrix.py \
+  --output-root "$OUT_ROOT" \
+  --data-manifest "$DATA_REPORT"
 ```
 
-The historical `experiment_plan_v2` matrix and its outputs are audit evidence;
-do not rebuild, rerun, move, or overwrite them. Corrected protocol-v2 work uses
-the separate `experiment_plan_v2_corrected` namespace.
+The primary file is `$OUT_ROOT/matrices/main_results.jsonl`; TSV, summary JSON,
+and skipped-combination JSONL files are created beside it.
 
-Run the small sanity matrix:
+3. Inspect the plan and status without launching work:
 
 ```bash
-N_JOBS=1 bash scripts/experiments/01_run_sanity_main.sh
+python scripts/run_experiments.py \
+  "$OUT_ROOT/matrices/main_results.jsonl" \
+  --data-root "$DATA_ROOT" \
+  --gpus 0,1 --jobs-per-gpu 2 --dry-run
+
+python scripts/run_experiments.py \
+  "$OUT_ROOT/matrices/main_results.jsonl" --status
 ```
 
-Run the main paper matrix:
+4. Run on two GPUs. Completed rows are skipped automatically; rerunning the
+same command resumes the matrix. Invalid partial artifacts are moved into each
+run's `quarantine/` directory before retry. Rows carrying `run.running` are
+left untouched so a second launcher cannot duplicate active work; use
+`--rerun-running` only after confirming the marker is stale.
 
 ```bash
-N_JOBS=1 bash scripts/experiments/02_run_main_results_local.sh
+python scripts/run_experiments.py \
+  "$OUT_ROOT/matrices/main_results.jsonl" \
+  --data-root "$DATA_ROOT" \
+  --gpus 0,1 --jobs-per-gpu 2
 ```
 
-Run a selected ablation:
+Useful subsets:
 
 ```bash
-ABLATION=sensor_count_ablation N_JOBS=1 bash scripts/experiments/04_run_ablation_local.sh
+# First 8 pending rows
+python scripts/run_experiments.py "$OUT_ROOT/matrices/main_results.jsonl" \
+  --data-root "$DATA_ROOT" --gpus 0,1 --first 8
+
+# Exact zero-based rows
+python scripts/run_experiments.py "$OUT_ROOT/matrices/main_results.jsonl" \
+  --data-root "$DATA_ROOT" --gpus 0,1 --indices 0,3,10-15
+
+# Retry only failed rows
+python scripts/run_experiments.py "$OUT_ROOT/matrices/main_results.jsonl" \
+  --data-root "$DATA_ROOT" --gpus 0,1 --failed-only
+
 ```
 
-Supported ablation names are:
-
-```text
-sensor_count_ablation
-noise_ablation
-sensor_mode_ablation
-time_varying_sensor_ablation
-runtime_budget_ablation
-train_size_ablation
-```
-
-Check status:
+5. Aggregate completed results. This writes publication/supplement CSV and
+JSON tables, capability/tuning tables, `results.xlsx`, and a collection report.
+Evaluation already saves every sample as a reloadable `.pt` dictionary and
+creates `samples.pdf`; `--redraw-samples` regenerates those PDFs from manifests.
 
 ```bash
-bash scripts/experiments/08_status.sh
+python scripts/collect_results.py \
+  "$OUT_ROOT/matrices/main_results.jsonl" \
+  --output-dir "$OUT_ROOT/aggregate/main_results" \
+  --latex --redraw-samples
 ```
 
-Baseline runs save reusable model checkpoints by default. Each run writes
-`<output_dir>/<run_prefix>.pt`, and records the path in `summary.json` and the
-result tables as `checkpoint_path`. Formal amortized runs require this artifact
-for provenance validation. Only non-formal smoke/debug runs may disable it:
+## Run an ablation
+
+Use the same three commands with another YAML. Supported designs are
+`sensor_count_ablation`, `noise_ablation`, `sensor_mode_ablation`,
+`time_varying_sensor_ablation`, `runtime_budget_ablation`, and
+`train_size_ablation`.
 
 ```bash
-python -m baselines.run ... --no-save-checkpoint
+NAME=noise_ablation
+REPORT="$OUT_ROOT/data_protocol/$NAME/full/data_protocol_report.json"
+
+python scripts/verify_data_protocol.py \
+  --config "configs/experiments/$NAME.yaml" --data-root "$DATA_ROOT" \
+  --output-dir "$OUT_ROOT/data_protocol/$NAME/full" --full
+
+python scripts/build_experiment_matrix.py \
+  --config "configs/experiments/$NAME.yaml" --matrix-name "$NAME" \
+  --output-root "$OUT_ROOT" --data-manifest "$REPORT"
+
+python scripts/run_experiments.py "$OUT_ROOT/matrices/$NAME.jsonl" \
+  --data-root "$DATA_ROOT" --gpus 0,1 --jobs-per-gpu 2
+
+python scripts/collect_results.py "$OUT_ROOT/matrices/$NAME.jsonl" \
+  --output-dir "$OUT_ROOT/aggregate/$NAME"
 ```
 
-Reload a saved model in Python:
+## Evaluation artifacts
+
+Each run stores a model checkpoint, `summary.json`, raw/summary result tables,
+and one tensor dictionary per test sample. Formal runs use a run-prefixed sample
+directory; its exact path is recorded in `summary.json`. The sample artifact
+contains inputs, targets, predictions, observations, masks, per-sample metrics,
+predictive standard deviations when available, and PC-BNN posterior particles
+when available.
 
 ```python
-from baselines.run import load_baseline_checkpoint
+import json
+from pathlib import Path
 
-model = load_baseline_checkpoint("outputs/.../run_id.pt", map_location="cpu")
-model.eval()
-```
-
-Every evaluation also stores one safe, reloadable tensor dictionary per test
-sample under `<output_dir>/samples/`, together with `manifest.jsonl` checksums
-and a multipage `samples.pdf`. The artifacts contain input, target, prediction,
-observations, masks, per-sample metrics, and (when available) predictive
-standard deviations and PC-BNN posterior particles. Reload or redraw them with:
-
-```python
 from baselines.common.sample_artifacts import load_evaluation_sample
 
-sample = load_evaluation_sample("outputs/.../samples/sample_000000.pt")
+summary = json.loads(Path("outputs/.../summary.json").read_text())
+manifest = Path(summary["sample_manifest_path"])
+first_record = json.loads(manifest.read_text().splitlines()[0])
+sample = load_evaluation_sample(first_record["artifact_path"])
 ```
 
-```bash
-python scripts/plot_sample_artifacts.py outputs/.../samples/manifest.jsonl \
-  --output outputs/.../samples_reloaded.pdf
-```
-
-Retry failed runs:
-
-```bash
-RETRY_LIMIT=3 bash scripts/experiments/09_retry_failed.sh
-```
-
-Aggregate results:
-
-```bash
-bash scripts/experiments/06_aggregate_main_results.sh
-bash scripts/experiments/07_aggregate_ablations.sh
-```
-
-## Slurm
-
-Submit the main matrix:
-
-```bash
-DATA_ROOT=/path/to/PDEdata \
-OUT_ROOT=outputs/baselines_large \
-PARTITION=gpu \
-GRES=gpu:1 \
-MAX_ARRAY_CONCURRENT=16 \
-bash scripts/experiments/03_submit_main_results_slurm.sh
-```
-
-Submit an ablation matrix:
-
-```bash
-ABLATION=noise_ablation \
-DATA_ROOT=/path/to/PDEdata \
-OUT_ROOT=outputs/baselines_large \
-PARTITION=gpu \
-GRES=gpu:1 \
-MAX_ARRAY_CONCURRENT=16 \
-bash scripts/experiments/05_submit_ablation_slurm.sh
-```
-
-## Testing
+## Tests
 
 ```bash
 python -m py_compile \
-  baselines/run.py baselines/aggregate_results.py baselines/experiment_matrix.py \
-  baselines/capabilities.py baselines/common/*.py baselines/methods/*.py \
-  scripts/experiments/*.py tests/test_*.py
-
-bash -n scripts/experiments/*.sh
+  scripts/build_experiment_matrix.py scripts/run_experiments.py \
+  scripts/collect_results.py scripts/experiments/*.py \
+  baselines/run.py baselines/aggregate_results.py
 python -m pytest -q
 ```
 
-## Principles
-
-- Do not present local compact implementations as official baselines.
-- Do not mix adapted/surrogate results into the main paper table.
-- Unsupported combinations must skip with an explicit reason.
-- `pde_opt` is a canonical mathematical baseline, not an official-code claim.
+The historical `experiment_plan_v2` matrix and outputs are immutable audit
+evidence. All mutating entry points reject that namespace.

@@ -22,7 +22,7 @@ from scripts.export_results_xlsx import (
     export_results,
     require_single_cohort,
 )
-from scripts.run_remaining_plan_v2 import completion_reasons, is_complete, quarantine_invalid_output
+from scripts.run_experiments import completion_reasons, is_complete, quarantine_invalid_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
