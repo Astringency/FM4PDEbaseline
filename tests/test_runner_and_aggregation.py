@@ -47,7 +47,7 @@ def test_runner_synthetic_full_test_loader_outputs_raw_and_summary(tmp_path: Pat
     sample_pdf = out / "samples.pdf"
     assert len(list(sample_dir.glob("sample_*.pt"))) == 4
     assert len(sample_manifest.read_text(encoding="utf-8").splitlines()) == 4
-    assert sample_pdf.read_bytes().startswith(b"%PDF")
+    assert not sample_pdf.exists()
     raw_rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
     assert len(raw_rows) == 2
     assert [row["batch_index"] for row in raw_rows] == [0, 1]
@@ -59,7 +59,7 @@ def test_runner_synthetic_full_test_loader_outputs_raw_and_summary(tmp_path: Pat
     assert "residual_mode_counts" in summary
     assert summary["sample_artifact_count"] == 4
     assert summary["sample_manifest_path"] == str(sample_manifest)
-    assert summary["sample_pdf_path"] == str(sample_pdf)
+    assert summary["sample_pdf_path"] == ""
 
 
 def test_aggregate_results_mean_std_ci_nan_and_residual_counts():

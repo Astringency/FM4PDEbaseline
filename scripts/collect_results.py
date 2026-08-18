@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Aggregate a matrix into publication tables, a workbook, and optional PDFs."""
+"""Aggregate a completed matrix into publication tables and a workbook."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.aggregate_results import main as aggregate_main
-from baselines.common.sample_artifacts import render_sample_manifest_pdf
 from scripts.experiments.run_one import load_matrix_rows
 from scripts.export_results_xlsx import (
     ExportValidationError,
@@ -29,7 +28,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--no-xlsx", action="store_true")
     parser.add_argument("--latex", action="store_true")
-    parser.add_argument("--redraw-samples", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -53,18 +51,6 @@ def main(argv: list[str] | None = None) -> int:
         validation_errors.append(f"missing raw results: {len(rows) - len(result_files)}")
     if not rows:
         validation_errors.append("matrix has no runnable rows")
-    sample_artifacts: list[tuple[Path, Path]] = []
-    if args.redraw_samples and not validation_errors:
-        for row in rows:
-            summary_path = Path(str(row["output_dir"])) / "summary.json"
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            manifest = Path(str(summary.get("sample_manifest_path", "")))
-            target_raw = str(summary.get("sample_pdf_path", ""))
-            if not manifest.is_file():
-                validation_errors.append(f"sample manifest missing for {row.get('run_id', '')}: {manifest}")
-                continue
-            target = Path(target_raw) if target_raw else manifest.parent.with_suffix(".pdf")
-            sample_artifacts.append((manifest, target))
     if not validation_errors:
         try:
             require_single_cohort(collection.records)
@@ -107,12 +93,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         except ExportValidationError as exc:
             report["workbook_error"] = str(exc)
-    if args.redraw_samples:
-        rendered = []
-        for manifest, target in sample_artifacts:
-            render_sample_manifest_pdf(manifest, target)
-            rendered.append(str(target))
-        report["rendered_pdfs"] = rendered
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "collection_report.json").write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))

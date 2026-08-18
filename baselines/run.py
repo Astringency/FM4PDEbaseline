@@ -213,14 +213,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--plot-sample-pdf",
         dest="plot_sample_pdf",
         action="store_true",
-        default=True,
-        help="Render evaluated samples into a multipage PDF (default: enabled).",
+        default=False,
+        help="Deprecated compatibility flag. Use scripts/plot_results.py after the run.",
     )
     parser.add_argument(
         "--no-plot-sample-pdf",
         dest="plot_sample_pdf",
         action="store_false",
-        help="Disable PDF rendering in non-paper diagnostic runs.",
+        help="Compatibility flag; experiment runs never render PDFs.",
     )
     return parser.parse_args(argv)
 
@@ -768,8 +768,12 @@ def _validate_mode(args: argparse.Namespace) -> None:
         raise ValueError("--synthetic-data is restricted to smoke/debug modes")
     if args.experiment_mode == "paper" and not bool(args.save_sample_artifacts):
         raise ValueError("paper mode requires --save-sample-artifacts")
-    if args.experiment_mode == "paper" and not bool(args.plot_sample_pdf):
-        raise ValueError("paper mode requires --plot-sample-pdf")
+    if bool(args.plot_sample_pdf):
+        warnings.warn(
+            "--plot-sample-pdf is deprecated and ignored; run scripts/plot_results.py after results are stored",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 def _resolve_physics_metric_mode(args: argparse.Namespace, cfg: dict[str, Any]) -> str:
@@ -1304,7 +1308,6 @@ def _evaluate_full_test_loader(
                 "seed": int(args.seed),
                 "sensor_seed": sensor_seed,
             },
-            pdf_path=(out_dir / f"{artifact_name}.pdf") if bool(getattr(args, "plot_sample_pdf", True)) else None,
         )
     provenance_fields = {
         "matrix_schema_version": int(getattr(args, "matrix_schema_version", MATRIX_SCHEMA_VERSION)),

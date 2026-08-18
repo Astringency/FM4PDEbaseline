@@ -10,13 +10,39 @@ design contains 76 runnable experiments and 6 explicitly skipped combinations.
 |---|---|
 | `scripts/build_experiment_matrix.py` | Generate a matrix from an experiment YAML |
 | `scripts/run_experiments.py` | Run, resume, inspect, or retry a matrix |
-| `scripts/collect_results.py` | Produce CSV, JSON, XLSX, LaTeX, and PDF artifacts |
+| `scripts/collect_results.py` | Produce CSV, JSON, XLSX, and LaTeX artifacts |
+| `scripts/plot_results.py` | Render one PDF per stored evaluation sample |
+| `scripts/run_baseline.sh` | Run the complete resumable workflow |
 
 Reusable implementation modules remain under `scripts/experiments/`. The
 historical `experiment_plan_v2` namespace is immutable audit evidence and is
 rejected by every mutating entry point.
 
 ## Quick start
+
+For the simplest setup, edit the configuration block at the top of
+`scripts/run_baseline.sh`, then run:
+
+```bash
+bash scripts/run_baseline.sh
+```
+
+The script verifies data, builds the matrix, resumes unfinished experiments,
+collects results, renders PDFs in a separate process, and prints status when it
+finishes or is interrupted. It uses an output lock and will not restart a
+`run.running` row whose process is alive.
+
+The same values can be overridden without editing the file:
+
+```bash
+DATA_ROOT=/path/to/PDEdata OUT_ROOT=outputs/main_results \
+GPUS=0,1 JOBS_PER_GPU=2 PLOT_LIMIT=100 bash scripts/run_baseline.sh
+```
+
+`PLOT_LIMIT` is applied per experiment. It defaults to `100`; set it to `0`
+to render every evaluated sample, or set `PLOT_SAMPLES=0` to skip plotting.
+
+The commands below show the equivalent manual workflow.
 
 Set the data and output paths:
 
@@ -83,9 +109,9 @@ python scripts/run_experiments.py "$OUT_ROOT/matrices/main_results.jsonl" \
   --data-root "$DATA_ROOT" --gpus 0,1 --failed-only
 ```
 
-Use `--rerun-running` only after confirming that all `run.running` markers are
-stale. Existing invalid artifacts are moved into the run's `quarantine/`
-directory before relaunch.
+Use `--rerun-running` to recover stale markers. The runner checks the recorded
+PID and process start time, leaves live work untouched, and moves invalid stale
+artifacts into the run's `quarantine/` directory before relaunch.
 
 ### 3. Collect the results
 
@@ -93,12 +119,17 @@ directory before relaunch.
 python scripts/collect_results.py \
   "$OUT_ROOT/matrices/main_results.jsonl" \
   --output-dir "$OUT_ROOT/aggregate/main_results" \
-  --latex \
-  --redraw-samples
+  --latex
+
+python scripts/plot_results.py \
+  --matrix "$OUT_ROOT/matrices/main_results.jsonl" \
+  --max-samples 100
 ```
 
 Collection fails before writing publication tables if any run is missing,
-invalid, from another provenance cohort, or lacks a requested sample manifest.
+invalid, or from another provenance cohort. Plotting reads only stored sample
+manifests, writes one PDF per sample, skips complete PDFs, and can be rerun
+without retraining.
 
 ## Ablations
 
@@ -132,13 +163,15 @@ python scripts/run_experiments.py "$OUT_ROOT/matrices/$NAME.jsonl" \
 
 python scripts/collect_results.py "$OUT_ROOT/matrices/$NAME.jsonl" \
   --output-dir "$OUT_ROOT/aggregate/$NAME"
+
+python scripts/plot_results.py --matrix "$OUT_ROOT/matrices/$NAME.jsonl"
 ```
 
 ## Outputs
 
 Each run stores its checkpoint, status markers, raw metrics, `summary.json`,
-per-sample `.pt` artifacts, a checksum manifest, and a multipage PDF. Exact
-artifact paths are recorded in `summary.json`.
+per-sample `.pt` artifacts, and a checksum manifest. PDF rendering is a separate
+step, so plotting failures never invalidate a completed experiment.
 
 Load the first saved evaluation sample:
 

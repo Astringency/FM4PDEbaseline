@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 from pathlib import Path
@@ -28,11 +29,9 @@ class EvaluationArtifactWriter:
         artifact_dir: str | Path,
         *,
         run_metadata: Mapping[str, Any],
-        pdf_path: str | Path | None = None,
     ) -> None:
         self.artifact_dir = Path(artifact_dir)
         self.manifest_path = self.artifact_dir / "manifest.jsonl"
-        self.pdf_path = Path(pdf_path) if pdf_path is not None else None
         self.run_metadata = _safe_mapping(run_metadata)
         self._sample_count = 0
         self._finalized = False
@@ -49,8 +48,6 @@ class EvaluationArtifactWriter:
     def finalize(self) -> None:
         if self._finalized:
             return
-        if self.pdf_path is not None:
-            render_sample_manifest_pdf(self.manifest_path, self.pdf_path)
         self._finalized = True
 
     @property
@@ -60,7 +57,7 @@ class EvaluationArtifactWriter:
             "sample_artifact_schema_version": SAMPLE_ARTIFACT_SCHEMA_VERSION,
             "sample_artifact_dir": str(self.artifact_dir),
             "sample_manifest_path": str(self.manifest_path),
-            "sample_pdf_path": str(self.pdf_path) if self.pdf_path is not None else "",
+            "sample_pdf_path": "",
         }
 
     def write_batch(
@@ -131,23 +128,25 @@ def load_evaluation_sample(path: str | Path, *, expected_sha256: str | None = No
     return payload
 
 
-def render_sample_manifest_pdf(manifest_path: str | Path, output_path: str | Path) -> Path:
-    manifest = Path(manifest_path)
+def render_evaluation_sample_pdf(
+    artifact_path: str | Path,
+    output_path: str | Path,
+    *,
+    expected_sha256: str | None = None,
+) -> Path:
+    artifact = Path(artifact_path)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
     with PdfPages(output) as pdf:
         info = pdf.infodict()
-        info["Title"] = "FM4PDE evaluation samples (reloaded)"
-        for row in rows:
-            artifact_path = Path(row["artifact_path"])
-            if _sha256(artifact_path) != str(row.get("artifact_sha256", "")):
-                raise ValueError(f"Evaluation sample checksum mismatch: {artifact_path}")
-            figure = _sample_figure(
-                load_evaluation_sample(artifact_path, expected_sha256=str(row.get("artifact_sha256", "")))
-            )
-            pdf.savefig(figure, bbox_inches="tight")
-            figure.clear()
+        info["Title"] = f"FM4PDE evaluation sample: {artifact.name}"
+        figure = _sample_figure(
+            load_evaluation_sample(artifact, expected_sha256=expected_sha256)
+        )
+        pdf.savefig(figure, bbox_inches="tight")
+        figure.clear()
+        del figure
+        gc.collect()
     return output
 
 

@@ -10,7 +10,7 @@ from baselines.common.data_adapter import build_default_registry
 from baselines.common.sample_artifacts import (
     EvaluationArtifactWriter,
     load_evaluation_sample,
-    render_sample_manifest_pdf,
+    render_evaluation_sample_pdf,
 )
 
 
@@ -32,7 +32,6 @@ def test_evaluation_artifacts_round_trip_every_sample_and_render_pdf(tmp_path: P
     writer = EvaluationArtifactWriter(
         tmp_path / "samples",
         run_metadata={"run_id": "run-1", "baseline": "pc_bnn", "seed": 1},
-        pdf_path=tmp_path / "samples.pdf",
     )
     with writer:
         records = writer.write_batch(
@@ -47,7 +46,7 @@ def test_evaluation_artifacts_round_trip_every_sample_and_render_pdf(tmp_path: P
     assert len(records) == 2
     assert writer.summary["sample_artifact_count"] == 2
     assert writer.manifest_path.exists()
-    assert (tmp_path / "samples.pdf").read_bytes().startswith(b"%PDF")
+    assert not (tmp_path / "samples.pdf").exists()
 
     manifest = [json.loads(line) for line in writer.manifest_path.read_text(encoding="utf-8").splitlines()]
     assert [row["sample_ordinal"] for row in manifest] == [0, 1]
@@ -59,7 +58,11 @@ def test_evaluation_artifacts_round_trip_every_sample_and_render_pdf(tmp_path: P
     assert loaded["posterior_samples"].shape == (2, *prediction.shape[1:])
     assert loaded["metrics"]["relative_l2_solution"] == 0.1
 
-    regenerated = render_sample_manifest_pdf(writer.manifest_path, tmp_path / "regenerated.pdf")
+    regenerated = render_evaluation_sample_pdf(
+        manifest[0]["artifact_path"],
+        tmp_path / "sample_000000.pdf",
+        expected_sha256=manifest[0]["artifact_sha256"],
+    )
     assert regenerated.read_bytes().startswith(b"%PDF")
 
     artifact_path = Path(manifest[0]["artifact_path"])

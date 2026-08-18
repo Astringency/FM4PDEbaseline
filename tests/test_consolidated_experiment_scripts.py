@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
-from scripts import build_experiment_matrix, collect_results, run_experiments
+from scripts import build_experiment_matrix, collect_results, plot_results, run_experiments
 
 
 def _write_matrix(path: Path, rows: list[dict]) -> Path:
@@ -83,6 +84,97 @@ def test_runner_does_not_duplicate_an_active_row(monkeypatch: pytest.MonkeyPatch
     assert launched == []
 
 
+def test_runner_recovery_restarts_only_dead_running_processes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    active = tmp_path / "active"
+    stale = tmp_path / "stale"
+    active.mkdir()
+    stale.mkdir()
+    (active / "run.running").write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "pid_start_ticks": run_experiments.process_start_ticks(os.getpid()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (stale / "run.running").write_text(json.dumps({"pid": 999_999_999}), encoding="utf-8")
+    matrix = _write_matrix(
+        tmp_path / "matrix.jsonl",
+        [
+            {"run_id": "active", "output_dir": str(active)},
+            {"run_id": "stale", "output_dir": str(stale)},
+        ],
+    )
+    launched: list[int] = []
+    monkeypatch.setattr(
+        run_experiments,
+        "run_index",
+        lambda _matrix, index, _gpu, _data_root: launched.append(index) or 0,
+    )
+    monkeypatch.setattr(run_experiments, "quarantine_invalid_output", lambda _row: None)
+
+    assert run_experiments.main(
+        [str(matrix), "--data-root", str(tmp_path), "--rerun-running"]
+    ) == 0
+    assert launched == [1]
+
+
+def test_runner_recovery_rejects_a_reused_pid_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    output = tmp_path / "reused"
+    output.mkdir()
+    actual_ticks = run_experiments.process_start_ticks(os.getpid())
+    (output / "run.running").write_text(
+        json.dumps({"pid": os.getpid(), "pid_start_ticks": actual_ticks + 1}), encoding="utf-8"
+    )
+    matrix = _write_matrix(
+        tmp_path / "matrix.jsonl",
+        [{"run_id": "reused", "output_dir": str(output)}],
+    )
+    launched: list[int] = []
+    monkeypatch.setattr(
+        run_experiments,
+        "run_index",
+        lambda _matrix, index, _gpu, _data_root: launched.append(index) or 0,
+    )
+    monkeypatch.setattr(run_experiments, "quarantine_invalid_output", lambda _row: None)
+
+    assert run_experiments.main(
+        [str(matrix), "--data-root", str(tmp_path), "--rerun-running"]
+    ) == 0
+    assert launched == [0]
+
+
+def test_runner_recovery_treats_a_malformed_process_identity_as_stale(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    output = tmp_path / "malformed"
+    output.mkdir()
+    (output / "run.running").write_text(
+        json.dumps({"pid": os.getpid(), "pid_start_ticks": "not-an-integer"}), encoding="utf-8"
+    )
+    matrix = _write_matrix(
+        tmp_path / "matrix.jsonl",
+        [{"run_id": "malformed", "output_dir": str(output)}],
+    )
+    launched: list[int] = []
+    monkeypatch.setattr(
+        run_experiments,
+        "run_index",
+        lambda _matrix, index, _gpu, _data_root: launched.append(index) or 0,
+    )
+    monkeypatch.setattr(run_experiments, "quarantine_invalid_output", lambda _row: None)
+
+    assert run_experiments.main(
+        [str(matrix), "--data-root", str(tmp_path), "--rerun-running"]
+    ) == 0
+    assert launched == [0]
+
+
 def test_runner_dry_run_supports_first_and_index_ranges(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     rows = [{"run_id": str(i), "output_dir": str(tmp_path / str(i))} for i in range(6)]
     matrix = _write_matrix(tmp_path / "matrix.jsonl", rows)
@@ -96,16 +188,15 @@ def test_runner_dry_run_supports_first_and_index_ranges(tmp_path: Path, capsys: 
     assert [row["index"] for row in report["selected"]] == [1, 3]
 
 
-def test_collect_results_calls_aggregate_export_and_pdf_render(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_collect_results_calls_aggregate_and_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     run_dir = tmp_path / "runs" / "r1"
     samples = run_dir / "samples"
     samples.mkdir(parents=True)
     (run_dir / "results_raw.jsonl").write_text("{}\n", encoding="utf-8")
     manifest = samples / "manifest.jsonl"
     manifest.write_text("{}\n", encoding="utf-8")
-    pdf = run_dir / "r1_samples.pdf"
     (run_dir / "summary.json").write_text(
-        json.dumps({"sample_manifest_path": str(manifest), "sample_pdf_path": str(pdf)}),
+        json.dumps({"sample_manifest_path": str(manifest), "sample_pdf_path": ""}),
         encoding="utf-8",
     )
     matrix = _write_matrix(
@@ -114,7 +205,6 @@ def test_collect_results_calls_aggregate_export_and_pdf_render(monkeypatch: pyte
     )
     aggregate_calls: list[list[str]] = []
     export_calls: list[dict] = []
-    pdf_calls: list[tuple[Path, Path]] = []
     monkeypatch.setattr(collect_results, "aggregate_main", lambda argv: aggregate_calls.append(argv))
     monkeypatch.setattr(
         collect_results,
@@ -127,18 +217,68 @@ def test_collect_results_calls_aggregate_export_and_pdf_render(monkeypatch: pyte
         "export_results",
         lambda rows, **kwargs: export_calls.append({"rows": rows, **kwargs}) or {"rows": 1},
     )
-    monkeypatch.setattr(
-        collect_results,
-        "render_sample_manifest_pdf",
-        lambda source, target: pdf_calls.append((Path(source), Path(target))) or target,
-    )
-
     out = tmp_path / "collected"
-    assert collect_results.main([str(matrix), "--output-dir", str(out), "--redraw-samples"]) == 0
+    assert collect_results.main([str(matrix), "--output-dir", str(out)]) == 0
 
     assert aggregate_calls == [[str(run_dir / "results_raw.jsonl"), "--output-dir", str(out)]]
     assert export_calls[0]["output"] == out / "results.xlsx"
-    assert pdf_calls == [(manifest, pdf)]
+
+
+def test_plot_results_renders_from_matrix_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    run_dir = tmp_path / "run"
+    samples = run_dir / "samples"
+    samples.mkdir(parents=True)
+    manifest = samples / "manifest.jsonl"
+    manifest.write_text("{}\n", encoding="utf-8")
+    (run_dir / "summary.json").write_text(
+        json.dumps({"sample_manifest_path": str(manifest)}), encoding="utf-8"
+    )
+    matrix = _write_matrix(
+        tmp_path / "matrix.jsonl",
+        [{"run_id": "r1", "output_dir": str(run_dir)}],
+    )
+    calls: list[tuple[Path, Path, bool, int]] = []
+
+    def fake_render(source: Path, output_dir: Path, *, force: bool, max_samples: int) -> dict:
+        calls.append((Path(source), Path(output_dir), force, max_samples))
+        return {"sample_count": 1, "rendered_count": 1, "skipped_count": 0, "errors": []}
+
+    monkeypatch.setattr(plot_results, "_render_manifest", fake_render)
+
+    assert plot_results.main(["--matrix", str(matrix), "--max-samples", "100"]) == 0
+    assert calls == [(manifest, run_dir / "samples_pdf", False, 100)]
+
+
+def test_plot_results_limits_each_manifest_to_first_n_samples(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    manifest = _write_matrix(
+        tmp_path / "samples" / "manifest.jsonl",
+        [
+            {"sample_ordinal": index, "artifact_path": str(tmp_path / f"sample_{index}.pt")}
+            for index in range(3)
+        ],
+    )
+
+    def fake_sample_pdf(_artifact: Path, output: Path, **_kwargs) -> Path:
+        Path(output).write_bytes(b"%PDF\n%%EOF\n")
+        return Path(output)
+
+    monkeypatch.setattr(plot_results, "render_evaluation_sample_pdf", fake_sample_pdf)
+    output = tmp_path / "pdfs"
+    report = plot_results._render_manifest(
+        manifest,
+        output,
+        force=False,
+        max_samples=2,
+    )
+
+    assert report["source_sample_count"] == 3
+    assert report["sample_count"] == 2
+    assert sorted(path.name for path in output.glob("sample_*.pdf")) == [
+        "sample_000000.pdf",
+        "sample_000001.pdf",
+    ]
 
 
 def test_collect_results_refuses_incomplete_matrix_before_writing_tables(
@@ -157,7 +297,7 @@ def test_collect_results_refuses_incomplete_matrix_before_writing_tables(
     assert not (tmp_path / "aggregate").exists()
 
 
-def test_collect_results_refuses_redraw_when_sample_manifest_is_missing(
+def test_plot_results_reports_missing_sample_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     run_dir = tmp_path / "run"
@@ -170,14 +310,4 @@ def test_collect_results_refuses_redraw_when_sample_manifest_is_missing(
         tmp_path / "matrix.jsonl",
         [{"run_id": "r1", "output_dir": str(run_dir)}],
     )
-    monkeypatch.setattr(
-        collect_results,
-        "collect_validated_results",
-        lambda rows: SimpleNamespace(records=rows, quarantine=[], missing_run_ids=[]),
-    )
-    monkeypatch.setattr(collect_results, "require_single_cohort", lambda _records: "cohort")
-    aggregate_calls: list[list[str]] = []
-    monkeypatch.setattr(collect_results, "aggregate_main", lambda argv: aggregate_calls.append(argv))
-
-    assert collect_results.main([str(matrix), "--redraw-samples"]) == 2
-    assert aggregate_calls == []
+    assert plot_results.main(["--matrix", str(matrix)]) == 2

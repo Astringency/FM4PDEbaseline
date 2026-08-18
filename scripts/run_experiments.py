@@ -22,7 +22,7 @@ from scripts.experiments.provenance import (
     reject_historical_experiment_row,
     summary_validation_reasons,
 )
-from scripts.experiments.run_one import load_matrix_rows
+from scripts.experiments.run_one import load_matrix_rows, process_start_ticks
 
 
 RUN_ONE = ROOT / "scripts" / "experiments" / "run_one.py"
@@ -88,6 +88,39 @@ def row_status(row: dict[str, Any]) -> str:
         if (output / f"run.{status}").exists():
             return status
     return "pending"
+
+
+def running_process_alive(row: dict[str, Any]) -> bool:
+    marker = Path(str(row.get("output_dir", ""))) / "run.running"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    for field, command_fragment in (("child_pid", "baselines.run"), ("pid", "run_one.py")):
+        try:
+            pid = int(payload.get(field, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        actual_start_ticks = process_start_ticks(pid)
+        if not actual_start_ticks:
+            continue
+        try:
+            expected_start_ticks = int(payload.get(f"{field}_start_ticks", 0) or 0)
+        except (TypeError, ValueError):
+            expected_start_ticks = 0
+        if expected_start_ticks:
+            if actual_start_ticks == expected_start_ticks:
+                return True
+            continue
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if command_fragment in command:
+            return True
+    return False
 
 
 def parse_indices(spec: str, total: int) -> list[int]:
@@ -159,8 +192,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if args.failed_only and status != "failed":
             continue
-        if status == "running" and not args.rerun_running:
-            continue
+        if status == "running":
+            if not args.rerun_running or running_process_alive(rows[index]):
+                continue
         if status == "done" and is_complete(rows[index]):
             continue
         selected.append(index)

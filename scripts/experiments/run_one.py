@@ -423,7 +423,14 @@ def run_one(
         "command": command_text,
     }
     started.write_text(json.dumps(start_payload, indent=2, sort_keys=True), encoding="utf-8")
-    running.write_text(json.dumps({**start_payload, "pid": os.getpid()}, indent=2, sort_keys=True), encoding="utf-8")
+    running.write_text(
+        json.dumps(
+            {**start_payload, "pid": os.getpid(), "pid_start_ticks": process_start_ticks(os.getpid())},
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     command_path.write_text(command_text + "\n", encoding="utf-8")
     (output_dir / "env.txt").write_text(_env_text(), encoding="utf-8")
     (output_dir / "metadata.json").write_text(
@@ -461,7 +468,17 @@ def run_one(
     with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
         proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
         running.write_text(
-            json.dumps({**start_payload, "pid": os.getpid(), "child_pid": proc.pid}, indent=2, sort_keys=True),
+            json.dumps(
+                {
+                    **start_payload,
+                    "pid": os.getpid(),
+                    "pid_start_ticks": process_start_ticks(os.getpid()),
+                    "child_pid": proc.pid,
+                    "child_pid_start_ticks": process_start_ticks(proc.pid),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
         next_heartbeat = started_monotonic + interval
@@ -656,6 +673,15 @@ def _previous_attempt(path: Path) -> int:
     try:
         return int(json.loads(path.read_text(encoding="utf-8")).get("attempt", 0))
     except Exception:
+        return 0
+
+
+def process_start_ticks(pid: int) -> int:
+    """Return Linux process start ticks, or zero when unavailable."""
+    try:
+        fields = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+        return int(fields[19])
+    except (IndexError, OSError, TypeError, ValueError):
         return 0
 
 
