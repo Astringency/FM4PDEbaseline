@@ -5,7 +5,7 @@ import torch
 
 from baselines.common.data_adapter import build_default_registry
 from baselines.methods.pinn_sparse import observation_loss_from_batch
-from baselines.run import BASELINES, build_data_spec
+from baselines.run import BASELINES, _align, build_data_spec
 
 
 CASES = [
@@ -46,3 +46,15 @@ def test_per_instance_observation_loss_uses_noisy_obs_values():
     noisy_loss = observation_loss_from_batch(pred, batch)
     assert clean_loss.item() == pytest.approx(0.0)
     assert noisy_loss.item() > 0.0
+
+
+def test_align_burger_inverse_field_to_initial_condition():
+    # Burger inverse baselines emit the full x-t field [N, C, T, W] while the
+    # target is the 1D initial condition [N, C, 1, W]. Evaluation must align the
+    # two by taking the t=0 slice instead of failing on a shape mismatch.
+    pred = torch.randn(2, 1, 128, 128)
+    target = torch.randn(2, 1, 1, 128)
+    aligned_pred, aligned_target = _align(pred, target)
+    assert tuple(aligned_pred.shape) == (2, 1, 1, 128)
+    assert tuple(aligned_target.shape) == (2, 1, 1, 128)
+    assert torch.allclose(aligned_pred, pred[:, :, :1, :])

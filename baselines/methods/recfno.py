@@ -81,6 +81,9 @@ class RecFNOBaseline(BaselineModel):
         mask = batch.mask
         if mask is None:
             mask_grid = torch.ones_like(base)
+        elif mask.ndim == base.ndim and mask.shape[0] == base.shape[0]:
+            # Per-sample masks already carry the batch dimension.
+            mask_grid = mask.to(base.device, base.dtype)
         else:
             mask_grid = mask.unsqueeze(0).repeat(base.shape[0], 1, 1, 1).to(base.device, base.dtype)
         x = torch.cat([base, mask_grid, grid_channels(base)], dim=1)

@@ -190,7 +190,7 @@ class IFNOBaseline(BaselineModel):
         monitor_name = _scheduler_monitor_name(self.config, val_loader)
         early_stopping = bool(self.config.get("early_stopping", False))
         early_stopping_patience = int(self.config.get("early_stopping_patience", 20))
-        early_stopping_min_delta = float(self.config.get("early_stopping_min_delta", 0.0))
+        early_stopping_min_delta = float(self.config.get("early_stopping_min_delta", 1e-4))
         min_epochs = int(self.config.get("min_epochs", 1))
         restore_best = bool(self.config.get("restore_best", True))
         grad_clip_norm = self.config.get("grad_clip_norm")

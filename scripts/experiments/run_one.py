@@ -192,7 +192,10 @@ def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _save_checkpoint_for_row(row: dict[str, Any]) -> bool:
-    mode = str(os.environ.get("SAVE_CHECKPOINT", "0")).strip().lower()
+    # Default to saving checkpoints for neural baselines so their weights can
+    # be reloaded for later inspection or re-evaluation. Per-instance methods
+    # (pinn_sparse/pde_opt/...) have no persistent model state to save.
+    mode = str(os.environ.get("SAVE_CHECKPOINT", "amortized")).strip().lower()
     if mode in {"0", "false", "no", "off", "none", ""}:
         return False
     if mode in {"1", "true", "yes", "on", "all"}:

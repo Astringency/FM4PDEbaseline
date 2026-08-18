@@ -901,6 +901,11 @@ def _evaluate_full_test_loader(
         _copy_eval_metadata(batch, eval_batch)
         pred_cpu = pred.detach().cpu()
         target = batch.target_fields.detach().cpu()
+        # Burger inverse targets are 1D initial fields [N, C, 1, W] while the
+        # 2D baselines (iFNO/VoronoiCNN/RecFNO) emit the full x-t field
+        # [N, C, T, W]. Align before computing metrics so evaluation does not
+        # rely on broadcasting and the shape assertion below passes.
+        pred_cpu, target = _align(pred_cpu, target)
         inf_opt = float(batch.metadata.get("inference_optimization_time", 0.0) or 0.0)
         batch_n = int(target.shape[0])
         rel_values = _relative_l2_values(pred_cpu, target)

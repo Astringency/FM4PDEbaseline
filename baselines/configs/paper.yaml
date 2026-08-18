@@ -46,7 +46,7 @@ method:
   scheduler_threshold: 1.0e-6
   early_stopping: true
   early_stopping_patience: 10
-  early_stopping_min_delta: 1.0e-8
+  early_stopping_min_delta: 1.0e-4
   min_epochs: 5
   restore_best: true
   grad_clip_norm: null
