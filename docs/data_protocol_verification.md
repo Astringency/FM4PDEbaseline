@@ -103,7 +103,7 @@ python scripts/experiments/build_matrix.py \
   --data-manifest outputs/data_protocol/experiment_plan_v2_corrected/full/data_protocol_report.json
 ```
 
-The corrected design expands seeds `[1, 2, 3]` into 228 active rows. The
+The corrected design runs seed `[1]` once per experiment, producing 70 active rows. The
 remaining-run launcher defaults to this corrected matrix and namespace:
 
 ```bash

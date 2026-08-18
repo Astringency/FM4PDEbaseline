@@ -35,3 +35,23 @@ def test_joint_sparse_solution_reports_input_and_solution_errors_separately():
 
     assert solution == [0.25]
     assert input_or_coeff == [0.5]
+
+
+def test_burger_joint_reconstruction_splits_initial_state_from_later_solution_times():
+    target = torch.ones(1, 1, 4, 2)
+    pred = target.clone()
+    pred[:, :, 0] = 2.0
+    pred[:, :, 1:] = 3.0
+
+    solution, input_or_coeff = _joint_reconstruction_relative_l2_values(
+        pred,
+        target,
+        {
+            "joint_reconstruction": True,
+            "joint_split_axis": 2,
+            "joint_input_extent": 1,
+        },
+    )
+
+    assert solution == [2.0]
+    assert input_or_coeff == [1.0]

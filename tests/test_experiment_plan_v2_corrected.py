@@ -56,10 +56,10 @@ def test_corrected_plan_excludes_invalid_sparse_rows():
     assert "pc_bnn" in groups["sparse_forward_main_physics"]["baselines"]
 
 
-def test_corrected_plan_expands_the_full_three_seed_cohort(tmp_path: Path):
+def test_corrected_plan_expands_the_single_run_cohort(tmp_path: Path):
     corrected = _load(CORRECTED)
 
-    assert corrected["seeds"] == [1, 2, 3]
+    assert corrected["seeds"] == [1]
 
     rows, skipped, summary = build_matrix(
         corrected,
@@ -67,15 +67,15 @@ def test_corrected_plan_expands_the_full_three_seed_cohort(tmp_path: Path):
         "experiment_plan_v2_corrected",
     )
 
-    assert len(rows) == summary["run_count"] == 228
-    assert len(skipped) == summary["skipped_combo_count"] == 6
-    assert summary["skipped_expanded_count"] == 18
+    assert len(rows) == summary["run_count"] == 70
+    assert len(skipped) == summary["skipped_combo_count"] == 12
+    assert summary["skipped_expanded_count"] == 12
     assert summary["by_task_group"] == {
-        "full_forward_main": 36,
-        "full_inverse_main": 12,
-        "sparse_forward_main_amortized": 36,
-        "sparse_forward_main_physics": 27,
-        "sparse_inverse_main": 63,
-        "sparse_solution_burger_time_slices": 9,
-        "sparse_solution_main_amortized": 45,
+        "full_forward_main": 12,
+        "full_inverse_main": 4,
+        "sparse_forward_main_amortized": 12,
+        "sparse_forward_main_physics": 6,
+        "sparse_inverse_main": 18,
+        "sparse_solution_burger_time_slices": 3,
+        "sparse_solution_main_amortized": 15,
     }

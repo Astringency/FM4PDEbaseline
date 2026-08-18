@@ -428,8 +428,9 @@ class PDEDataRegistry:
         elif task in {"sparse_solution", "sparse_reconstruction"} and spec.name == "burger":
             # Burgers' T x X reconstruction already contains a=u(t=0).
             metadata["joint_reconstruction"] = True
-            metadata["joint_input_channels"] = 1
-            metadata["joint_solution_channels"] = 1
+            metadata["joint_split_axis"] = 2
+            metadata["joint_input_extent"] = 1
+            metadata["joint_solution_extent"] = int(target_fields.shape[2] - 1)
         metadata["original_input_fields"] = original_input_fields
         metadata["background_fields"] = _background_fields_for_task(full, spec, metadata, original_input_fields)
         mask = obs_values = obs_coords = None

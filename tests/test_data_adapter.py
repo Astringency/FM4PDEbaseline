@@ -389,6 +389,9 @@ def test_burger_time_slice_mode_reconstructs_the_full_trajectory():
     assert materialized.target_fields.shape == (2, 1, 8, 8)
     assert materialized.obs_values.shape == (2, 24, 1)
     assert materialized.metadata["num_observations_total"] == 24
+    assert materialized.metadata["joint_split_axis"] == 2
+    assert materialized.metadata["joint_input_extent"] == 1
+    assert materialized.metadata["joint_solution_extent"] == 7
 
 
 def test_missing_file_error_lists_pde_and_candidates(tmp_path):

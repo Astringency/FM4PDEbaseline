@@ -1832,6 +1832,26 @@ def _joint_reconstruction_relative_l2_values(
     target: torch.Tensor,
     metadata: dict[str, Any],
 ) -> tuple[list[float], list[float]]:
+    split_axis = metadata.get("joint_split_axis")
+    input_extent = int(metadata.get("joint_input_extent", 0) or 0)
+    if metadata.get("joint_reconstruction") and split_axis is not None and input_extent > 0:
+        axis = int(split_axis)
+        if axis < 0:
+            axis += target.ndim
+        if axis <= 0 or axis >= target.ndim or target.shape[axis] <= input_extent:
+            raise ValueError(
+                f"invalid joint reconstruction split: axis={split_axis}, input_extent={input_extent}, "
+                f"target_shape={tuple(target.shape)}"
+            )
+        input_pred = pred.narrow(axis, 0, input_extent)
+        input_target = target.narrow(axis, 0, input_extent)
+        solution_extent = int(target.shape[axis] - input_extent)
+        solution_pred = pred.narrow(axis, input_extent, solution_extent)
+        solution_target = target.narrow(axis, input_extent, solution_extent)
+        return (
+            _relative_l2_values(solution_pred, solution_target),
+            _relative_l2_values(input_pred, input_target),
+        )
     input_channels = int(metadata.get("joint_input_channels", 0) or 0)
     if not metadata.get("joint_reconstruction") or input_channels <= 0 or target.shape[1] <= input_channels:
         return _relative_l2_values(pred, target), [float("nan")] * int(target.shape[0])

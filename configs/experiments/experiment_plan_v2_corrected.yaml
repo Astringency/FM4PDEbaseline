@@ -13,7 +13,7 @@ pdes:
   - darcy
   - burger
   - nsnonbounded
-seeds: [1, 2, 3]
+seeds: [1]
 train_size: 50000
 val_size: 1000
 test_size: 1000

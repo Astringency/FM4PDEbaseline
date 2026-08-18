@@ -545,6 +545,7 @@ def resolve_capability(
                     "PC-BNN uses a disclosed joint source/solution particle posterior with sparse observations and a PDE residual",
                     "Generic scalar-PDE PC-BNN adaptation; report separately from the matched official shallow-water setting.",
                     eligible=False,
+                    unified_comparison_eligible=False,
                 )
             return _cap(
                 baseline,
