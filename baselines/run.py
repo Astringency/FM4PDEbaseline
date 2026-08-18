@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import shutil
-import subprocess
 import sys
 import time
 import warnings
@@ -51,6 +50,14 @@ from baselines.methods.var4d import Var4DBaseline
 from baselines.methods.vivid import VIVIDBaseline
 from baselines.methods.voronoicnn import VoronoiCNNBaseline
 from baselines.experiment_matrix import capability_skip_row
+from scripts.experiments.provenance import (
+    DEFAULT_TASK_PROTOCOL_VERSION,
+    requires_full_data_manifest,
+    repository_revision,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 BASELINES = {
@@ -85,7 +92,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", default=None)
     parser.add_argument("--experiment-mode", choices=["smoke", "debug", "paper"], default="debug")
     parser.add_argument("--num-sensors", type=int, default=500)
-    parser.add_argument("--sensor-mode", choices=["random", "fixed", "grid", "time_varying"], default="random")
+    parser.add_argument(
+        "--sensor-mode",
+        choices=["random", "random_per_sample", "fixed", "grid", "time_varying"],
+        default="random_per_sample",
+    )
     parser.add_argument("--sensor-budget-mode", choices=["per_time", "total"], default=None)
     parser.add_argument("--noise-level", type=float, default=0.0)
     parser.add_argument("--train-size", type=int, default=50000)
@@ -97,6 +108,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--sensor-seed", type=int, default=None, help="Independent base seed for sensor layouts; defaults to --seed.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", default="outputs/baselines")
     parser.add_argument("--experiment-kind", default="")
@@ -104,6 +116,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--task-group", default="")
     parser.add_argument("--run-id", default="", help="Stable external run identifier used in output filenames.")
     parser.add_argument("--run-name", default="", help="Human-readable external run name stored in metadata.")
+    parser.add_argument("--run-fingerprint", default="", help="Content-addressed experiment fingerprint supplied by the matrix builder.")
+    parser.add_argument("--config-content-sha256", default="", help="SHA-256 of the resolved experiment config contract.")
+    parser.add_argument(
+        "--data-manifest-sha256",
+        default="",
+        help="SHA-256 of the passing full data_protocol_report.json bound to this experiment.",
+    )
+    parser.add_argument(
+        "--data-manifest-path",
+        default="",
+        help="Auditable path to the bound full data_protocol_report.json.",
+    )
+    parser.add_argument(
+        "--commit-hash",
+        default="",
+        help="Exact repository revision (HEAD plus dirty-tree digest) supplied by the experiment matrix.",
+    )
+    parser.add_argument("--summary-schema-version", type=int, default=2)
+    parser.add_argument("--execution-mode", choices=["train", "eval_only"], default=None)
+    parser.add_argument("--task-protocol-version", default="2")
+    parser.add_argument("--sensor-protocol-version", default="2")
+    parser.add_argument("--comparison-track", choices=["unified_adapted", "official_native"], default="unified_adapted")
+    parser.add_argument("--source-train-run-id", default="", help="Training run identifier expected for eval-only checkpoints.")
+    parser.add_argument(
+        "--source-train-run-fingerprint",
+        default="",
+        help="Training fingerprint expected inside an eval-only checkpoint; distinct from the evaluation run fingerprint.",
+    )
+    parser.add_argument("--source-train-seed", type=int, default=None, help="Model-training seed expected in an eval-only checkpoint.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--synthetic-data", action="store_true", help="Use deterministic synthetic data for smoke/debug tests.")
     parser.add_argument("--allow-synthetic-fallback", action="store_true", help="Fall back to synthetic data when requested real files are missing.")
@@ -152,8 +193,16 @@ def load_yaml(path: str | None) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def load_baseline_checkpoint(path: str | Path, *, baseline: str | None = None, map_location: str | torch.device = "cpu") -> torch.nn.Module:
+def load_baseline_checkpoint(
+    path: str | Path,
+    *,
+    baseline: str | None = None,
+    map_location: str | torch.device = "cpu",
+    expected: dict[str, Any] | None = None,
+    require_provenance: bool = False,
+) -> torch.nn.Module:
     payload = torch.load(path, map_location=map_location, weights_only=False)
+    _validate_checkpoint_payload(payload, expected or {}, require_provenance=require_provenance)
     baseline_name = str(baseline or payload.get("baseline") or "")
     if not baseline_name:
         raise ValueError("Checkpoint does not record a baseline name; pass baseline='...' explicitly.")
@@ -162,6 +211,46 @@ def load_baseline_checkpoint(path: str | Path, *, baseline: str | None = None, m
     model = BASELINES[baseline_name]().build(payload.get("config", {}), payload.get("data_spec", {}))
     model.load_payload(payload)
     return model.to(torch.device(map_location))
+
+
+def _validate_checkpoint_payload(payload: dict[str, Any], expected: dict[str, Any], *, require_provenance: bool) -> None:
+    provenance = payload.get("provenance")
+    if not isinstance(provenance, dict):
+        if require_provenance:
+            raise ValueError("Checkpoint has no provenance contract and cannot be used for a strict eval-only run")
+        provenance = {}
+    data_spec = payload.get("data_spec") if isinstance(payload.get("data_spec"), dict) else {}
+    actual = {
+        "baseline": payload.get("baseline"),
+        "pde": provenance.get("pde", data_spec.get("pde")),
+        "task": provenance.get("task", data_spec.get("task")),
+        "run_fingerprint": provenance.get("run_fingerprint"),
+        "config_content_sha256": provenance.get("config_content_sha256"),
+        "data_manifest_sha256": provenance.get("data_manifest_sha256"),
+        "data_manifest_path": provenance.get("data_manifest_path"),
+        "task_protocol_version": provenance.get("task_protocol_version"),
+        "sensor_protocol_version": provenance.get("sensor_protocol_version"),
+        "commit_hash": provenance.get("commit_hash"),
+        "source_train_run_id": provenance.get("run_id"),
+        "seed": provenance.get("seed"),
+        "comparison_track": provenance.get("comparison_track"),
+        "sensor_mode": provenance.get("sensor_mode"),
+        "num_sensors": provenance.get("num_sensors"),
+        "requested_train_size": provenance.get("requested_train_size"),
+        "val_size": provenance.get("val_size"),
+        "train_shards": provenance.get("train_shards"),
+        "batch_size": provenance.get("batch_size"),
+        "epochs": provenance.get("epochs"),
+    }
+    mismatches = []
+    for key, wanted in expected.items():
+        if wanted in {None, ""}:
+            continue
+        got = actual.get(key)
+        if str(got) != str(wanted):
+            mismatches.append(f"{key}: checkpoint={got!r}, expected={wanted!r}")
+    if mismatches:
+        raise ValueError("Checkpoint provenance mismatch: " + "; ".join(mismatches))
 
 
 def build_method_config(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -226,6 +315,17 @@ def build_data_spec(batch: PDEBatch) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     _validate_mode(args)
+    actual_revision = repository_revision(ROOT)
+    if args.commit_hash and args.commit_hash != actual_revision:
+        raise ValueError(
+            "--commit-hash does not match the current repository revision: "
+            f"supplied={args.commit_hash!r}, actual={actual_revision!r}; regenerate the matrix from this code tree"
+        )
+    args.commit_hash = actual_revision
+    if args.sensor_seed is None:
+        args.sensor_seed = int(args.seed)
+    if args.source_train_seed is None:
+        args.source_train_seed = int(args.seed)
     torch.manual_seed(args.seed)
     cfg = load_yaml(args.config)
     args.data_loading_mode = _resolve_data_loading_mode(args)
@@ -234,6 +334,18 @@ def main(argv: list[str] | None = None) -> None:
     args.physics_metric_mode = _resolve_physics_metric_mode(args, cfg)
     args.sensor_budget_mode = _resolve_sensor_budget_mode(args, cfg)
     method_cfg = build_method_config(cfg, args)
+    derived_execution_mode = "eval_only" if args.eval_only else "train"
+    if args.execution_mode is not None and args.execution_mode != derived_execution_mode:
+        raise ValueError(
+            f"--execution-mode={args.execution_mode} conflicts with "
+            f"{'--eval-only' if args.eval_only else 'a training invocation'}"
+        )
+    args.execution_mode = derived_execution_mode
+    if not args.config_content_sha256:
+        args.config_content_sha256 = _config_content_sha256(args.config, cfg)
+    _validate_data_manifest_binding(args)
+    if not args.run_fingerprint:
+        args.run_fingerprint = _local_run_fingerprint(args, method_cfg)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_prefix = _run_file_prefix(args)
@@ -257,6 +369,20 @@ def main(argv: list[str] | None = None) -> None:
         return
     if (
         args.experiment_mode == "paper"
+        and args.comparison_track == "official_native"
+        and not bool(getattr(capability, "official_native_eligible", False))
+    ):
+        _skip_paper_run(
+            args,
+            capability,
+            method_cfg,
+            "No end-to-end official-native verification recipe is registered for this combination",
+            adapter_status="official_native_not_verified",
+        )
+        return
+    if (
+        args.experiment_mode == "paper"
+        and args.comparison_track == "official_native"
         and capability.implementation_required == "adapted_allowed"
         and _official_request_mode(method_cfg) in {"official", "official_or_skip", "official_architecture", "official_aligned"}
     ):
@@ -392,16 +518,50 @@ def main(argv: list[str] | None = None) -> None:
     if args.eval_only:
         if not args.checkpoint:
             raise ValueError("--eval-only requires --checkpoint")
+        if args.experiment_mode == "paper" and (not args.source_train_run_id or not args.source_train_run_fingerprint):
+            raise ValueError(
+                "paper eval-only requires --source-train-run-id and --source-train-run-fingerprint so the checkpoint "
+                "can be tied to its training run"
+            )
         ckpt_path = Path(args.checkpoint)
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-        model = load_baseline_checkpoint(ckpt_path, map_location=args.device)
+        model = load_baseline_checkpoint(
+            ckpt_path,
+            map_location=args.device,
+            expected={
+                "baseline": args.baseline,
+                "pde": args.pde,
+                "task": args.task,
+                "run_fingerprint": args.source_train_run_fingerprint,
+                "config_content_sha256": args.config_content_sha256,
+                "data_manifest_sha256": args.data_manifest_sha256,
+                "data_manifest_path": args.data_manifest_path,
+                "task_protocol_version": args.task_protocol_version,
+                "sensor_protocol_version": args.sensor_protocol_version,
+                "commit_hash": args.commit_hash,
+                "source_train_run_id": args.source_train_run_id,
+                "seed": args.source_train_seed,
+                "comparison_track": args.comparison_track,
+                "sensor_mode": args.sensor_mode,
+                "num_sensors": args.num_sensors if use_sensors else 0,
+                "requested_train_size": split_info["train_requested_size"],
+                "val_size": split_info["val_requested_size"],
+                "train_shards": args.train_shards,
+                "batch_size": args.batch_size,
+                "epochs": method_cfg.get("epochs", 0),
+            },
+            require_provenance=True,
+        )
+        backend_info = _backend_info(model, method_cfg)
+        capability_info["paper_table_eligible"] = _paper_table_eligibility(capability, backend_info)
         train_time = 0.0
         train_history = {}
         normalization_stats_path = ""
         normalization_fields = {}
-        config_snapshot = Path("")
-        config_hash = ""
+        checkpoint_provenance = dict(getattr(model, "provenance", {}) or {})
+        config_snapshot = str(checkpoint_provenance.get("config_path", ""))
+        config_hash = str(checkpoint_provenance.get("config_hash", ""))
         checkpoint_path = str(ckpt_path)
         train_history_path = out_dir / f"{run_prefix}_train_history.json"
     else:
@@ -413,12 +573,44 @@ def main(argv: list[str] | None = None) -> None:
         else:
             train_history = model.fit(train_loader, val_loader)
         train_time = time.perf_counter() - train_start
+        split_info["fit_setup_time"] = float(train_time)
+        if is_per_instance:
+            # Per-instance optimization happens inside predict() on each test
+            # sample. The microsecond setup call is not amortized training.
+            train_time = 0.0
         _run_stage("fit", "done", baseline=args.baseline, elapsed_sec=f"{train_time:.3f}")
 
         normalization_stats_path = _write_normalization_stats(out_dir, run_prefix, model)
         normalization_fields = _normalization_fields(model, normalization_stats_path)
         config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields, memory_fields)
         config_hash = _file_sha1(config_snapshot)
+        model.provenance = {
+            "run_id": args.run_id,
+            "run_fingerprint": args.run_fingerprint,
+            "baseline": args.baseline,
+            "pde": args.pde,
+            "task": args.task,
+            "seed": int(args.seed),
+            "config_content_sha256": args.config_content_sha256,
+            "data_manifest_sha256": args.data_manifest_sha256,
+            "data_manifest_path": args.data_manifest_path,
+            "config_hash": config_hash,
+            "config_path": str(config_snapshot),
+            "task_protocol_version": str(args.task_protocol_version),
+            "sensor_protocol_version": str(args.sensor_protocol_version),
+            "comparison_track": str(args.comparison_track),
+            "execution_mode": "train",
+            "commit_hash": str(getattr(args, "commit_hash", "")),
+            "requested_train_size": int(split_info["train_requested_size"]),
+            "effective_train_size": 0 if is_per_instance else int(split_info["effective_train_size"]),
+            "val_size": int(split_info["val_requested_size"]),
+            "train_shards": int(args.train_shards),
+            "batch_size": int(args.batch_size),
+            "epochs": int(method_cfg.get("epochs", 0)),
+            "sensor_mode": str(args.sensor_mode),
+            "sensor_seed": int(args.sensor_seed),
+            "num_sensors": int(args.num_sensors if use_sensors else 0),
+        }
         train_history_path = out_dir / f"{run_prefix}_train_history.json"
         train_history_payload = _json_safe(train_history)
         if isinstance(train_history_payload, dict):
@@ -473,11 +665,17 @@ def main(argv: list[str] | None = None) -> None:
         {
             "train_time": train_time,
             "num_params": int(model.parameter_count() if hasattr(model, "parameter_count") else num_parameters(model)),
+            "num_params_storage": int(
+                model.parameter_storage_count()
+                if hasattr(model, "parameter_storage_count")
+                else sum(p.numel() for p in model.parameters() if p.requires_grad)
+            ),
+            "parameter_count_convention": "real_scalar_dof_complex_counts_as_two",
             "config_path": str(config_snapshot),
             "config_hash": config_hash,
             "checkpoint_path": checkpoint_path,
             "train_history_path": str(train_history_path),
-            "commit_hash": _commit_hash(),
+            "commit_hash": args.commit_hash,
             "dry_run": bool(args.dry_run),
             "synthetic_data": bool(args.synthetic_data),
             "experiment_mode": args.experiment_mode,
@@ -831,7 +1029,7 @@ def _make_split_dataset(
             sensor_mode=args.sensor_mode,
             sensor_budget_mode=args.sensor_budget_mode,
             noise_level=args.noise_level,
-            seed=args.seed,
+            seed=args.sensor_seed,
             experiment_mode=args.experiment_mode,
         )
         return PDEBatchDataset(batch)
@@ -848,7 +1046,7 @@ def _make_split_dataset(
         sensor_mode=args.sensor_mode,
         sensor_budget_mode=args.sensor_budget_mode,
         noise_level=args.noise_level,
-        seed=args.seed,
+        seed=args.sensor_seed,
         prefer_test=args.prefer_test and split == "test",
         synthetic_if_missing=args.allow_synthetic_fallback,
         synthetic_resolution=args.synthetic_resolution,
@@ -887,28 +1085,58 @@ def _evaluate_full_test_loader(
     config_hash: str,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     model.eval()
+    sensor_seed = int(getattr(args, "sensor_seed", args.seed))
+    source_train_seed = int(getattr(args, "source_train_seed", args.seed))
     rows: list[dict[str, Any]] = []
     inference_time_total = 0.0
     inference_optimization_time_total = 0.0
     raw_path = out_dir / "results_raw.jsonl"
     grad_enabled = args.baseline in {"pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"}
+    per_instance = bool(split_info.get("per_instance_baseline", False))
+    reported_train_size = 0 if per_instance else int(split_info["effective_train_size"])
+    checkpoint_sha256 = _file_sha256(Path(checkpoint_path)) if checkpoint_path else ""
+    checkpoint_provenance = dict(getattr(model, "provenance", {}) or {})
+    provenance_fields = {
+        "summary_schema_version": int(getattr(args, "summary_schema_version", 2)),
+        "status": "success",
+        "execution_mode": str(getattr(args, "execution_mode", "eval_only" if getattr(args, "eval_only", False) else "train")),
+        "eval_only": bool(getattr(args, "eval_only", False)),
+        "run_fingerprint": str(getattr(args, "run_fingerprint", "")),
+        "config_content_sha256": str(getattr(args, "config_content_sha256", "")),
+        "data_manifest_sha256": str(getattr(args, "data_manifest_sha256", "")),
+        "data_manifest_path": str(getattr(args, "data_manifest_path", "")),
+        "task_protocol_version": str(getattr(args, "task_protocol_version", "2")),
+        "sensor_protocol_version": str(getattr(args, "sensor_protocol_version", "2")),
+        "comparison_track": str(getattr(args, "comparison_track", "unified_adapted")),
+        "source_train_run_id": str(
+            checkpoint_provenance.get("run_id", args.run_id if not getattr(args, "eval_only", False) else "")
+        ),
+        "source_train_run_fingerprint": str(checkpoint_provenance.get("run_fingerprint", "")),
+        "source_train_seed": int(
+            checkpoint_provenance.get(
+                "seed",
+                source_train_seed if getattr(args, "eval_only", False) else args.seed,
+            )
+        ),
+        "checkpoint_sha256": checkpoint_sha256,
+    }
     for batch_index, batch in enumerate(loader):
         start = time.perf_counter()
-        eval_batch = _to_device_batch_for_eval(batch, args.device)
+        eval_batch = _to_device_batch_for_eval(_make_inference_batch(batch), args.device)
         with torch.set_grad_enabled(grad_enabled):
             pred = model.predict_physical(eval_batch) if hasattr(model, "predict_physical") else model.predict(eval_batch)
         elapsed = time.perf_counter() - start
         _copy_eval_metadata(batch, eval_batch)
         pred_cpu = pred.detach().cpu()
         target = batch.target_fields.detach().cpu()
-        # Burger inverse targets are 1D initial fields [N, C, 1, W] while the
-        # 2D baselines (iFNO/VoronoiCNN/RecFNO) emit the full x-t field
-        # [N, C, T, W]. Align before computing metrics so evaluation does not
-        # rely on broadcasting and the shape assertion below passes.
         pred_cpu, target = _align(pred_cpu, target)
         inf_opt = float(batch.metadata.get("inference_optimization_time", 0.0) or 0.0)
         batch_n = int(target.shape[0])
-        rel_values = _relative_l2_values(pred_cpu, target)
+        rel_values = (
+            [float("nan")] * int(target.shape[0])
+            if args.task in {"inverse", "sparse_inverse"}
+            else _relative_l2_values(pred_cpu, target)
+        )
         input_or_coeff_values = _relative_l2_input_or_coeff_values(args.task, pred_cpu, target)
         mse_values = _mse_values(pred_cpu, target)
         mae_values = _mae_values(pred_cpu, target)
@@ -916,18 +1144,20 @@ def _evaluate_full_test_loader(
         row = {
             "run_id": args.run_id,
             "run_name": args.run_name,
+            **provenance_fields,
             **_experiment_fields(args),
             **method_budget_fields,
             "pde": args.pde,
             "task": args.task,
             "baseline": args.baseline,
             "seed": args.seed,
+            "sensor_seed": sensor_seed,
             "batch_index": batch_index,
             "sample_count": batch_n,
             "split": "test",
-            "train_size": int(split_info["effective_train_size"]),
+            "train_size": reported_train_size,
             "train_requested_size": int(split_info["train_requested_size"]),
-            "effective_train_size": int(split_info["effective_train_size"]),
+            "effective_train_size": reported_train_size,
             "train_size_loaded_for_fit": int(split_info["train_size_loaded_for_fit"]),
             "train_size_loaded_for_spec": int(split_info["train_size_loaded_for_spec"]),
             "val_size": len(val_dataset) if val_dataset is not None else 0,
@@ -963,6 +1193,7 @@ def _evaluate_full_test_loader(
             "time_varying_sensor_valid": bool(batch.metadata.get("time_varying_sensor_valid", True)),
             "noise_level": args.noise_level,
             "mask_id": batch.metadata.get("mask_id", ""),
+            "mask_ids_unique_count": len(set(batch.metadata.get("mask_ids", []) or [])),
             "backend_used": backend_info["backend_used"],
             "official_backend": backend_info["official_backend"],
             "fallback_used": backend_info["fallback_used"],
@@ -996,13 +1227,22 @@ def _evaluate_full_test_loader(
             "optimized_state_shape": json.dumps(list(batch.metadata.get("optimized_state_shape", ())) if batch.metadata.get("optimized_state_shape") else []),
             "posterior_particles": int(batch.metadata.get("posterior_particles", 0) or 0),
             "train_time": train_time,
+            "fit_setup_time": float(split_info.get("fit_setup_time", 0.0) or 0.0),
+            "test_time_optimization": per_instance,
+            "amortized_training": not per_instance,
             "inference_time": elapsed,
             "inference_optimization_time": inf_opt,
             "num_params": int(model.parameter_count() if hasattr(model, "parameter_count") else num_parameters(model)),
+            "num_params_storage": int(
+                model.parameter_storage_count()
+                if hasattr(model, "parameter_storage_count")
+                else sum(p.numel() for p in model.parameters() if p.requires_grad)
+            ),
+            "parameter_count_convention": "real_scalar_dof_complex_counts_as_two",
             "config_path": config_snapshot,
             "config_hash": config_hash,
             "checkpoint_path": checkpoint_path,
-            "commit_hash": _commit_hash(),
+            "commit_hash": str(getattr(args, "commit_hash", "")),
             "dry_run": bool(args.dry_run),
             "synthetic_data": bool(args.synthetic_data),
             "experiment_mode": args.experiment_mode,
@@ -1119,6 +1359,8 @@ def _summarize_run(
     memory_fields: dict[str, float],
     config_hash: str,
 ) -> dict[str, Any]:
+    sensor_seed = int(getattr(args, "sensor_seed", args.seed))
+    source_train_seed = int(getattr(args, "source_train_seed", args.seed))
     metric_keys = [
         "relative_l2_solution",
         "relative_l2_input_or_coeff",
@@ -1132,19 +1374,44 @@ def _summarize_run(
         "ic_residual",
         "physics_loss",
     ]
+    per_instance = bool(split_info.get("per_instance_baseline", False))
+    reported_train_size = 0 if per_instance else int(split_info["effective_train_size"])
     summary: dict[str, Any] = {
         "run_id": args.run_id,
         "run_name": args.run_name,
+        "summary_schema_version": int(getattr(args, "summary_schema_version", 2)),
+        "status": "success",
+        "execution_mode": str(getattr(args, "execution_mode", "eval_only" if getattr(args, "eval_only", False) else "train")),
+        "eval_only": bool(getattr(args, "eval_only", False)),
+        "run_fingerprint": str(getattr(args, "run_fingerprint", "")),
+        "config_content_sha256": str(getattr(args, "config_content_sha256", "")),
+        "data_manifest_sha256": str(getattr(args, "data_manifest_sha256", "")),
+        "data_manifest_path": str(getattr(args, "data_manifest_path", "")),
+        "task_protocol_version": str(getattr(args, "task_protocol_version", "2")),
+        "sensor_protocol_version": str(getattr(args, "sensor_protocol_version", "2")),
+        "comparison_track": str(getattr(args, "comparison_track", "unified_adapted")),
+        "source_train_run_id": str(rows[0].get("source_train_run_id", "") if rows else ""),
+        "source_train_run_fingerprint": str(rows[0].get("source_train_run_fingerprint", "") if rows else ""),
+        "source_train_seed": int(
+            rows[0].get(
+                "source_train_seed",
+                source_train_seed if getattr(args, "eval_only", False) else args.seed,
+            )
+            if rows
+            else (source_train_seed if getattr(args, "eval_only", False) else args.seed)
+        ),
+        "checkpoint_sha256": str(rows[0].get("checkpoint_sha256", "") if rows else ""),
         **_experiment_fields(args),
         **method_budget_fields,
         "pde": args.pde,
         "task": args.task,
         "baseline": args.baseline,
         "seed": args.seed,
+        "sensor_seed": sensor_seed,
         "split": "test",
-        "train_size": int(split_info["effective_train_size"]),
+        "train_size": reported_train_size,
         "train_requested_size": int(split_info["train_requested_size"]),
-        "effective_train_size": int(split_info["effective_train_size"]),
+        "effective_train_size": reported_train_size,
         "train_size_loaded_for_fit": int(split_info["train_size_loaded_for_fit"]),
         "train_size_loaded_for_spec": int(split_info["train_size_loaded_for_spec"]),
         "val_size": len(val_dataset) if val_dataset is not None else 0,
@@ -1180,6 +1447,10 @@ def _summarize_run(
         "time_varying_sensor_valid": bool(test_dataset.batch.metadata.get("time_varying_sensor_valid", True)),
         "noise_level": args.noise_level,
         "mask_id": test_dataset.batch.metadata.get("mask_id", ""),
+        "mask_ids_unique_count": len(set(test_dataset.batch.metadata.get("mask_ids", []) or [])),
+        "split_mask_manifest": json.dumps(
+            _split_mask_manifest(train_dataset, val_dataset, test_dataset), sort_keys=True
+        ),
         "backend_used": backend_info["backend_used"],
         "official_backend": backend_info["official_backend"],
         "fallback_used": backend_info["fallback_used"],
@@ -1198,6 +1469,9 @@ def _summarize_run(
         "inference_time_per_sample": eval_totals["inference_time_total"] / max(len(test_dataset), 1),
         "inference_optimization_time_total": eval_totals["inference_optimization_time_total"],
         "inference_optimization_time_per_sample": eval_totals["inference_optimization_time_total"] / max(len(test_dataset), 1),
+        "fit_setup_time": float(split_info.get("fit_setup_time", 0.0) or 0.0),
+        "test_time_optimization": per_instance,
+        "amortized_training": not per_instance,
         "config_hash": config_hash,
         **_train_history_fields(rows[0].get("train_history", "{}") if rows else {}),
         **normalization_fields,
@@ -1261,6 +1535,50 @@ def _to_device_batch_for_eval(batch: PDEBatch, device: str) -> PDEBatch:
     return _to_device_batch(batch, torch.device(device))
 
 
+def _make_inference_batch(batch: PDEBatch) -> PDEBatch:
+    """Create the model-facing view without labels or hidden full truth.
+
+    Targets remain available to the evaluator outside this object. A zero tensor
+    preserves the declared output shape for per-instance algorithms without
+    exposing its values. Full/source/initial truth is similarly removed from
+    the model-facing metadata.
+    """
+    private_keys = {
+        "full_tensor",
+        "full_trajectory",
+        "original_input_fields",
+        "observed_solution_fields",
+        "observation_source_fields",
+        "background_fields",
+        "solution_fields",
+        "source_fields",
+        "coeff_fields",
+        "initial_1d",
+    }
+    metadata = {key: value for key, value in batch.metadata.items() if key not in private_keys}
+    metadata["inference_truth_hidden"] = True
+    return PDEBatch(
+        pde_name=batch.pde_name,
+        task=batch.task,
+        full_tensor=torch.zeros_like(batch.full_tensor),
+        input_fields=batch.input_fields,
+        target_fields=torch.zeros_like(batch.target_fields),
+        coords=batch.coords,
+        mask=batch.mask,
+        obs_values=batch.obs_values,
+        obs_coords=batch.obs_coords,
+        channel_names=list(batch.channel_names),
+        input_channel_names=list(batch.input_channel_names),
+        target_channel_names=list(batch.target_channel_names),
+        metadata=metadata,
+        pde_params=dict(batch.pde_params),
+        split=batch.split,
+        sample_indices=batch.sample_indices,
+        global_sample_ids=list(batch.global_sample_ids),
+        file_paths=list(batch.file_paths),
+    )
+
+
 def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
     for key in (
         "inference_optimization_time",
@@ -1309,19 +1627,29 @@ def _relative_l2_input_or_coeff_values(task: str, pred: torch.Tensor, target: to
 
 
 def _obs_mse_clean(pred: torch.Tensor, target: torch.Tensor, batch: PDEBatch) -> float:
-    if batch.task == "sparse_inverse":
+    if batch.task in {"sparse_inverse", "sparse_forward"}:
         return float("nan")
     return float(obs_mse(pred, target, batch.mask).detach().cpu())
 
 
 def _obs_mse_noisy(pred: torch.Tensor, batch: PDEBatch) -> float:
-    if batch.task == "sparse_inverse" or batch.mask is None or batch.obs_values is None:
+    if batch.task in {"sparse_inverse", "sparse_forward"} or batch.mask is None or batch.obs_values is None:
         return float("nan")
     try:
         c = min(pred.shape[1], batch.obs_values.shape[-1])
-        spatial_mask = batch.mask[0].bool().reshape(-1).to(pred.device)
-        flat_idx = spatial_mask.nonzero(as_tuple=False).squeeze(-1)
-        pred_obs = pred.reshape(pred.shape[0], pred.shape[1], -1).permute(0, 2, 1)[:, flat_idx, :c]
+        masks = batch.mask
+        if tuple(masks.shape) == tuple(pred.shape[1:]):
+            masks = masks.unsqueeze(0).expand(pred.shape[0], *masks.shape)
+        if tuple(masks.shape) != tuple(pred.shape):
+            return float("nan")
+        pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
+        pred_obs = torch.stack(
+            [
+                pred_flat[i, :, masks[i, 0].bool().reshape(-1)].transpose(0, 1)
+                for i in range(pred.shape[0])
+            ],
+            dim=0,
+        )[..., :c]
         obs = batch.obs_values.to(pred.device, pred.dtype)[..., :c]
         return float((pred_obs - obs).pow(2).mean().detach().cpu())
     except Exception:
@@ -1341,12 +1669,10 @@ def _mae_values(pred: torch.Tensor, target: torch.Tensor) -> list[float]:
 def _align(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if pred.shape == target.shape:
         return pred, target
-    if pred.ndim == target.ndim and pred.shape[0] == target.shape[0]:
-        slices = [slice(None)]
-        for a, b in zip(pred.shape[1:], target.shape[1:]):
-            slices.append(slice(0, min(a, b)))
-        return pred[tuple(slices)], target[tuple(slices)]
-    raise ValueError(f"Cannot align prediction shape {tuple(pred.shape)} with target shape {tuple(target.shape)}")
+    raise ValueError(
+        f"Prediction and target shapes must exactly match; got {tuple(pred.shape)} and {tuple(target.shape)}. "
+        "Silent cropping or broadcasting is forbidden."
+    )
 
 
 def _metric_stats(values: list[float]) -> dict[str, float | int]:
@@ -1438,6 +1764,97 @@ def _file_sha1(path: Path) -> str:
         return hashlib.sha1(path.read_bytes()).hexdigest()[:16]
     except Exception:
         return ""
+
+
+def _file_sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except Exception:
+        return ""
+
+
+def _config_content_sha256(config_path: str | None, cfg: dict[str, Any]) -> str:
+    if config_path:
+        path = Path(config_path)
+        if path.is_file():
+            return _file_sha256(path)
+    encoded = json.dumps(_json_safe(cfg), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_data_manifest_binding(args: argparse.Namespace) -> None:
+    """Fail closed on missing, stale, or non-full formal data evidence."""
+    manifest_sha256 = str(getattr(args, "data_manifest_sha256", "") or "").strip().lower()
+    manifest_path_text = str(getattr(args, "data_manifest_path", "") or "").strip()
+    formal_paper_run = args.experiment_mode == "paper" and requires_full_data_manifest(
+        args.task_protocol_version
+    )
+    if formal_paper_run and not manifest_sha256:
+        raise ValueError(
+            f"paper runs using task protocol {DEFAULT_TASK_PROTOCOL_VERSION} require "
+            "--data-manifest-sha256 from a passing full data-protocol report"
+        )
+    if manifest_sha256 and (
+        len(manifest_sha256) != 64 or any(character not in "0123456789abcdef" for character in manifest_sha256)
+    ):
+        raise ValueError("--data-manifest-sha256 must be a 64-character hexadecimal SHA-256 digest")
+    if manifest_path_text:
+        manifest_path = Path(manifest_path_text).expanduser().resolve()
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"data manifest not found: {manifest_path}")
+        if not manifest_sha256:
+            raise ValueError("--data-manifest-path requires --data-manifest-sha256")
+        observed_sha256 = _file_sha256(manifest_path)
+        if observed_sha256 != manifest_sha256:
+            raise ValueError(
+                "data manifest SHA-256 mismatch: "
+                f"observed={observed_sha256}, expected={manifest_sha256}, path={manifest_path}"
+            )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"data manifest is not readable JSON: {manifest_path}") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError(f"data manifest must be a JSON object: {manifest_path}")
+        if manifest.get("status") != "pass" or manifest.get("mode") != "full":
+            raise ValueError(
+                "data manifest must record status='pass' and mode='full': "
+                f"status={manifest.get('status')!r}, mode={manifest.get('mode')!r}, path={manifest_path}"
+            )
+        args.data_manifest_path = str(manifest_path)
+    args.data_manifest_sha256 = manifest_sha256
+
+
+def _local_run_fingerprint(args: argparse.Namespace, method_cfg: dict[str, Any]) -> str:
+    payload = {
+        "baseline": args.baseline,
+        "pde": args.pde,
+        "task": args.task,
+        "seed": int(args.seed),
+        "sensor_seed": int(args.sensor_seed),
+        "train_size": int(args.train_size),
+        "val_size": int(args.val_size),
+        "test_size": int(args.test_size),
+        "train_shards": int(args.train_shards),
+        "batch_size": int(args.batch_size),
+        "epochs": int(method_cfg.get("epochs", 0)),
+        "device": str(args.device),
+        "sensor_mode": str(args.sensor_mode),
+        "sensor_budget_mode": str(args.sensor_budget_mode),
+        "num_sensors": int(args.num_sensors),
+        "noise_level": float(args.noise_level),
+        "config_content_sha256": args.config_content_sha256,
+        "data_manifest_sha256": str(args.data_manifest_sha256),
+        "data_manifest_path": str(args.data_manifest_path),
+        "task_protocol_version": str(args.task_protocol_version),
+        "sensor_protocol_version": str(args.sensor_protocol_version),
+        "comparison_track": str(args.comparison_track),
+        "execution_mode": str(args.execution_mode),
+        "method": _json_safe(method_cfg),
+        "commit_hash": str(args.commit_hash),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _uses_official_inverse_observation_operator(baseline: str, method_cfg: dict[str, Any]) -> bool:
@@ -1661,6 +2078,8 @@ def _capability_fields(capability_info: dict[str, Any]) -> dict[str, Any]:
         "official_aligned_allowed": bool(capability_info.get("official_aligned_allowed", False)),
         "eligible_implementation_modes": json.dumps(list(capability_info.get("eligible_implementation_modes", []))),
         "paper_table_eligible": bool(capability_info.get("paper_table_eligible", False)),
+        "unified_comparison_eligible": bool(capability_info.get("unified_comparison_eligible", False)),
+        "official_native_eligible": bool(capability_info.get("official_native_eligible", False)),
     }
 
 
@@ -1697,6 +2116,27 @@ def _file_summary(train_dataset: PDEBatchDataset, val_dataset: PDEBatchDataset |
         return {"count": len(paths), "first": paths[:3]}
 
     return {"train": one(train_dataset), "val": one(val_dataset), "test": one(test_dataset)}
+
+
+def _split_mask_manifest(
+    train_dataset: PDEBatchDataset,
+    val_dataset: PDEBatchDataset | None,
+    test_dataset: PDEBatchDataset,
+) -> dict[str, Any]:
+    def one(dataset: PDEBatchDataset | None) -> dict[str, Any]:
+        if dataset is None:
+            return {"mask_id": "", "sample_mask_count": 0, "unique_mask_count": 0, "mask_ids_sha256": ""}
+        metadata = dataset.batch.metadata
+        mask_ids = [str(value) for value in metadata.get("mask_ids", []) or [] if value]
+        encoded = json.dumps(mask_ids, separators=(",", ":")).encode("utf-8")
+        return {
+            "mask_id": str(metadata.get("mask_id", "")),
+            "sample_mask_count": len(mask_ids),
+            "unique_mask_count": len(set(mask_ids)),
+            "mask_ids_sha256": hashlib.sha256(encoded).hexdigest() if mask_ids else "",
+        }
+
+    return {"train_epoch0": one(train_dataset), "validation": one(val_dataset), "test": one(test_dataset)}
 
 
 def _run_file_prefix(args: argparse.Namespace) -> str:
@@ -1755,13 +2195,6 @@ def _write_latest_csv(path: Path, row: dict[str, Any]) -> None:
         writer = csv.DictWriter(f, fieldnames=list(row.keys()))
         writer.writeheader()
         writer.writerow(row)
-
-
-def _commit_hash() -> str:
-    try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        return ""
 
 
 def _json_safe(obj: Any) -> Any:

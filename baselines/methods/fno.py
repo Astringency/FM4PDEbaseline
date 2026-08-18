@@ -47,10 +47,15 @@ class FNOBaseline(BaselineModel):
                     "neuraloperator",
                     "neuraloperator",
                     fallback_used=False,
-                    implementation_mode_effective="official",
-                    implementation_source="neuraloperator",
+                    implementation_mode_effective="adapted",
+                    implementation_source="neuraloperator_2_component_unified_training",
                     official_import_success=True,
-                    adapter_status="official_code",
+                    official_alignment_level="component",
+                    official_alignment_notes=(
+                        "Uses the vendored NeuralOperator 2.0 FNO network component with FM4PDE's unified "
+                        "normalization, pointwise MSE, optimizer, scheduler, early stopping, and data protocol."
+                    ),
+                    adapter_status="official_component_unified_training_adapter",
                     **official_source_info("neuraloperator"),
                 )
                 return self

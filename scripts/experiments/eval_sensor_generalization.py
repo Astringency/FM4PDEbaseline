@@ -3,9 +3,11 @@
 
 For each baseline (senseiver / recfno / voronoicnn), load the seed=1
 sparse_solution / poisson checkpoint from the old ``main_results_20260624_161620``
-outputs and run ``baselines.run --eval-only`` with test sensor locations at
-seed = 1 (train locations), 2, and 3 (unseen locations). This isolates the
-effect of moving the sparse observation points at test time.
+outputs and run a separately fingerprinted ``eval_only`` row with test sensor
+seeds 1, 2, and 3. Model seed and test-layout seed remain separate.
+
+Legacy checkpoints without v2 training provenance are rejected; they cannot be
+made trustworthy by deriving an evaluation identity after the fact.
 
 Usage:
     python scripts/experiments/eval_sensor_generalization.py --dry-run
@@ -25,6 +27,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.experiments.run_one import build_command  # noqa: E402
+from scripts.experiments.sensor_generalization_common import (  # noqa: E402
+    make_provenance_row,
+    require_source_identity,
+    write_eval_request,
+)
 
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_ROOT", "/home/zhangxf/share/zhangxfA100/large_storage/outputs/FM4PDEbaseline"))
 OLD_RUNS = OUTPUT_ROOT / "main_results_20260624_161620" / "runs" / "main_results"
@@ -51,57 +58,32 @@ def load_old_args(baseline: str) -> dict:
     return json.loads(configs[0].read_text())["args"]
 
 
-def build_eval_command(baseline: str, test_seed: int) -> tuple[list[str], Path]:
+def build_eval_command(baseline: str, test_seed: int) -> tuple[list[str], Path, dict]:
     old = load_old_args(baseline)
     ckpt = find_checkpoint(baseline)
     out_dir = EVAL_ROOT / baseline / f"testseed{test_seed}"
-
-    row = {
-        "baseline": old["baseline"],
-        "pde": old["pde"],
-        "task": old["task"],
-        "seed": test_seed,
-        "device": old.get("device", "cuda"),
-        "output_dir": str(out_dir),
-        "run_id": f"{old['run_id']}_testseed{test_seed}",
-        "run_name": f"{old['run_name']} testseed={test_seed}",
-        "task_group": old.get("task_group", "sparse_solution_main_amortized"),
-        "experiment_kind": old.get("experiment_kind", "main"),
-        "ablation_factor": old.get("ablation_factor", ""),
-        "config": old["config"],
-        "train_size": old["train_size"],
-        "val_size": old["val_size"],
-        "test_size": old["test_size"],
-        "train_shards": old.get("train_shards", 5),
-        "batch_size": old.get("batch_size", 16),
-        "epochs": old.get("epochs", 200),
-        "data_loading_mode": old.get("data_loading_mode", "eager"),
-        "num_workers": old.get("num_workers", 0),
-        "prefetch_factor": old.get("prefetch_factor", 2),
-        "scalar_param_mode": old.get("scalar_param_mode", "metadata"),
-        "num_sensors": old.get("num_sensors", 500),
-        "sensor_mode": old.get("sensor_mode", "random"),
-        "noise_level": old.get("noise_level", 0.0),
-        "load_full_trajectory": old.get("load_full_trajectory", False),
-        "pin_memory": old.get("pin_memory", True),
-        "persistent_workers": old.get("persistent_workers", False),
-        "steps": old.get("steps") or 0,
-        "refine_steps": old.get("refine_steps") or 0,
-        "particles": old.get("particles") or 0,
-    }
-
-    env = dict(os.environ)
-    env["DATA_ROOT"] = DATA_ROOT
-    env["SAVE_CHECKPOINT"] = "off"
-    env["PYTHON"] = sys.executable
+    source_run_id, source_fingerprint, source_seed = require_source_identity(
+        old, fallback_run_id=ckpt.parent.name.removeprefix("run=")
+    )
+    row = make_provenance_row(
+        old,
+        execution_mode="eval_only",
+        output_dir=out_dir,
+        run_label=f"sensor_gen_{baseline}_poisson_testseed{test_seed}",
+        seed=source_seed,
+        sensor_seed=test_seed,
+        source_train_run_id=source_run_id,
+        source_train_run_fingerprint=source_fingerprint,
+        source_train_seed=source_seed,
+        checkpoint_path=ckpt,
+    )
 
     # build_command uses DATA_ROOT/DEVICE/PYTHON from the process env.
     os.environ["DATA_ROOT"] = DATA_ROOT
     os.environ["SAVE_CHECKPOINT"] = "off"
     os.environ["PYTHON"] = sys.executable
     cmd = build_command(row)
-    cmd += ["--eval-only", "--checkpoint", str(ckpt)]
-    return cmd, out_dir
+    return cmd, out_dir, row
 
 
 def run(cmd: list[str], out_dir: Path) -> int:
@@ -147,11 +129,12 @@ def main() -> int:
     results = {}
     for baseline in args.baselines:
         for seed in args.seeds:
-            cmd, out_dir = build_eval_command(baseline, seed)
+            cmd, out_dir, row = build_eval_command(baseline, seed)
             key = (baseline, seed)
             if args.dry_run:
-                print(f"[dry-run] {baseline} seed={seed} -> {out_dir}")
+                print(f"[dry-run] {baseline} sensor_seed={seed} run_id={row['run_id']} -> {out_dir}")
                 continue
+            write_eval_request(out_dir, row, cmd)
             code = run(cmd, out_dir)
             results[key] = {"exit": code, "metrics": metrics_from_summary(out_dir)}
             print(f"  {key} -> {results[key]}", flush=True)

@@ -51,6 +51,7 @@ class BaselineModel(nn.Module):
         self.normalization_stats: NormalizationStats | None = None
         self.uses_normalization: bool = False
         self.normalization_stats_path: str = ""
+        self.provenance: dict[str, Any] = {}
 
     def build(self, config, data_spec):
         self.config = dict(config or {})
@@ -132,7 +133,7 @@ class BaselineModel(nn.Module):
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
-                "format_version": 1,
+                "format_version": 2,
                 "baseline": self.name,
                 "state_dict": self.state_dict(),
                 "config": self.config,
@@ -140,6 +141,7 @@ class BaselineModel(nn.Module):
                 "backend": self.backend_metadata(),
                 "uses_normalization": self.uses_normalization,
                 "normalization_stats": self.normalization_stats.state_dict() if self.normalization_stats is not None else None,
+                "provenance": dict(self.provenance),
             },
             path,
         )
@@ -158,9 +160,20 @@ class BaselineModel(nn.Module):
                 setattr(self, key, value)
         self.uses_normalization = bool(payload.get("uses_normalization", False))
         self.normalization_stats = NormalizationStats.from_state_dict(payload.get("normalization_stats"))
+        self.provenance = dict(payload.get("provenance", {}))
         return self
 
     def parameter_count(self) -> int:
+        """Count trainable real scalar degrees of freedom.
+
+        PyTorch stores one complex value as one element, but official
+        NeuralOperator/iFNO parameter reports count its real and imaginary
+        parts separately. This definition makes comparisons consistent.
+        """
+        return int(sum(p.numel() * (2 if p.is_complex() else 1) for p in self.parameters() if p.requires_grad))
+
+    def parameter_storage_count(self) -> int:
+        """Return raw PyTorch trainable ``numel`` for provenance/debugging."""
         return int(sum(p.numel() for p in self.parameters() if p.requires_grad))
 
     def backend_metadata(self) -> dict[str, Any]:
@@ -353,6 +366,9 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
     no_improve_epochs = 0
     cumulative_train_time = 0.0
     for epoch in range(epochs):
+        _set_dataset_epoch(train_loader, epoch)
+        if val_loader is not None:
+            _set_dataset_epoch(val_loader, 0)
         epoch_start = time.perf_counter()
         model.train()
         total = 0.0
@@ -368,6 +384,7 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
             target = batch.target_fields
             opt.zero_grad(set_to_none=True)
             pred = model.predict(batch)
+            _require_exact_shape(pred, target, model.name, "train")
             loss = loss_fn(pred, target)
             _raise_if_nonfinite_loss(loss, model, epoch + 1, step + 1, "train_loss")
             loss.backward()
@@ -406,6 +423,7 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
                     if model.uses_normalization and model.normalization_stats is not None:
                         batch = normalize_batch_input_target(batch, model.normalization_stats)
                     pred = model.predict(batch)
+                    _require_exact_shape(pred, batch.target_fields, model.name, "validation")
                     loss = F.mse_loss(pred, batch.target_fields)
                     _raise_if_nonfinite_loss(loss, model, epoch + 1, step + 1, "val_loss")
                     val_total += float(loss.detach().cpu())
@@ -474,6 +492,20 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
     if best_state is not None and restore_best:
         restore_state_dict(model, best_state)
     return history
+
+
+def _set_dataset_epoch(loader, epoch: int) -> None:
+    dataset = getattr(loader, "dataset", None)
+    if dataset is not None and hasattr(dataset, "set_epoch"):
+        dataset.set_epoch(int(epoch))
+
+
+def _require_exact_shape(pred: torch.Tensor, target: torch.Tensor, baseline: str, stage: str) -> None:
+    if tuple(pred.shape) != tuple(target.shape):
+        raise ValueError(
+            f"{baseline} {stage} prediction shape {tuple(pred.shape)} must exactly match target shape "
+            f"{tuple(target.shape)}; PyTorch broadcasting is forbidden"
+        )
 
 
 def _build_optimizer(model: nn.Module, config: dict[str, Any], lr: float) -> torch.optim.Optimizer:

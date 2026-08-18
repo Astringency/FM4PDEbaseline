@@ -231,6 +231,11 @@ class VIVIDBaseline(BaselineModel):
                     train_batch = normalize_batch_input_target(batch, self.normalization_stats)
                 opt.zero_grad(set_to_none=True)
                 pred = self.inverse_operator(train_batch)
+                if tuple(pred.shape) != tuple(train_batch.target_fields.shape):
+                    raise ValueError(
+                        f"VIVID inverse-operator prediction {tuple(pred.shape)} must exactly match target "
+                        f"{tuple(train_batch.target_fields.shape)}"
+                    )
                 inv = F.mse_loss(pred, train_batch.target_fields)
                 pred_physical = denormalize_prediction(pred, self.normalization_stats) if self.uses_normalization and self.normalization_stats is not None else pred
                 obs = observation_loss_from_batch(pred_physical, batch)
@@ -265,6 +270,11 @@ class VIVIDBaseline(BaselineModel):
                         batch = _move_batch_tensors(batch, device)
                         val_batch = normalize_batch_input_target(batch, self.normalization_stats) if self.uses_normalization and self.normalization_stats is not None else batch
                         pred = self.inverse_operator(val_batch)
+                        if tuple(pred.shape) != tuple(val_batch.target_fields.shape):
+                            raise ValueError(
+                                f"VIVID validation prediction {tuple(pred.shape)} must exactly match target "
+                                f"{tuple(val_batch.target_fields.shape)}"
+                            )
                         val_total += float(F.mse_loss(pred, val_batch.target_fields).detach().cpu())
                         val_count += 1
                 val_loss = val_total / max(val_count, 1)
@@ -284,10 +294,17 @@ def _mse_aligned(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     if a.shape == b.shape:
         return F.mse_loss(a, b)
     if a.ndim == 5 and b.ndim == 4:
-        return F.mse_loss(a[:, :, -1], b[:, : a.shape[1]])
+        terminal = a[:, :, -1]
+        if tuple(terminal.shape) == tuple(b.shape):
+            return F.mse_loss(terminal, b)
     if a.ndim == 4 and b.ndim == 5:
-        return F.mse_loss(a[:, : b.shape[1]], b[:, :, -1])
-    return F.mse_loss(a.reshape(a.shape[0], -1), b.reshape(b.shape[0], -1)[:, : a.reshape(a.shape[0], -1).shape[1]])
+        terminal = b[:, :, -1]
+        if tuple(a.shape) == tuple(terminal.shape):
+            return F.mse_loss(a, terminal)
+    raise ValueError(
+        f"VIVID state shapes must match exactly (or be an explicit full-trajectory/terminal pair), got "
+        f"{tuple(a.shape)} and {tuple(b.shape)}"
+    )
 
 
 def _inject_learned_state_into_trajectory(state0: torch.Tensor, learned_state: torch.Tensor, batch: PDEBatch) -> tuple[torch.Tensor, str]:

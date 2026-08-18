@@ -31,7 +31,7 @@ persistent_workers: true
 prefetch_factor: 2
 seeds: [1, 2, 3]
 sensor_counts: [50, 100, 250, 500, 1000]
-sensor_modes: [random, grid, fixed]
+sensor_modes: [random_per_sample, grid, fixed]
 noise_levels: [0.0, 0.01, 0.05, 0.10]
 
 method:
@@ -56,9 +56,6 @@ method:
   layers: 4
   hidden: 256
   basis: 128
-  token_dim: 128
-  num_latents: 128
-  heads: 4
   steps: 200
   refine_steps: 100
   lambda_obs: 1.0
@@ -89,11 +86,19 @@ method_by_baseline:
     early_stopping_patience: 12
   recfno:
     width: 64
-    embedding: mask
+    input_representation: voronoi_mask_coords
   senseiver:
-    token_dim: 128
-    num_latents: 128
-    heads: 4
+    space_bands: 32
+    enc_preproc_ch: 64
+    num_latents: 4
+    enc_num_latent_channels: 16
+    num_layers: 3
+    num_cross_attention_heads: 2
+    enc_num_self_attention_heads: 2
+    num_self_attention_layers_per_block: 3
+    dec_preproc_ch: null
+    dec_num_latent_channels: 16
+    dec_num_cross_attention_heads: 1
   voronoicnn:
     implementation_mode: official_architecture
     official_backend: voronoicnn

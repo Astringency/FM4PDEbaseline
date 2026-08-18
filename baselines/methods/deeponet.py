@@ -45,10 +45,15 @@ class DeepONetBaseline(BaselineModel):
                     "deepxde",
                     "deepxde",
                     fallback_used=False,
-                    implementation_mode_effective="official",
-                    implementation_source="deepxde",
+                    implementation_mode_effective="adapted",
+                    implementation_source="deepxde_cartesianprod_component_unified_training",
                     official_import_success=True,
-                    adapter_status="official_code_adapter",
+                    official_alignment_level="component",
+                    official_alignment_notes=(
+                        "Uses DeepXDE's DeepONetCartesianProd network component with FM4PDE's unified "
+                        "normalization, fit loop, optimizer, scheduler, and data protocol."
+                    ),
+                    adapter_status="official_component_unified_training_adapter",
                     **official_source_info("deepxde"),
                 )
             except Exception as exc:

@@ -65,6 +65,9 @@ class PINNSparseBaseline(BaselineModel):
         proto = self._new_field(self.coord_dim, self.target_channels)
         return int(sum(p.numel() for p in proto.parameters() if p.requires_grad))
 
+    def parameter_storage_count(self) -> int:
+        return self.parameter_count()
+
     def fit(self, train_loader, val_loader=None):
         return {"status": "per_instance_method_no_amortized_fit"}
 
@@ -73,6 +76,11 @@ class PINNSparseBaseline(BaselineModel):
             return self._predict_sparse_inverse(batch)
         if batch.task == "sparse_forward":
             return self._predict_sparse_forward(batch)
+        if batch.task in {"sparse_solution", "sparse_reconstruction"}:
+            raise RuntimeError(
+                "PINN-Sparse is disabled for the sensor-only sparse_solution protocol because its PDE objective "
+                "requires hidden source/coefficient/initial fields. Use a separately named equal-context protocol."
+            )
         start = time.perf_counter()
         preds = []
         steps = int(self.config.get("steps", 2))
@@ -223,14 +231,13 @@ def observation_loss_from_batch(pred: torch.Tensor, batch: PDEBatch, item: int |
         return sparse_inverse_observation_loss(pred, batch, item=item)
     target = batch.target_fields[item : item + 1] if item is not None else batch.target_fields
     obs_values = batch.obs_values[item : item + 1] if item is not None and batch.obs_values is not None else batch.obs_values
-    return _observation_loss(pred, target.to(pred.device, pred.dtype), batch.mask, obs_values)
+    return _observation_loss(pred, target.to(pred.device, pred.dtype), _item_mask(batch, item), obs_values)
 
 
 def sparse_inverse_observation_loss(solution: torch.Tensor, batch: PDEBatch, item: int | None = None) -> torch.Tensor:
-    observed = batch.metadata.get("observed_solution_fields", batch.input_fields)
-    target = observed[item : item + 1] if item is not None and isinstance(observed, torch.Tensor) else observed
+    target = batch.input_fields[item : item + 1] if item is not None else batch.input_fields
     obs_values = batch.obs_values[item : item + 1] if item is not None and batch.obs_values is not None else batch.obs_values
-    return _observation_loss(solution, target.to(solution.device, solution.dtype), batch.mask, obs_values)
+    return _observation_loss(solution, target.to(solution.device, solution.dtype), _item_mask(batch, item), obs_values)
 
 
 def sparse_forward_observation_loss(unknown: torch.Tensor, batch: PDEBatch, item: int | None = None) -> torch.Tensor:
@@ -238,7 +245,7 @@ def sparse_forward_observation_loss(unknown: torch.Tensor, batch: PDEBatch, item
     # `unknown` (source) must match the observed source values at sensor points.
     target = batch.input_fields[item : item + 1] if item is not None else batch.input_fields
     obs_values = batch.obs_values[item : item + 1] if item is not None and batch.obs_values is not None else batch.obs_values
-    return _observation_loss(unknown, target.to(unknown.device, unknown.dtype), batch.mask, obs_values)
+    return _observation_loss(unknown, target.to(unknown.device, unknown.dtype), _item_mask(batch, item), obs_values)
 
 
 def sparse_inverse_physics_loss(
@@ -250,7 +257,7 @@ def sparse_inverse_physics_loss(
 ) -> torch.Tensor:
     if batch.pde_name.lower() not in STATIC_SPARSE_INVERSE_PDES:
         return torch.tensor(float("nan"), device=unknown.device, dtype=unknown.dtype)
-    meta = _single_meta(batch, int(item or 0)) if item is not None else dict(batch.metadata)
+    meta = _single_meta(batch, item) if item is not None else _metadata_without_private_truth(batch)
     meta.update(_physics_weight_metadata(config))
     meta["task"] = "sparse_inverse"
     meta["solution_fields"] = solution
@@ -267,15 +274,39 @@ def _observation_loss(
 ) -> torch.Tensor:
     if obs_values is not None and mask is not None:
         c = min(pred.shape[1], obs_values.shape[-1])
-        spatial_mask = mask[0].bool().reshape(-1).to(pred.device)
-        flat_idx = spatial_mask.nonzero(as_tuple=False).squeeze(-1)
-        pred_obs = pred.reshape(pred.shape[0], pred.shape[1], -1).permute(0, 2, 1)[:, flat_idx, :c]
+        masks = mask
+        if tuple(masks.shape) == tuple(pred.shape[1:]):
+            masks = masks.unsqueeze(0).expand(pred.shape[0], *masks.shape)
+        if tuple(masks.shape) != tuple(pred.shape):
+            raise ValueError(
+                f"Observation mask shape {tuple(mask.shape)} must match prediction with or without batch "
+                f"({tuple(pred.shape)} or {tuple(pred.shape[1:])})"
+            )
+        flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
+        pred_obs = torch.stack(
+            [flat[i, :, masks[i, 0].bool().reshape(-1)].transpose(0, 1) for i in range(pred.shape[0])],
+            dim=0,
+        )[..., :c]
         obs = obs_values.to(pred.device, pred.dtype)[..., :c]
         return F.mse_loss(pred_obs, obs)
     if mask is None:
         return F.mse_loss(pred, target)
-    local_mask = mask[: pred.shape[1]].unsqueeze(0).to(pred.device, pred.dtype)
+    local_mask = mask
+    if tuple(local_mask.shape) == tuple(pred.shape[1:]):
+        local_mask = local_mask.unsqueeze(0).expand(pred.shape[0], *local_mask.shape)
+    if tuple(local_mask.shape) != tuple(pred.shape):
+        raise ValueError(f"Observation mask shape {tuple(mask.shape)} does not match prediction {tuple(pred.shape)}")
+    local_mask = local_mask.to(pred.device, pred.dtype)
     return (((pred - target) ** 2) * local_mask).sum() / local_mask.sum().clamp_min(1.0)
+
+
+def _item_mask(batch: PDEBatch, item: int | None) -> torch.Tensor | None:
+    mask = batch.mask
+    if mask is None or item is None:
+        return mask
+    if mask.ndim == batch.input_fields.ndim and mask.shape[0] == batch.input_fields.shape[0]:
+        return mask[item : item + 1]
+    return mask
 
 
 def _physics_weight_metadata(config: dict) -> dict:
@@ -314,13 +345,28 @@ def _smoothness_reg(field: torch.Tensor) -> torch.Tensor:
 
 
 def _single_meta(batch: PDEBatch, item: int) -> dict:
-    meta = dict(batch.metadata)
+    meta = _metadata_without_private_truth(batch)
     for key, value in list(meta.items()):
         if isinstance(value, torch.Tensor) and value.shape[:1] == batch.target_fields.shape[:1]:
             meta[key] = value[item : item + 1]
     return {
         "input_fields": batch.input_fields[item : item + 1],
-        "full_tensor": batch.full_tensor[item : item + 1],
         "task": batch.task,
         **meta,
     }
+
+
+def _metadata_without_private_truth(batch: PDEBatch) -> dict:
+    private_truth_keys = {
+        "full_tensor",
+        "original_input_fields",
+        "observed_solution_fields",
+        "observation_source_fields",
+        "background_fields",
+        "full_trajectory",
+        "solution_fields",
+        "source_fields",
+        "coeff_fields",
+        "initial_1d",
+    }
+    return {key: value for key, value in batch.metadata.items() if key not in private_truth_keys}

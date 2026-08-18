@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Run every remaining ``experiment_plan_v2`` run, in dependency order.
 
-The remaining set is computed dynamically: a run is considered complete when
-``summary.json`` exists in its ``output_dir``. This keeps the script correct
-after the matrix is regenerated (e.g. the sparse_forward_main_physics time-
-dependent PDEs were removed from the plan) and after partial runs.
+The remaining set is computed dynamically.  A run is complete only when its
+``summary.json`` is a successful, schema-v2 result whose identity, configuration
+content hash, and run fingerprint match the matrix row.  Legacy, eval-only, or
+mismatched summaries remain auditable but are never mistaken for training runs.
 
 Phases
 ------
@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.experiments.run_one import build_command  # noqa: E402
+from scripts.experiments.provenance import quarantine_output_artifacts, summary_validation_reasons  # noqa: E402
 
 # Directory containing the ``experiment_plan_v2`` outputs (matrix + runs + logs).
 # Defaults to the local ``outputs/``; set OUTPUT_ROOT to run against a different
@@ -65,8 +66,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def completion_reasons(row: dict[str, Any]) -> list[str]:
+    summary_path = Path(row["output_dir"]) / "summary.json"
+    if not summary_path.exists():
+        return ["summary_missing"]
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ["summary_unreadable"]
+    if not isinstance(summary, dict):
+        return ["summary_not_object"]
+    return summary_validation_reasons(row, summary)
+
+
 def is_complete(row: dict[str, Any]) -> bool:
-    return (Path(row["output_dir"]) / "summary.json").exists()
+    return not completion_reasons(row)
 
 
 def _remap_output_paths(row: dict[str, Any]) -> dict[str, Any]:
@@ -119,20 +133,25 @@ def _log_path(row: dict[str, Any]) -> Path:
 
 
 def _clean_stale_output(row: dict[str, Any]) -> None:
-    """Remove partial per-sample results from an interrupted run.
+    """Quarantine partial or provenance-invalid artifacts before a rerun.
 
     ``baselines.run`` appends to ``results_raw.jsonl`` / ``results_summary.jsonl``.
     If a run was killed before writing ``summary.json``, relaunching it would
-    append a fresh 1000-sample pass on top of the partial rows and corrupt the
-    metrics. Drop those stale append-only files so the relaunch starts clean.
+    append a fresh pass on top of stale rows and corrupt the metrics.  Moving
+    every prior top-level artifact keeps the evidence readable while ensuring
+    the relaunched run starts clean.
     """
-    out = Path(row["output_dir"])
-    if (out / "summary.json").exists():
+    if is_complete(row):
         return
-    for name in ("results_raw.jsonl", "results_summary.jsonl"):
-        path = out / name
-        if path.exists():
-            path.unlink()
+    quarantine_invalid_output(row)
+
+
+def quarantine_invalid_output(row: dict[str, Any]) -> Path | None:
+    out = Path(row["output_dir"])
+    if not out.exists() or is_complete(row):
+        return None
+    reasons = completion_reasons(row)
+    return quarantine_output_artifacts(row, reasons)
 
 
 def _launch(row: dict[str, Any], gpu: int) -> subprocess.Popen:

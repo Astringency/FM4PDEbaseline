@@ -90,8 +90,15 @@ class VoronoiCNNBaseline(BaselineModel):
         mask = batch.mask
         if mask is None:
             mask_grid = torch.ones_like(vor)
+        elif tuple(mask.shape) == tuple(vor.shape):
+            mask_grid = mask.to(vor.device, vor.dtype)
+        elif tuple(mask.shape) == tuple(vor.shape[1:]):
+            mask_grid = mask.unsqueeze(0).expand(vor.shape[0], *mask.shape).to(vor.device, vor.dtype)
         else:
-            mask_grid = mask.unsqueeze(0).repeat(vor.shape[0], 1, 1, 1).to(vor.device, vor.dtype)
+            raise ValueError(
+                f"VoronoiCNN mask shape {tuple(mask.shape)} must match input with or without batch "
+                f"({tuple(vor.shape)} or {tuple(vor.shape[1:])})"
+            )
         parts = [vor, mask_grid]
         if self.include_coords:
             parts.append(grid_channels(vor))

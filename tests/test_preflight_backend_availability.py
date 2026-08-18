@@ -58,7 +58,7 @@ def test_official_or_skip_uses_aligned_when_direct_official_missing():
     assert _preflight_backend_availability(args, cap, {"implementation_mode": "official_or_skip"}) is None
 
 
-def test_official_or_skip_skips_when_aligned_unavailable(monkeypatch):
+def test_adapted_ifno_does_not_claim_or_probe_official_backend(monkeypatch):
     def missing_direct():
         raise OfficialImportError("missing direct")
 
@@ -69,6 +69,5 @@ def test_official_or_skip_skips_when_aligned_unavailable(monkeypatch):
     monkeypatch.setattr(run_module, "get_ifno_official_aligned_status", missing_aligned)
     args = Namespace(experiment_mode="paper", baseline="ifno", pde="darcy")
     cap = resolve_capability("ifno", "darcy", "forward")
-    skip = _preflight_backend_availability(args, cap, {"implementation_mode": "official_or_skip"})
-    assert skip is not None
-    assert "missing aligned" in skip["reason"]
+    assert cap.implementation_required == "adapted_allowed"
+    assert _preflight_backend_availability(args, cap, {"implementation_mode": "official_or_skip"}) is None

@@ -2,11 +2,7 @@ name: runtime_budget_ablation
 experiment_kind: ablation
 ablation_factor: runtime_budget
 config: baselines/configs/paper.yaml
-pdes:
-  - poisson
-  - nsnonbounded
-  - reaction_diffusion
-  - shallow_water
+pdes: [poisson, nsnonbounded, reaction_diffusion, shallow_water]
 baselines: [pinn_sparse, pc_bnn, pde_opt, var4d, vivid]
 seeds: [1, 2, 3]
 train_size: 50000
@@ -14,7 +10,7 @@ val_size: 0
 test_size: 10000
 train_shards: 5
 num_sensors: 500
-sensor_mode: random
+sensor_mode: random_per_sample
 noise_level: 0.0
 data_loading_mode: eager
 num_workers: 4
@@ -22,17 +18,35 @@ pin_memory: true
 persistent_workers: true
 prefetch_factor: 2
 device: cuda
-task_groups: [runtime_budget_ablation]
+task_groups:
+  - runtime_budget_sparse_forward
+  - runtime_budget_pcbnn
+  - runtime_budget_time_varying_da
 task_group_overrides:
-  runtime_budget_ablation:
+  runtime_budget_sparse_forward:
+    task: sparse_forward
+    pdes: [poisson]
+    baselines: [pinn_sparse, pde_opt]
     budget_by_baseline:
       pinn_sparse:
         steps: [50, 100, 250, 500, 1000]
+      pde_opt:
+        steps: [50, 100, 250, 500, 1000]
+  runtime_budget_pcbnn:
+    task: sparse_solution
+    pdes: [shallow_water]
+    baselines: [pc_bnn]
+    budget_by_baseline:
       pc_bnn:
         steps: [50, 100, 250, 500, 1000]
         particles: 8
-      pde_opt:
-        steps: [50, 100, 250, 500, 1000]
+  runtime_budget_time_varying_da:
+    task: sparse_solution
+    pdes: [nsnonbounded, reaction_diffusion, shallow_water]
+    baselines: [var4d, vivid]
+    sensor_mode: time_varying
+    load_full_trajectory: true
+    budget_by_baseline:
       var4d:
         steps: [50, 100, 250, 500, 1000]
       vivid:

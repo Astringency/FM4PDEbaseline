@@ -49,19 +49,19 @@ task_group_overrides:
     task: sparse_solution
     baselines: [recfno, senseiver, voronoicnn]
     num_sensors: 500
-    sensor_mode: random
+    sensor_mode: random_per_sample
     noise_level: 0.0
   sparse_solution_main_physics:
     task: sparse_solution
     baselines: [pinn_sparse, pc_bnn, pde_opt]
     num_sensors: 500
-    sensor_mode: random
+    sensor_mode: random_per_sample
     noise_level: 0.0
   sparse_inverse_main:
     task: sparse_inverse
     baselines: [pinn_sparse, pde_opt]
     num_sensors: 500
-    sensor_mode: random
+    sensor_mode: random_per_sample
     noise_level: 0.0
   time_varying_da_main:
     task: sparse_solution

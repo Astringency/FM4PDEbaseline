@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
 import shlex
@@ -26,9 +25,18 @@ from baselines.experiment_matrix import (
     PER_INSTANCE_BASELINES,
     TIME_VARYING_SENSOR_BASELINES,
     capability_skip_row,
-    compatibility_reason,
     main_table_skip_reason,
     resolve_capability,
+)
+from scripts.experiments.provenance import (
+    DEFAULT_SENSOR_PROTOCOL_VERSION,
+    DEFAULT_TASK_PROTOCOL_VERSION,
+    FINGERPRINT_FIELDS,
+    MATRIX_SCHEMA_VERSION,
+    SUMMARY_SCHEMA_VERSION,
+    repository_revision,
+    run_fingerprint,
+    sha256_file,
 )
 
 
@@ -54,6 +62,9 @@ GROUP_TO_TASK = {
     "sensor_mode_ablation": "sparse_solution",
     "time_varying_sensor_ablation": "sparse_solution",
     "runtime_budget_ablation": "sparse_solution",
+    "runtime_budget_sparse_forward": "sparse_forward",
+    "runtime_budget_pcbnn": "sparse_solution",
+    "runtime_budget_time_varying_da": "sparse_solution",
     "train_size_ablation": "sparse_solution",
 }
 
@@ -71,10 +82,14 @@ DEFAULT_BASELINES_BY_GROUP = {
     "sensor_mode_ablation": ["recfno", "senseiver", "voronoicnn", "pde_opt"],
     "time_varying_sensor_ablation": ["var4d", "vivid", "senseiver"],
     "runtime_budget_ablation": ["pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"],
+    "runtime_budget_sparse_forward": ["pinn_sparse", "pde_opt"],
+    "runtime_budget_pcbnn": ["pc_bnn"],
+    "runtime_budget_time_varying_da": ["var4d", "vivid"],
     "train_size_ablation": ["fno", "deeponet", "recfno", "senseiver", "voronoicnn"],
 }
 
 VALID_EXPERIMENT_KINDS = {"main", "ablation"}
+VALID_COMPARISON_TRACKS = {"unified_adapted", "official_native"}
 VALID_ABLATION_FACTORS = {
     "sensor_count",
     "noise_level",
@@ -92,41 +107,38 @@ FACTOR_TO_VARIED_FIELDS = {
     "train_size": {"train_size"},
 }
 
-HASH_FIELDS = [
-    "experiment_kind",
-    "ablation_factor",
-    "task_group",
-    "task",
-    "pde",
-    "baseline",
-    "seed",
-    "train_size",
-    "test_size",
-    "num_sensors",
-    "sensor_mode",
-    "noise_level",
-    "steps",
-    "refine_steps",
-    "particles",
-    "scalar_param_mode",
-    "data_loading_mode",
-    "num_workers",
-    "pin_memory",
-    "persistent_workers",
-    "prefetch_factor",
-    "load_full_trajectory",
-]
+# Backwards-compatible public name used by downstream tooling.  The v2 list is
+# defined in one place alongside the summary validation contract.
+HASH_FIELDS = list(FINGERPRINT_FIELDS)
 
 MATRIX_FIELDS = [
+    "matrix_schema_version",
+    "summary_schema_version",
     "run_id",
+    "run_fingerprint",
     "run_name",
+    "execution_mode",
+    "source_train_run_id",
+    "source_train_run_fingerprint",
+    "comparison_track",
     "experiment_kind",
     "ablation_factor",
     "task_group",
     "task",
+    "task_protocol_version",
+    "sensor_protocol_version",
+    "data_manifest_sha256",
+    "data_manifest_path",
+    "capability_status",
+    "implementation_required",
+    "paper_table_eligible",
+    "unified_comparison_eligible",
+    "official_native_eligible",
     "pde",
     "baseline",
     "seed",
+    "sensor_seed",
+    "source_train_seed",
     "train_size",
     "val_size",
     "test_size",
@@ -147,7 +159,11 @@ MATRIX_FIELDS = [
     "refine_steps",
     "particles",
     "device",
+    "commit_hash",
     "config",
+    "config_content_sha256",
+    "checkpoint_path",
+    "checkpoint_sha256",
     "output_dir",
     "log_dir",
     "status_file",
@@ -177,14 +193,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-root", default=os.environ.get("OUT_ROOT", "outputs/baselines_large"))
     parser.add_argument("--matrix-name", default="")
     parser.add_argument("--include-skipped", action="store_true", help="Also include unsupported rows in the matrix with skip_reason set.")
-    parser.add_argument("--main-table-only", action="store_true", help="Skip adapted/supplement-only capabilities at matrix generation time.")
-    parser.add_argument("--paper-mode", action="store_true", help="Alias for --main-table-only.")
+    parser.add_argument(
+        "--main-table-only",
+        action="store_true",
+        help="Legacy table-layout flag; use --comparison-track official_native for strict official verification.",
+    )
+    parser.add_argument("--paper-mode", action="store_true", help="Legacy alias for --main-table-only.")
+    parser.add_argument("--comparison-track", choices=sorted(VALID_COMPARISON_TRACKS), default="")
+    parser.add_argument(
+        "--data-manifest",
+        default="",
+        help="Full, passing data_protocol_report.json to bind into every formal experiment row.",
+    )
     return parser.parse_args(argv)
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def load_data_manifest_binding(path: str | Path) -> tuple[str, str]:
+    """Validate a full data-protocol report and return absolute path + SHA-256."""
+    manifest_path = Path(path).expanduser().resolve()
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"data manifest not found: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"data manifest is not readable JSON: {manifest_path}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError(f"data manifest must be a JSON object: {manifest_path}")
+    if manifest.get("status") != "pass":
+        raise ValueError(
+            f"data manifest must have status='pass', got {manifest.get('status')!r}: {manifest_path}"
+        )
+    if manifest.get("mode") != "full":
+        raise ValueError(
+            f"data manifest must have mode='full', got {manifest.get('mode')!r}: {manifest_path}"
+        )
+    return str(manifest_path), sha256_file(manifest_path)
 
 
 def build_matrix(
@@ -194,10 +242,12 @@ def build_matrix(
     include_skipped: bool = False,
     main_table_only: bool | None = None,
     emit_progress: bool = False,
+    data_manifest: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     output_root = Path(output_root)
     experiment_kind = _experiment_kind(cfg)
     ablation_factor = _ablation_factor(cfg, experiment_kind)
+    comparison_track = _comparison_track(cfg)
     if main_table_only is None:
         main_table_only = bool(cfg.get("main_table_only", False))
     allow_multi = _as_bool(cfg.get("allow_multi_factor_grid", False))
@@ -208,6 +258,14 @@ def build_matrix(
     rows: list[dict[str, Any]] = []
     skipped: dict[tuple[Any, ...], dict[str, Any]] = {}
     global_defaults = _global_defaults(cfg)
+    commit_hash = repository_revision(ROOT)
+    if data_manifest:
+        data_manifest_path, data_manifest_sha256 = load_data_manifest_binding(data_manifest)
+    else:
+        # Direct construction remains useful for capability/design inspection.
+        # Such formal rows cannot be executed or published until rebuilt from
+        # the CLI with a passing full manifest.
+        data_manifest_path, data_manifest_sha256 = "", ""
 
     for task_group in task_groups:
         if task_group not in GROUP_TO_TASK:
@@ -248,6 +306,7 @@ def build_matrix(
                         "matrix_name": matrix_name,
                         "experiment_kind": experiment_kind,
                         "ablation_factor": ablation_factor,
+                        "comparison_track": comparison_track,
                         "task_group": task_group,
                         "task": task,
                         "pde": pde,
@@ -264,7 +323,16 @@ def build_matrix(
                     }
                     _merge_skip(skipped, skipped_row)
                     if include_skipped:
-                        rows.append(_skipped_matrix_row(skipped_row, global_defaults, output_root))
+                        rows.append(
+                            _skipped_matrix_row(
+                                skipped_row,
+                                global_defaults,
+                                output_root,
+                                commit_hash,
+                                data_manifest_path,
+                                data_manifest_sha256,
+                            )
+                        )
             for baseline in candidate_baselines:
                 budget_variants = _budget_variants(cfg, group_cfg, baseline, ablation_factor, experiment_kind)
                 for sensor_mode in expansion["sensor_modes"]:
@@ -279,7 +347,26 @@ def build_matrix(
                         uses_official_inverse_observation_operator=_matrix_uses_official_inverse_observation_operator(cfg, group_cfg, baseline),
                     )
                     reason = capability.reason if capability.support_status == "unsupported" else ""
-                    if not reason and main_table_only and not capability.paper_table_eligible:
+                    if not reason and comparison_track == "unified_adapted" and not capability.unified_comparison_eligible:
+                        reason = (
+                            f"{capability.reason}; this debug/supplement adaptation is not eligible for the unified "
+                            "comparison track"
+                        )
+                    if not reason and comparison_track == "official_native" and not capability.official_native_eligible:
+                        reason = (
+                            f"{capability.baseline}/{capability.task_family} is not eligible for the strict "
+                            "official-native verification track"
+                        )
+                    # ``main_table_only`` is retained as a legacy layout flag,
+                    # not as a synonym for official reproduction.  Unified
+                    # comparison explicitly permits supported adaptations;
+                    # the official-native track has its own strict predicate.
+                    if (
+                        not reason
+                        and comparison_track == "official_native"
+                        and main_table_only
+                        and not capability.paper_table_eligible
+                    ):
                         reason = main_table_skip_reason(capability)
                     if reason:
                         skipped_row = capability_skip_row(
@@ -289,6 +376,8 @@ def build_matrix(
                                 "matrix_name": matrix_name,
                                 "experiment_kind": experiment_kind,
                                 "ablation_factor": ablation_factor,
+                                "comparison_track": comparison_track,
+                                "official_native_eligible": capability.official_native_eligible,
                                 "reason": reason,
                                 "unsupported_reason": reason if capability.support_status == "unsupported" else "",
                                 "would_have_expanded": (
@@ -302,7 +391,16 @@ def build_matrix(
                         )
                         _merge_skip(skipped, skipped_row)
                         if include_skipped:
-                            rows.append(_skipped_matrix_row(skipped_row, global_defaults, output_root))
+                            rows.append(
+                                _skipped_matrix_row(
+                                    skipped_row,
+                                    global_defaults,
+                                    output_root,
+                                    commit_hash,
+                                    data_manifest_path,
+                                    data_manifest_sha256,
+                                )
+                            )
                         continue
                     for seed in seeds:
                         for train_size in expansion["train_sizes"]:
@@ -317,6 +415,8 @@ def build_matrix(
                                             matrix_name=matrix_name,
                                             experiment_kind=experiment_kind,
                                             ablation_factor=ablation_factor,
+                                            comparison_track=comparison_track,
+                                            capability=capability,
                                             task_group=task_group,
                                             task=task,
                                             pde=str(pde),
@@ -327,12 +427,24 @@ def build_matrix(
                                             sensor_mode=str(sensor_mode),
                                             noise_level=float(noise_level),
                                             budget=budget,
+                                            commit_hash=commit_hash,
+                                            data_manifest_path=data_manifest_path,
+                                            data_manifest_sha256=data_manifest_sha256,
                                         )
                                         rows.append(row)
 
     _ensure_unique_run_ids(rows)
     skipped_rows = list(skipped.values())
-    summary = _summary(rows, skipped_rows, matrix_name, experiment_kind, ablation_factor)
+    summary = _summary(
+        rows,
+        skipped_rows,
+        matrix_name,
+        experiment_kind,
+        ablation_factor,
+        comparison_track,
+        data_manifest_path,
+        data_manifest_sha256,
+    )
     return rows, skipped_rows, summary
 
 
@@ -381,6 +493,13 @@ def _ablation_factor(cfg: dict[str, Any], experiment_kind: str) -> str:
     return factor
 
 
+def _comparison_track(cfg: dict[str, Any]) -> str:
+    track = str(cfg.get("comparison_track", "unified_adapted") or "unified_adapted")
+    if track not in VALID_COMPARISON_TRACKS:
+        raise ValueError(f"comparison_track must be one of {sorted(VALID_COMPARISON_TRACKS)}, got {track!r}")
+    return track
+
+
 def _global_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     train_size = _env_int("TRAIN_SIZE", int(cfg.get("train_size", 50000)))
     return {
@@ -390,7 +509,11 @@ def _global_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
         "test_size": _env_int("TEST_SIZE", int(cfg.get("test_size", 10000))),
         "train_shards": _env_int("TRAIN_SHARDS", int(cfg.get("train_shards", 5))),
         "sensor_counts": _env_list("SENSOR_COUNTS", _first_present(cfg, ["sensor_counts", "num_sensors", "sensor_count"], [500]), int),
-        "sensor_modes": _env_list("SENSOR_MODES", _first_present(cfg, ["sensor_modes", "sensor_mode"], ["random"]), str),
+        "sensor_modes": _env_list(
+            "SENSOR_MODES",
+            _first_present(cfg, ["sensor_modes", "sensor_mode"], ["random_per_sample"]),
+            str,
+        ),
         "noise_levels": _env_list("NOISE_LEVELS", _first_present(cfg, ["noise_levels", "noise_level"], [0.0]), float),
         "train_sizes": _env_list("TRAIN_SIZES", cfg.get("train_sizes", [train_size]), int),
         "data_loading_mode": str(cfg.get("data_loading_mode", "eager")),
@@ -622,6 +745,8 @@ def _make_run_row(
     matrix_name: str,
     experiment_kind: str,
     ablation_factor: str,
+    comparison_track: str,
+    capability,
     task_group: str,
     task: str,
     pde: str,
@@ -632,6 +757,9 @@ def _make_run_row(
     sensor_mode: str,
     noise_level: float,
     budget: dict[str, int],
+    commit_hash: str,
+    data_manifest_path: str,
+    data_manifest_sha256: str,
 ) -> dict[str, Any]:
     resources = _resource_config(cfg, baseline)
     val_size = _env_int("VAL_SIZE", int(group_cfg.get("val_size", defaults["val_size"])))
@@ -648,16 +776,45 @@ def _make_run_row(
     if sensor_mode == "time_varying" or task_group == "time_varying_sensor_ablation":
         load_full_trajectory = True
     scalar_param_mode = _scalar_param_mode(defaults, pde, task)
+    config_path = str(group_cfg.get("config", defaults["config"]))
     row: dict[str, Any] = {
+        "matrix_schema_version": MATRIX_SCHEMA_VERSION,
+        "summary_schema_version": SUMMARY_SCHEMA_VERSION,
         "run_id": "",
+        "run_fingerprint": "",
         "run_name": "",
+        "execution_mode": "train",
+        "source_train_run_id": "",
+        "source_train_run_fingerprint": "",
+        "comparison_track": comparison_track,
         "experiment_kind": experiment_kind,
         "ablation_factor": ablation_factor,
         "task_group": task_group,
         "task": task,
+        "task_protocol_version": str(
+            group_cfg.get(
+                "task_protocol_version",
+                cfg.get("task_protocol_version", DEFAULT_TASK_PROTOCOL_VERSION),
+            )
+        ),
+        "sensor_protocol_version": str(
+            group_cfg.get(
+                "sensor_protocol_version",
+                cfg.get("sensor_protocol_version", DEFAULT_SENSOR_PROTOCOL_VERSION),
+            )
+        ),
+        "data_manifest_sha256": data_manifest_sha256,
+        "data_manifest_path": data_manifest_path,
+        "capability_status": capability.support_status,
+        "implementation_required": capability.implementation_required,
+        "paper_table_eligible": bool(capability.paper_table_eligible),
+        "unified_comparison_eligible": bool(capability.unified_comparison_eligible),
+        "official_native_eligible": bool(capability.official_native_eligible),
         "pde": pde,
         "baseline": baseline,
         "seed": seed,
+        "sensor_seed": _env_int("SENSOR_SEED", int(group_cfg.get("sensor_seed", cfg.get("sensor_seed", seed)))),
+        "source_train_seed": "",
         "train_size": train_size,
         "val_size": val_size,
         "test_size": test_size,
@@ -678,12 +835,17 @@ def _make_run_row(
         "refine_steps": int(budget.get("refine_steps", 0) or 0),
         "particles": int(budget.get("particles", 0) or 0),
         "device": defaults["device"],
-        "config": str(group_cfg.get("config", defaults["config"])),
+        "commit_hash": commit_hash,
+        "config": config_path,
+        "config_content_sha256": sha256_file(config_path, root=ROOT),
+        "checkpoint_path": "",
+        "checkpoint_sha256": "",
         "output_dir": "",
         "log_dir": "",
         "status_file": "",
         "skip_reason": "",
     }
+    row["run_fingerprint"] = run_fingerprint(row)
     row["run_id"] = _run_id(row)
     row["run_name"] = _run_name(row)
     row["output_dir"] = str(_run_output_dir(output_root, matrix_name, row))
@@ -734,8 +896,8 @@ def _scalar_param_mode(defaults: dict[str, Any], pde: str, task: str) -> str:
 
 
 def _run_id(row: dict[str, Any]) -> str:
-    payload = {key: row[key] for key in HASH_FIELDS}
-    digest = hashlib.sha1(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:12]
+    fingerprint = str(row.get("run_fingerprint") or run_fingerprint(row))
+    digest = fingerprint[:12]
     prefix = f"{row['task_group']}_{row['baseline']}_{row['pde']}_s{row['seed']}"
     return _safe_name(f"{prefix}_{digest}")
 
@@ -820,18 +982,43 @@ def _budget_label(row: dict[str, Any]) -> str:
     return ""
 
 
-def _skipped_matrix_row(skip: dict[str, Any], defaults: dict[str, Any], output_root: Path) -> dict[str, Any]:
+def _skipped_matrix_row(
+    skip: dict[str, Any],
+    defaults: dict[str, Any],
+    output_root: Path,
+    commit_hash: str,
+    data_manifest_path: str,
+    data_manifest_sha256: str,
+) -> dict[str, Any]:
     row = {field: "" for field in MATRIX_FIELDS}
     row.update(
         {
+            "matrix_schema_version": MATRIX_SCHEMA_VERSION,
+            "summary_schema_version": SUMMARY_SCHEMA_VERSION,
             "run_id": _safe_name(f"skipped_{skip['task_group']}_{skip['baseline']}_{skip['pde']}_{skip['sensor_mode']}"),
+            "run_fingerprint": "",
+            "execution_mode": "skipped",
+            "source_train_run_id": "",
+            "source_train_run_fingerprint": "",
+            "comparison_track": skip.get("comparison_track", "unified_adapted"),
             "experiment_kind": skip.get("experiment_kind", ""),
             "ablation_factor": skip.get("ablation_factor", ""),
             "task_group": skip["task_group"],
             "task": skip["task"],
+            "task_protocol_version": DEFAULT_TASK_PROTOCOL_VERSION,
+            "sensor_protocol_version": DEFAULT_SENSOR_PROTOCOL_VERSION,
+            "data_manifest_sha256": data_manifest_sha256,
+            "data_manifest_path": data_manifest_path,
+            "capability_status": skip.get("capability_status", "unsupported"),
+            "implementation_required": skip.get("implementation_required", "unsupported"),
+            "paper_table_eligible": bool(skip.get("paper_table_eligible", False)),
+            "unified_comparison_eligible": bool(skip.get("unified_comparison_eligible", False)),
+            "official_native_eligible": bool(skip.get("official_native_eligible", False)),
             "pde": skip["pde"],
             "baseline": skip["baseline"],
             "seed": 0,
+            "sensor_seed": 0,
+            "source_train_seed": "",
             "train_size": defaults["train_size"],
             "val_size": defaults["val_size"],
             "test_size": defaults["test_size"],
@@ -852,7 +1039,11 @@ def _skipped_matrix_row(skip: dict[str, Any], defaults: dict[str, Any], output_r
             "refine_steps": 0,
             "particles": 0,
             "device": defaults["device"],
+            "commit_hash": commit_hash,
             "config": defaults["config"],
+            "config_content_sha256": "",
+            "checkpoint_path": "",
+            "checkpoint_sha256": "",
             "output_dir": str(output_root / "skipped" / _safe_name(skip["task_group"])),
             "log_dir": str(output_root / "logs" / "skipped"),
             "status_file": "",
@@ -886,6 +1077,9 @@ def _summary(
     matrix_name: str,
     experiment_kind: str,
     ablation_factor: str,
+    comparison_track: str,
+    data_manifest_path: str,
+    data_manifest_sha256: str,
 ) -> dict[str, Any]:
     active_rows = [row for row in rows if not row.get("skip_reason")]
     by_group = Counter(row["task_group"] for row in active_rows)
@@ -899,9 +1093,14 @@ def _summary(
         skipped_total_expanded += int(row.get("would_have_expanded", 1))
     varied_fields, fixed_fields = _field_variation(active_rows, ablation_factor)
     return {
+        "matrix_schema_version": MATRIX_SCHEMA_VERSION,
+        "summary_schema_version": SUMMARY_SCHEMA_VERSION,
         "matrix_name": matrix_name,
         "experiment_kind": experiment_kind,
         "ablation_factor": ablation_factor,
+        "comparison_track": comparison_track,
+        "data_manifest_sha256": data_manifest_sha256,
+        "data_manifest_path": data_manifest_path,
         "run_count": len(active_rows),
         "skipped_combo_count": len(skipped_rows),
         "skipped_expanded_count": skipped_total_expanded,
@@ -1053,12 +1252,15 @@ def _output_paths(output_root: str | Path, matrix_name: str) -> dict[str, Path]:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     cfg = load_config(args.config)
+    if args.comparison_track:
+        cfg["comparison_track"] = args.comparison_track
     matrix_name = args.matrix_name or str(cfg.get("name") or Path(args.config).stem)
     main_table_only = bool(args.main_table_only or args.paper_mode or cfg.get("main_table_only", False))
     task_groups = list(cfg.get("task_groups", []))
     progress(
         f"[matrix start] config={args.config} matrix_name={matrix_name} output_root={args.output_root} "
         f"experiment_kind={cfg.get('experiment_kind', '')} main_table_only={main_table_only} "
+        f"comparison_track={cfg.get('comparison_track', 'unified_adapted')} "
         f"task_groups={_short_list(task_groups)}"
     )
     rows, skipped, summary = build_matrix(
@@ -1068,6 +1270,7 @@ def main(argv: list[str] | None = None) -> None:
         include_skipped=args.include_skipped,
         main_table_only=main_table_only,
         emit_progress=True,
+        data_manifest=args.data_manifest or None,
     )
     write_outputs(rows, skipped, summary, args.output_root, matrix_name)
     output_paths = _output_paths(args.output_root, matrix_name)

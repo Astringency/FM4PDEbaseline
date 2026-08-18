@@ -4,8 +4,9 @@ import h5py
 import numpy as np
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
-from baselines.common.data_adapter import build_default_registry
+from baselines.common.data_adapter import build_default_registry, pde_collate
 
 
 CURRENT_PDES = [
@@ -227,6 +228,87 @@ def test_sensor_budget_metadata_static_and_time_varying():
     )
     assert per_time.metadata["num_observations_total"] == 40
     assert total.metadata["num_observations_total"] <= 4
+
+
+def test_legacy_random_sensor_mode_is_rejected_in_paper_mode():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("poisson", n=2, resolution=8)
+    with pytest.raises(ValueError, match="ambiguous"):
+        registry.make_task(
+            raw,
+            "poisson",
+            "sparse_solution",
+            num_sensors=5,
+            sensor_mode="random",
+            experiment_mode="paper",
+        )
+
+
+def test_random_per_sample_dataset_refreshes_training_masks_by_epoch():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("poisson", n=3, resolution=8, split="train")
+    batch = registry.make_task(
+        raw,
+        "poisson",
+        "sparse_solution",
+        num_sensors=5,
+        sensor_mode="random_per_sample",
+        seed=3,
+        experiment_mode="paper",
+    )
+    dataset = registry.make_dataset_from_batch(batch)
+    loader = DataLoader(dataset, batch_size=3, collate_fn=pde_collate, shuffle=False)
+    first = next(iter(loader))
+    dataset.set_epoch(1)
+    second = next(iter(loader))
+
+    assert first.mask.shape == first.input_fields.shape
+    assert not torch.equal(first.mask[0], first.mask[1])
+    assert not torch.equal(first.mask, second.mask)
+
+
+def test_random_per_sample_epoch_reaches_persistent_workers():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("poisson", n=3, resolution=8, split="train")
+    batch = registry.make_task(
+        raw,
+        "poisson",
+        "sparse_solution",
+        num_sensors=5,
+        sensor_mode="random_per_sample",
+        seed=3,
+        experiment_mode="paper",
+    )
+    dataset = registry.make_dataset_from_batch(batch)
+    loader = DataLoader(
+        dataset,
+        batch_size=3,
+        collate_fn=pde_collate,
+        shuffle=False,
+        num_workers=1,
+        persistent_workers=True,
+    )
+    first = next(iter(loader))
+    dataset.set_epoch(1)
+    second = next(iter(loader))
+
+    assert not torch.equal(first.mask, second.mask)
+
+
+def test_burger_full_inverse_is_terminal_state_to_initial_state():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("burger", n=2, resolution=8)
+    raw["full_tensor"][:, :, 0, :] = 1.0
+    raw["full_tensor"][:, :, -1, :] = 9.0
+    raw["metadata"]["initial_1d"] = torch.ones(2, 8)
+    batch = registry.make_task(raw, "burger", "inverse")
+
+    assert tuple(batch.input_fields.shape) == (2, 1, 1, 8)
+    assert tuple(batch.target_fields.shape) == (2, 1, 1, 8)
+    assert torch.all(batch.input_fields == 9.0)
+    assert torch.all(batch.target_fields == 1.0)
+    assert batch.input_channel_names == ["uT"]
+    assert batch.target_channel_names == ["u0"]
 
 
 def test_missing_file_error_lists_pde_and_candidates(tmp_path):

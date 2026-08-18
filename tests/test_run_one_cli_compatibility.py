@@ -28,7 +28,7 @@ def _parse_command(row: dict, monkeypatch):
 
 def test_run_one_command_is_accepted_by_baselines_run_parse_args(tmp_path: Path, monkeypatch):
     rows = _rows("main_results", tmp_path, monkeypatch)
-    row = next(row for row in rows if row["task_group"] == "sparse_solution_main_physics" and row["baseline"] == "pde_opt")
+    row = next(row for row in rows if row["task_group"] == "sparse_inverse_main" and row["baseline"] == "pde_opt")
     cmd, args = _parse_command(row, monkeypatch)
     assert "--run-id" in cmd
     assert "--run-name" in cmd

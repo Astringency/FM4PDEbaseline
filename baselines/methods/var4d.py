@@ -162,7 +162,14 @@ def _assimilation_mode(batch: PDEBatch) -> str:
 
 
 def _obs_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    if tuple(pred.shape) != tuple(target.shape):
+        raise ValueError(f"4D-Var observation prediction {tuple(pred.shape)} must exactly match target {tuple(target.shape)}")
     if mask is None:
         return F.mse_loss(pred, target)
-    local_mask = mask[: pred.shape[1]].unsqueeze(0).to(pred.device, pred.dtype)
+    local_mask = mask
+    if tuple(local_mask.shape) == tuple(pred.shape[1:]):
+        local_mask = local_mask.unsqueeze(0).expand(pred.shape[0], *local_mask.shape)
+    if tuple(local_mask.shape) != tuple(pred.shape):
+        raise ValueError(f"4D-Var mask {tuple(mask.shape)} must match prediction {tuple(pred.shape)} with or without batch")
+    local_mask = local_mask.to(pred.device, pred.dtype)
     return (((pred - target) ** 2) * local_mask).sum() / local_mask.sum().clamp_min(1.0)

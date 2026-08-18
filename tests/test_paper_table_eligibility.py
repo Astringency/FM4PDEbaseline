@@ -21,7 +21,7 @@ def test_adapted_and_surrogate_capabilities_are_not_main_eligible():
     assert paper_table_eligible(vivid_style, "adapted") is False
 
 
-def test_native_official_or_canonical_capabilities_are_main_eligible():
+def test_unified_component_adapter_is_not_misreported_as_official_native():
     recfno = resolve_capability("recfno", "darcy", "sparse_solution", "random")
     assert paper_table_eligible(
         recfno,
@@ -31,7 +31,8 @@ def test_native_official_or_canonical_capabilities_are_main_eligible():
             "fallback_used": False,
             "adapter_status": "official_code_adapter",
         },
-    ) is True
+    ) is False
+    assert recfno.official_native_eligible is False
 
     pde_opt = resolve_capability("pde_opt", "poisson", "sparse_inverse", "random")
     assert paper_table_eligible(pde_opt, "canonical_math") is True
@@ -93,7 +94,7 @@ def test_official_architecture_must_be_explicitly_allowed():
             "fallback_used": False,
             "adapter_status": "official_architecture_reimplementation",
         },
-    ) is True
+    ) is False
 
 
 def test_vivid_style_without_official_import_is_supplement_only():

@@ -105,9 +105,18 @@ def test_sparse_observation_values_use_task_side_stats():
         obs_values=obs_values,
         metadata={"masked_grid": torch.full((1, 1, 2, 2), 14.0), "voronoi_grid": torch.full((1, 1, 2, 2), 16.0)},
     )
+    sparse_forward = _manual_batch(
+        task="sparse_forward",
+        input_fields=torch.full((1, 1, 2, 2), 14.0),
+        target_fields=torch.full((1, 1, 2, 2), 100.0),
+        mask=mask,
+        obs_values=obs_values,
+        metadata={"masked_grid": torch.full((1, 1, 2, 2), 14.0), "voronoi_grid": torch.full((1, 1, 2, 2), 16.0)},
+    )
 
     norm_inverse = normalize_batch_input_target(inverse, stats)
     norm_solution = normalize_batch_input_target(solution, stats)
+    norm_forward = normalize_batch_input_target(sparse_forward, stats)
 
     assert norm_inverse.obs_values.flatten().tolist() == pytest.approx([2.0, 4.0])
     assert norm_inverse.metadata["normalization_metadata_sources"]["obs_values"] == "input"
@@ -115,6 +124,9 @@ def test_sparse_observation_values_use_task_side_stats():
     assert norm_solution.obs_values.flatten().tolist() == pytest.approx([-17.2, -16.4])
     assert norm_solution.metadata["normalization_metadata_sources"]["obs_values"] == "target"
     assert norm_solution.metadata["normalization_metadata_sources"]["masked_grid"] == "target"
+    assert norm_forward.obs_values.flatten().tolist() == pytest.approx([2.0, 4.0])
+    assert norm_forward.metadata["normalization_metadata_sources"]["obs_values"] == "input"
+    assert norm_forward.metadata["normalization_metadata_sources"]["masked_grid"] == "input"
 
 
 def test_evaluation_uses_predict_physical_for_normalized_model(tmp_path: Path):
@@ -136,7 +148,7 @@ def test_evaluation_uses_predict_physical_for_normalized_model(tmp_path: Path):
         num_batches=1,
         num_samples=2,
     )
-    model = _NormalizedTargetEcho().build({}, build_data_spec(batch))
+    model = _NormalizedConstant().build({}, build_data_spec(batch))
     model.uses_normalization = True
     model.normalization_stats = stats
     args = Namespace(
@@ -232,6 +244,9 @@ def test_evaluation_uses_predict_physical_for_normalized_model(tmp_path: Path):
     assert rows[0]["mse"] == pytest.approx(0.0)
     assert rows[0]["mae"] == pytest.approx(0.0)
     assert json.loads(rows[0]["relative_l2_solution_values"]) == pytest.approx([0.0, 0.0])
+    assert model.saw_sanitized_target is True
+    assert model.saw_sanitized_full_tensor is True
+    assert model.saw_private_metadata is False
 
 
 def test_normalized_fno_tiny_run_saves_stats_and_best_val(tmp_path: Path):
@@ -298,11 +313,17 @@ def test_normalized_fno_tiny_run_saves_stats_and_best_val(tmp_path: Path):
     assert restored.uses_normalization is True
 
 
-class _NormalizedTargetEcho(BaselineModel):
-    name = "normalized_target_echo"
+class _NormalizedConstant(BaselineModel):
+    name = "normalized_constant"
 
     def predict(self, batch: PDEBatch):
-        return batch.target_fields
+        self.saw_sanitized_target = bool(torch.allclose(batch.target_fields, torch.full_like(batch.target_fields, -2.0)))
+        self.saw_sanitized_full_tensor = bool(torch.count_nonzero(batch.full_tensor) == 0)
+        self.saw_private_metadata = any(
+            key in batch.metadata
+            for key in ("full_trajectory", "original_input_fields", "observation_source_fields", "background_fields")
+        )
+        return torch.full_like(batch.target_fields, 2.0)
 
 
 def _manual_batch(

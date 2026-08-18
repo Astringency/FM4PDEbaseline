@@ -11,10 +11,18 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from scripts.experiments.provenance import (
+    FINGERPRINT_FIELDS,
+    quarantine_output_artifacts,
+    repository_revision,
+    run_fingerprint,
+    sha256_file,
+    summary_validation_reasons,
+)
 
 FORBIDDEN_PAPER_FLAGS = {
     "--dry-run",
@@ -73,6 +81,7 @@ def load_row_with_total(matrix: str | Path, index: int) -> tuple[dict[str, Any],
 
 def build_command(row: dict[str, Any]) -> list[str]:
     values = effective_command_values(row)
+    _validate_matrix_provenance(row, values)
     data_root = os.environ.get("DATA_ROOT", "")
     if not data_root:
         raise RuntimeError("DATA_ROOT must be set to a real PDE data root for paper-mode runs")
@@ -128,7 +137,29 @@ def build_command(row: dict[str, Any]) -> list[str]:
         str(row["run_id"]),
         "--run-name",
         str(row.get("run_name", row["run_id"])),
+        "--sensor-seed",
+        str(values["sensor_seed"]),
     ]
+    provenance_flags = {
+        "--summary-schema-version": row.get("summary_schema_version"),
+        "--run-fingerprint": row.get("run_fingerprint"),
+        "--config-content-sha256": row.get("config_content_sha256"),
+        "--data-manifest-sha256": row.get("data_manifest_sha256"),
+        "--data-manifest-path": row.get("data_manifest_path"),
+        "--task-protocol-version": row.get("task_protocol_version"),
+        "--sensor-protocol-version": row.get("sensor_protocol_version"),
+        "--execution-mode": row.get("execution_mode"),
+        "--comparison-track": row.get("comparison_track"),
+        "--source-train-run-id": row.get("source_train_run_id"),
+        "--source-train-run-fingerprint": row.get("source_train_run_fingerprint"),
+        "--source-train-seed": row.get("source_train_seed"),
+        "--commit-hash": row.get("commit_hash"),
+    }
+    for flag, value in provenance_flags.items():
+        # Hand-authored legacy/debug rows remain CLI-compatible, but they will
+        # not pass v2 completion or publication validation.
+        if value not in {None, ""}:
+            cmd.extend([flag, str(value)])
     if str(row["task"]).startswith("sparse"):
         cmd.extend(
             [
@@ -142,7 +173,13 @@ def build_command(row: dict[str, Any]) -> list[str]:
         )
     if _as_bool(row.get("load_full_trajectory", False)):
         cmd.append("--load-full-trajectory")
-    save_checkpoint = _save_checkpoint_for_row(row)
+    execution_mode = str(row.get("execution_mode", "train"))
+    if execution_mode == "eval_only":
+        checkpoint = str(row.get("checkpoint_path", "") or "")
+        if not checkpoint:
+            raise RuntimeError("eval-only matrix row must define checkpoint_path")
+        cmd.extend(["--eval-only", "--checkpoint", checkpoint])
+    save_checkpoint = False if execution_mode == "eval_only" else _save_checkpoint_for_row(row)
     cmd.append("--save-checkpoint" if save_checkpoint else "--no-save-checkpoint")
     cmd.append("--pin-memory" if _as_bool(values["pin_memory"]) else "--no-pin-memory")
     cmd.append("--persistent-workers" if _as_bool(values["persistent_workers"]) else "--no-persistent-workers")
@@ -161,6 +198,50 @@ def build_command(row: dict[str, Any]) -> list[str]:
     if forbidden:
         raise RuntimeError(f"paper command contains forbidden flags: {sorted(forbidden)}")
     return cmd
+
+
+def _validate_matrix_provenance(row: dict[str, Any], values: dict[str, Any]) -> None:
+    """Fail before launch when a v2 matrix row no longer describes the command."""
+    expected_fingerprint = str(row.get("run_fingerprint", "") or "")
+    if not expected_fingerprint:
+        return
+
+    effective = dict(row)
+    for field in FINGERPRINT_FIELDS:
+        if field in values:
+            effective[field] = values[field]
+    effective["device"] = os.environ.get("DEVICE", str(row["device"]))
+    try:
+        effective["commit_hash"] = repository_revision(ROOT)
+        effective["config_content_sha256"] = sha256_file(str(values["config"]), root=ROOT)
+        data_manifest_path = str(effective.get("data_manifest_path", "") or "")
+        if data_manifest_path:
+            observed_data_manifest_hash = sha256_file(data_manifest_path, root=ROOT)
+            expected_data_manifest_hash = str(effective.get("data_manifest_sha256", "") or "")
+            if not expected_data_manifest_hash:
+                raise ValueError("data_manifest_path is present but data_manifest_sha256 is missing")
+            if observed_data_manifest_hash != expected_data_manifest_hash:
+                raise ValueError(
+                    f"data manifest SHA-256 {observed_data_manifest_hash} does not match matrix "
+                    f"{expected_data_manifest_hash}"
+                )
+        if effective.get("execution_mode") == "eval_only":
+            checkpoint_path = str(effective.get("checkpoint_path", "") or "")
+            observed_checkpoint_hash = sha256_file(checkpoint_path, root=ROOT)
+            if observed_checkpoint_hash != effective.get("checkpoint_sha256"):
+                raise ValueError(
+                    f"checkpoint SHA-256 {observed_checkpoint_hash} does not match matrix "
+                    f"{effective.get('checkpoint_sha256')}"
+                )
+        observed_fingerprint = run_fingerprint(effective)
+    except (FileNotFoundError, ValueError) as exc:
+        raise RuntimeError(f"matrix provenance mismatch: {exc}") from exc
+
+    if observed_fingerprint != expected_fingerprint:
+        raise RuntimeError(
+            "matrix provenance mismatch: the effective command/config no longer matches "
+            f"run_fingerprint={expected_fingerprint}; regenerate the matrix instead of overriding it"
+        )
 
 
 def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
@@ -182,6 +263,7 @@ def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
         "num_sensors": row_value(row, "num_sensors", "NUM_SENSORS", allow_override),
         "sensor_mode": row_value(row, "sensor_mode", "SENSOR_MODE", allow_override),
         "noise_level": row_value(row, "noise_level", "NOISE_LEVEL", allow_override),
+        "sensor_seed": row_value_default(row, "sensor_seed", row.get("seed", 1), "SENSOR_SEED", allow_override),
         "steps": _method_steps(row, allow_override),
         "refine_steps": _method_refine_steps(row, allow_override),
         "particles": _method_particles(row, allow_override),
@@ -234,9 +316,23 @@ def run_one(
     stderr_path = output_dir / "stderr.log"
     command_path = output_dir / "command.txt"
 
-    if done.exists() and not force:
-        _write_status(status_file, row, "done", "existing done marker")
-        progress(f"[run skip] index={index_text} run_id={row['run_id']} reason=existing done marker output_dir={output_dir}")
+    summary_reasons = _summary_completion_reasons(row)
+    if not summary_reasons and not force:
+        if not done.exists():
+            done.write_text(
+                json.dumps(
+                    {
+                        "run_id": row["run_id"],
+                        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "reason": "validated existing summary",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+        _write_status(status_file, row, "done", "validated existing summary")
+        progress(f"[run skip] index={index_text} run_id={row['run_id']} reason=validated existing summary output_dir={output_dir}")
         return 0
     if failed.exists() and not retry_failed and not force:
         _write_status(status_file, row, "failed", "existing failed marker")
@@ -260,6 +356,12 @@ def run_one(
         )
 
     attempt = _previous_attempt(failed) + 1
+    quarantined = quarantine_output_artifacts(row, summary_reasons)
+    if quarantined is not None:
+        progress(
+            f"[run quarantine] index={index_text} run_id={row['run_id']} reasons={','.join(summary_reasons)} "
+            f"destination={quarantined}"
+        )
     command_text = shlex.join(cmd)
     start_payload = {
         "run_id": row["run_id"],
@@ -322,7 +424,8 @@ def run_one(
 
     running.unlink(missing_ok=True)
     elapsed = time.monotonic() - started_monotonic
-    if proc.returncode == 0:
+    output_validation_reasons = _summary_completion_reasons(row) if proc.returncode == 0 else []
+    if proc.returncode == 0 and not output_validation_reasons:
         failed.unlink(missing_ok=True)
         done.write_text(
             json.dumps(
@@ -341,13 +444,21 @@ def run_one(
         progress(f"[run done] run_id={row['run_id']} elapsed={_format_elapsed(elapsed)} exit_code=0 output_dir={output_dir}")
         return 0
 
+    effective_returncode = int(proc.returncode or 1)
+    failure_reason = (
+        f"summary_validation={','.join(output_validation_reasons)}"
+        if output_validation_reasons
+        else f"exit_code={effective_returncode}"
+    )
+    done.unlink(missing_ok=True)
     failed.write_text(
         json.dumps(
             {
                 "run_id": row["run_id"],
                 "attempt": attempt,
                 "failed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "exit_code": proc.returncode,
+                "exit_code": effective_returncode,
+                "summary_validation_reasons": output_validation_reasons,
                 "command": command_text,
             },
             indent=2,
@@ -355,16 +466,30 @@ def run_one(
         ),
         encoding="utf-8",
     )
-    _write_status(status_file, row, "failed", f"exit_code={proc.returncode}")
+    _write_status(status_file, row, "failed", failure_reason)
     progress(
-        f"[run failed] run_id={row['run_id']} elapsed={_format_elapsed(elapsed)} exit_code={proc.returncode} "
+        f"[run failed] run_id={row['run_id']} elapsed={_format_elapsed(elapsed)} exit_code={effective_returncode} "
+        f"reason={failure_reason} "
         f"stderr={stderr_path} stderr_tail={_tail_for_progress(stderr_path, lines=5)}"
     )
     progress(
         f"[run failed paths] output_dir={output_dir} stdout={stdout_path} stderr={stderr_path} "
         f"command={command_path} status={status_file}"
     )
-    return int(proc.returncode)
+    return effective_returncode
+
+
+def _summary_completion_reasons(row: dict[str, Any]) -> list[str]:
+    summary_path = Path(row["output_dir"]) / "summary.json"
+    if not summary_path.exists():
+        return ["summary_missing"]
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ["summary_unreadable"]
+    if not isinstance(summary, dict):
+        return ["summary_not_object"]
+    return summary_validation_reasons(row, summary)
 
 
 def _index_text(index: int | None, total: int | None) -> str:

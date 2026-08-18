@@ -209,12 +209,12 @@ def _channel_view(values: torch.Tensor, ndim: int) -> torch.Tensor:
 
 
 def _obs_value_normalization_source(batch: PDEBatch) -> str:
-    return "input" if batch.task == "sparse_inverse" else "target"
+    return "input" if batch.task in {"sparse_inverse", "sparse_forward"} else "target"
 
 
 def _metadata_normalization_source(batch: PDEBatch, key: str, value: torch.Tensor, stats: NormalizationStats) -> str:
     if key in {"masked_grid", "voronoi_grid", "observed_solution_fields", "observation_source_fields"}:
-        return "input" if batch.task == "sparse_inverse" else "target"
+        return "input" if batch.task in {"sparse_inverse", "sparse_forward"} else "target"
     if key == "original_input_fields":
         return "input"
     if tuple(value.shape) == tuple(batch.input_fields.shape):

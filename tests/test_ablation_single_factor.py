@@ -22,7 +22,7 @@ def test_sensor_count_ablation_only_varies_num_sensors(tmp_path: Path, monkeypat
     assert summary["experiment_kind"] == "ablation"
     assert summary["ablation_factor"] == "sensor_count"
     assert {row["num_sensors"] for row in rows} == {25, 50, 100, 250, 500, 1000}
-    assert {row["sensor_mode"] for row in rows} == {"random"}
+    assert {row["sensor_mode"] for row in rows} == {"random_per_sample"}
     assert {row["noise_level"] for row in rows} == {0.0}
 
 
@@ -30,12 +30,12 @@ def test_noise_ablation_only_varies_noise_level(tmp_path: Path, monkeypatch):
     rows, _skipped, _summary = _matrix("noise_ablation", tmp_path, monkeypatch)
     assert {row["noise_level"] for row in rows} == {0.0, 0.01, 0.05, 0.10}
     assert {row["num_sensors"] for row in rows} == {500}
-    assert {row["sensor_mode"] for row in rows} == {"random"}
+    assert {row["sensor_mode"] for row in rows} == {"random_per_sample"}
 
 
 def test_sensor_mode_ablation_only_varies_sensor_mode(tmp_path: Path, monkeypatch):
     rows, _skipped, _summary = _matrix("sensor_mode_ablation", tmp_path, monkeypatch)
-    assert {row["sensor_mode"] for row in rows} == {"random", "fixed", "grid"}
+    assert {row["sensor_mode"] for row in rows} == {"random_per_sample", "fixed", "grid"}
     assert {row["num_sensors"] for row in rows} == {500}
     assert {row["noise_level"] for row in rows} == {0.0}
 
@@ -44,7 +44,7 @@ def test_train_size_ablation_only_varies_train_size(tmp_path: Path, monkeypatch)
     rows, _skipped, _summary = _matrix("train_size_ablation", tmp_path, monkeypatch)
     assert {row["train_size"] for row in rows} == {500, 1000, 5000, 10000, 50000}
     assert {row["num_sensors"] for row in rows} == {500}
-    assert {row["sensor_mode"] for row in rows} == {"random"}
+    assert {row["sensor_mode"] for row in rows} == {"random_per_sample"}
     assert {row["noise_level"] for row in rows} == {0.0}
 
 

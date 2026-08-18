@@ -20,10 +20,10 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
     assert summary["run_count"] == 360
     assert summary["by_task_group"] == {
         "full_forward_main": 99,
-        "full_inverse_main": 33,
+        "full_inverse_main": 99,
         "sparse_inverse_main": 24,
         "sparse_solution_main_amortized": 99,
-        "sparse_solution_main_physics": 69,
+        "sparse_solution_main_physics": 3,
         "time_varying_da_main": 36,
     }
     run_ids = [row["run_id"] for row in rows]
@@ -43,12 +43,15 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
         "time_varying_da_main",
     }
     assert len(skipped) == 46
-    adapted_skips = [row for row in skipped if row["task_group"] == "full_inverse_main"]
-    assert {row["baseline"] for row in adapted_skips} == {"fno", "deeponet"}
-    assert all("supplement-only" in row["reason"] for row in adapted_skips)
+    inverse_rows = [row for row in rows if row["task_group"] == "full_inverse_main"]
+    assert {row["baseline"] for row in inverse_rows} == {"fno", "deeponet", "ifno"}
+    assert {row["capability_status"] for row in inverse_rows} == {"adapted"}
     unsupported_skips = [row for row in skipped if row["task_group"] == "sparse_inverse_main"]
     assert all(row["baseline"] in {"pinn_sparse", "pde_opt"} for row in unsupported_skips)
-    assert all("time-dependent sparse inverse" in row["reason"] for row in unsupported_skips)
+    assert all(
+        "time-dependent sparse inverse" in row["reason"] or "Burger sparse_inverse is excluded" in row["reason"]
+        for row in unsupported_skips
+    )
     pcbnn_skips = [row for row in skipped if row["task_group"] == "sparse_solution_main_physics" and row["baseline"] == "pc_bnn"]
     assert len(pcbnn_skips) == 10
     assert all("PC-BNN" in row["reason"] for row in pcbnn_skips)

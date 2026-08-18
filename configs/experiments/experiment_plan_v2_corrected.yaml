@@ -1,0 +1,88 @@
+name: experiment_plan_v2_corrected
+experiment_kind: main
+comparison_track: unified_adapted
+main_table_only: true
+config: baselines/configs/paper.yaml
+task_protocol_version: fm4pde-task-contract-v2
+sensor_protocol_version: fm4pde-sensor-contract-v2
+# This is a new namespace. The historical experiment_plan_v2 config and
+# outputs remain immutable audit evidence and must not be overwritten.
+pdes:
+  - poisson
+  - helmholtz
+  - darcy
+  - burger
+  - nsnonbounded
+seeds: [1]
+train_size: 50000
+val_size: 1000
+test_size: 1000
+train_shards: 5
+data_loading_mode: eager
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
+device: cuda
+task_groups:
+  - full_forward_main
+  - full_inverse_main
+  - sparse_inverse_main
+  - sparse_solution_main_amortized
+  - sparse_forward_main_amortized
+  - sparse_forward_main_physics
+task_group_overrides:
+  full_forward_main:
+    task: forward
+    baselines: [fno, deeponet, ifno]
+    num_sensors: 0
+    sensor_mode: none
+    noise_level: 0.0
+  full_inverse_main:
+    task: inverse
+    baselines: [ifno]
+    num_sensors: 0
+    sensor_mode: none
+    noise_level: 0.0
+  sparse_inverse_main:
+    task: sparse_inverse
+    # Burger sparse inverse is intentionally absent. Burger full inverse is
+    # the explicit u(T) -> u(0) contract above.
+    pdes: [poisson, helmholtz, darcy, nsnonbounded]
+    baselines: [pinn_sparse, pde_opt, recfno, senseiver, voronoicnn]
+    num_sensors: 500
+    sensor_mode: random_per_sample
+    noise_level: 0.0
+  sparse_solution_main_amortized:
+    task: sparse_solution
+    baselines: [recfno, senseiver, voronoicnn]
+    num_sensors: 500
+    sensor_mode: random_per_sample
+    noise_level: 0.0
+  sparse_forward_main_amortized:
+    task: sparse_forward
+    baselines: [recfno, senseiver, voronoicnn]
+    num_sensors: 500
+    sensor_mode: random_per_sample
+    noise_level: 0.0
+  sparse_forward_main_physics:
+    task: sparse_forward
+    baselines: [pinn_sparse, pde_opt]
+    num_sensors: 500
+    sensor_mode: random_per_sample
+    noise_level: 0.0
+resources:
+  amortized_default:
+    batch_size: 16
+    epochs: 200
+    device: cuda
+  per_instance_default:
+    batch_size: 1
+    epochs: 1
+    device: cuda
+  pinn_sparse:
+    batch_size: 1
+    steps: 1000
+  pde_opt:
+    batch_size: 1
+    steps: 500

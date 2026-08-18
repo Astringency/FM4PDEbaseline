@@ -22,7 +22,7 @@ def _cfg(**extra):
     return cfg
 
 
-def test_ifno_official_aligned_forward_and_inverse_shapes_and_metadata():
+def test_ifno_adapted_reimplementation_forward_and_inverse_shapes_and_metadata():
     for task in ("forward", "inverse"):
         batch = _batch(task)
         model = IFNOBaseline().build(_cfg(), build_data_spec(batch))
@@ -30,9 +30,10 @@ def test_ifno_official_aligned_forward_and_inverse_shapes_and_metadata():
         assert tuple(pred.shape) == tuple(batch.target_fields.shape)
         backend = _backend_info(model, model.config)
         cap = resolve_capability("ifno", "darcy", task)
-        assert backend["implementation_mode_effective"] in {"official", "official_architecture", "official_aligned"}
-        assert backend["official_reimplementation_success"] is True
-        assert paper_table_eligible(cap, backend_info=backend) is True
+        assert backend["implementation_mode_effective"] == "adapted"
+        assert backend["official_reimplementation_success"] is False
+        assert backend["official_alignment_level"] == "concept"
+        assert paper_table_eligible(cap, backend_info=backend) is False
 
 
 def test_ifno_sparse_tasks_remain_unsupported():

@@ -13,8 +13,9 @@ def test_operator_and_sparse_capability_statuses():
 
     for baseline in ("recfno", "senseiver", "voronoicnn"):
         cap = resolve_capability(baseline, "darcy", "sparse_solution", "random")
-        assert cap.support_status == "official_adapter"
-        assert cap.paper_table_eligible is True
+        assert cap.support_status == "adapted"
+        assert cap.paper_table_eligible is False
+        assert cap.official_native_eligible is False
 
 
 def test_static_sparse_inverse_physics_baselines_supported():
@@ -31,3 +32,13 @@ def test_endpoint_da_is_surrogate_not_main():
     surrogate = resolve_capability("var4d", "heat", "sparse_solution", "time_varying", "time_varying", load_full_trajectory=False)
     assert surrogate.support_status == "adapted"
     assert surrogate.paper_table_eligible is False
+
+
+def test_sensor_only_protocol_excludes_hidden_truth_and_burger_sparse_inverse():
+    for baseline in ("pinn_sparse", "pde_opt"):
+        cap = resolve_capability(baseline, "poisson", "sparse_solution", "random_per_sample")
+        assert cap.support_status == "unsupported"
+        assert "sensor-only" in cap.reason
+    for baseline in ("recfno", "senseiver", "voronoicnn", "pinn_sparse", "pde_opt"):
+        cap = resolve_capability(baseline, "burger", "sparse_inverse", "random_per_sample")
+        assert cap.support_status == "unsupported"

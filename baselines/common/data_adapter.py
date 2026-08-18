@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -281,7 +282,7 @@ class PDEDataRegistry:
         pde_name: str,
         task: str,
         num_sensors: int | None = None,
-        sensor_mode: str = "random",
+        sensor_mode: str = "random_per_sample",
         sensor_budget_mode: str = "per_time",
         noise_level: float = 0.0,
         seed: int = 0,
@@ -320,6 +321,15 @@ class PDEDataRegistry:
         if task.startswith("sparse") or num_sensors:
             requested_sensor_mode = sensor_mode
             effective_sensor_mode = sensor_mode
+            if requested_sensor_mode == "random":
+                message = (
+                    "sensor_mode='random' is ambiguous and historically produced one fixed layout shared by every sample and split; "
+                    "use 'fixed' or 'random_per_sample' explicitly"
+                )
+                if experiment_mode == "paper":
+                    raise ValueError(message)
+                warnings.warn(message + ". Preserving the legacy fixed-layout behavior for this debug run.", RuntimeWarning, stacklevel=2)
+                effective_sensor_mode = "fixed"
             observation_source = target_fields
             observation_names = list(target_names)
             if task in {"sparse_inverse", "sparse_forward"}:
@@ -337,8 +347,8 @@ class PDEDataRegistry:
                 )
                 if experiment_mode == "paper":
                     raise ValueError(message)
-                warnings.warn(message + " Falling back to random sensors for this smoke/debug run.", RuntimeWarning, stacklevel=2)
-                effective_sensor_mode = "random"
+                warnings.warn(message + " Falling back to an explicit fixed layout for this smoke/debug run.", RuntimeWarning, stacklevel=2)
+                effective_sensor_mode = "fixed"
             obs = build_observation_tensors(
                 observation_source,
                 num_sensors=num_sensors or 500,
@@ -347,6 +357,9 @@ class PDEDataRegistry:
                 noise_level=noise_level,
                 sensor_budget_mode=sensor_budget_mode,
                 time_dim=0 if (effective_sensor_mode == "time_varying" and spec.name == "burger" and observation_source.ndim == 4) else None,
+                sample_ids=canonical.get("global_sample_ids") or canonical.get("sample_indices"),
+                split=str(canonical.get("split", metadata.get("split", ""))),
+                epoch=0,
             )
             mask = obs["mask"]
             obs_values = obs["obs_values"]
@@ -365,6 +378,9 @@ class PDEDataRegistry:
                     "num_sensors_per_time": obs["num_sensors_per_time"],
                     "noise_level": float(noise_level),
                     "mask_id": obs["mask_id"],
+                    "mask_ids": list(obs.get("mask_ids", [])),
+                    "sensor_seed": int(seed),
+                    "sensor_protocol_version": "2",
                 }
             )
             if task in {"sparse_solution", "sparse_reconstruction"}:
@@ -407,6 +423,11 @@ class PDEDataRegistry:
             file_paths=list(canonical.get("file_paths", metadata.get("files", []))),
         )
 
+    @staticmethod
+    def make_dataset_from_batch(batch: PDEBatch) -> "PDEBatchDataset":
+        """Wrap a canonical batch while retaining dynamic sensor regeneration."""
+        return PDEBatchDataset(batch)
+
     def make_dataset(
         self,
         pde_name: str,
@@ -418,7 +439,7 @@ class PDEDataRegistry:
         sample_offset: int = 0,
         val_from_train_offset: int | None = None,
         num_sensors: int | None = None,
-        sensor_mode: str = "random",
+        sensor_mode: str = "random_per_sample",
         sensor_budget_mode: str = "per_time",
         noise_level: float = 0.0,
         seed: int = 0,
@@ -633,8 +654,13 @@ class PDEDataRegistry:
             else:
                 init = initial.to(full.device, full.dtype).reshape(full.shape[0], 1, 1, full.shape[-1])
                 input_fields = init.repeat(1, 1, full.shape[-2], 1)
-            if task in {"inverse", "sparse_inverse"}:
-                return target, input_fields[:, :, :1, :], ["u"], ["u0"]
+            if task == "sparse_inverse":
+                raise ValueError(
+                    "Burger sparse_inverse is not defined in the sensor-only protocol; "
+                    "use full inverse u(T)->u(0) or sparse_solution trajectory reconstruction"
+                )
+            if task == "inverse":
+                return target[:, :, -1:, :], input_fields[:, :, :1, :], ["uT"], ["u0"]
             return input_fields, target, ["u0"], ["u"]
 
         if full.ndim == 5:
@@ -777,12 +803,73 @@ class PDEBatchDataset(Dataset):
         self.loaded_in_memory_samples = int(batch.input_fields.shape[0])
         self.loaded_full_trajectory = _batch_has_full_trajectory(batch)
         self.data_loading_mode = "eager"
+        # A shared-memory scalar is visible to persistent DataLoader workers;
+        # a normal Python integer would stay frozen in each worker copy after
+        # the first epoch.
+        self._epoch_state = torch.zeros((), dtype=torch.int64).share_memory_()
+        self._dynamic_observation_source: torch.Tensor | None = None
+        if batch.metadata.get("effective_sensor_mode") == "random_per_sample":
+            if batch.task in {"sparse_inverse", "sparse_forward"}:
+                source = batch.metadata.get("observation_source_fields")
+                if not isinstance(source, torch.Tensor):
+                    raise ValueError("random_per_sample requires private observation_source_fields for inverse/forward tasks")
+                self._dynamic_observation_source = source
+            else:
+                self._dynamic_observation_source = batch.target_fields
+
+    def set_epoch(self, epoch: int) -> None:
+        """Select deterministic epoch-specific training masks.
+
+        Validation/test masks ignore the epoch inside ``build_observation_tensors``.
+        """
+        self._epoch_state.fill_(int(epoch))
+
+    @property
+    def epoch(self) -> int:
+        return int(self._epoch_state.item())
 
     def __len__(self) -> int:
         return int(self.batch.input_fields.shape[0])
 
     def __getitem__(self, index: int) -> PDEBatch:
-        return slice_pde_batch(self.batch, index)
+        item = slice_pde_batch(self.batch, index)
+        if self._dynamic_observation_source is None:
+            return item
+        source = self._dynamic_observation_source[index : index + 1]
+        sample_id: str | int
+        if item.global_sample_ids:
+            sample_id = item.global_sample_ids[0]
+        elif item.sample_indices is not None and item.sample_indices.numel():
+            sample_id = int(item.sample_indices.reshape(-1)[0])
+        else:
+            sample_id = index
+        mode = str(item.metadata.get("effective_sensor_mode", "random_per_sample"))
+        obs = build_observation_tensors(
+            source,
+            num_sensors=int(item.metadata.get("num_sensors", 500)),
+            mode=mode,
+            seed=int(item.metadata.get("sensor_seed", 0)),
+            noise_level=float(item.metadata.get("noise_level", 0.0)),
+            sensor_budget_mode=str(item.metadata.get("sensor_budget_mode", "per_time")),
+            time_dim=0 if (mode == "time_varying" and item.pde_name == "burger" and source.ndim == 4) else None,
+            sample_ids=[sample_id],
+            split=item.split,
+            epoch=self.epoch,
+        )
+        item.mask = obs["mask"]
+        item.obs_values = obs["obs_values"]
+        item.obs_coords = obs["obs_coords"]
+        item.input_fields = obs["masked_grid"].float()
+        item.metadata.update(
+            {
+                "masked_grid": obs["masked_grid"],
+                "voronoi_grid": obs["voronoi_grid"],
+                "mask_id": obs["mask_id"],
+                "mask_ids": list(obs.get("mask_ids", [])),
+                "sensor_epoch": self.epoch if item.split == "train" else 0,
+            }
+        )
+        return item
 
 
 def slice_pde_batch(batch: PDEBatch, index: int) -> PDEBatch:
@@ -797,7 +884,11 @@ def slice_pde_batch(batch: PDEBatch, index: int) -> PDEBatch:
         input_fields=batch.input_fields[sl],
         target_fields=batch.target_fields[sl],
         coords=batch.coords[sl] if batch.coords is not None and batch.coords.shape[0] == len(batch.full_tensor) else batch.coords,
-        mask=batch.mask,
+        mask=(
+            batch.mask[sl]
+            if batch.mask is not None and batch.mask.ndim == batch.input_fields.ndim and batch.mask.shape[0] == batch.input_fields.shape[0]
+            else batch.mask
+        ),
         obs_values=batch.obs_values[sl] if batch.obs_values is not None else None,
         obs_coords=batch.obs_coords[sl] if batch.obs_coords is not None else None,
         channel_names=batch.channel_names,
@@ -830,6 +921,20 @@ def pde_collate(items: list[PDEBatch]) -> PDEBatch:
     global_ids: list[str] = []
     for b in items:
         global_ids.extend(b.global_sample_ids)
+    mask = first.mask
+    if mask is not None and mask.ndim == first.input_fields.ndim and mask.shape[0] == first.input_fields.shape[0]:
+        mask = torch.cat([b.mask for b in items if b.mask is not None], dim=0)
+        metadata["mask_ids"] = [
+            str(mask_id)
+            for batch in items
+            for mask_id in batch.metadata.get("mask_ids", [batch.metadata.get("mask_id", "")])
+            if mask_id
+        ]
+        metadata["mask_id"] = hashlib.sha1(
+            mask.detach().cpu().contiguous().numpy().tobytes()
+        ).hexdigest()[:16]
+    elif mask is not None and any(not torch.equal(mask, b.mask) for b in items[1:] if b.mask is not None):
+        raise ValueError("Cannot collate different shared masks; use batch-aware [B,C,*grid] masks")
     return PDEBatch(
         pde_name=first.pde_name,
         task=first.task,
@@ -837,7 +942,7 @@ def pde_collate(items: list[PDEBatch]) -> PDEBatch:
         input_fields=torch.cat([b.input_fields for b in items], dim=0),
         target_fields=torch.cat([b.target_fields for b in items], dim=0),
         coords=coords,
-        mask=first.mask,
+        mask=mask,
         obs_values=torch.cat([b.obs_values for b in items], dim=0) if first.obs_values is not None else None,
         obs_coords=torch.cat([b.obs_coords for b in items], dim=0) if first.obs_coords is not None else None,
         channel_names=first.channel_names,

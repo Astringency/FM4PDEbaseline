@@ -24,7 +24,7 @@ def test_main_results_sparse_tasks_use_one_standard_sparse_setting(tmp_path: Pat
     time_varying = [row for row in sparse_rows if row["task_group"] == "time_varying_da_main"]
     assert sparse_rows
     assert {row["num_sensors"] for row in sparse_rows} == {500}
-    assert {row["sensor_mode"] for row in standard_sparse} == {"random"}
+    assert {row["sensor_mode"] for row in standard_sparse} == {"random_per_sample"}
     assert {row["sensor_mode"] for row in time_varying} == {"time_varying"}
     assert {row["noise_level"] for row in sparse_rows} == {0.0}
 

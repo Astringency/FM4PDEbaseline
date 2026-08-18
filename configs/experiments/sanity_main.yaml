@@ -37,19 +37,19 @@ task_group_overrides:
     pdes: [darcy, reaction_diffusion]
     baselines: [recfno, senseiver]
     num_sensors: 50
-    sensor_mode: random
+    sensor_mode: random_per_sample
     noise_level: 0.0
   sparse_solution_main_physics:
     pdes: [poisson, shallow_water]
     baselines: [pde_opt, pinn_sparse]
     num_sensors: 50
-    sensor_mode: random
+    sensor_mode: random_per_sample
     noise_level: 0.0
   sparse_inverse_main:
     pdes: [darcy, poisson]
     baselines: [pde_opt, pinn_sparse]
     num_sensors: 50
-    sensor_mode: random
+    sensor_mode: random_per_sample
     noise_level: 0.0
 resources:
   amortized_default:

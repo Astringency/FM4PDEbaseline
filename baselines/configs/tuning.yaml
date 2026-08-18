@@ -45,10 +45,14 @@ tuning_grid:
     lr: [0.001]
   recfno:
     width: [32, 64]
-    token_dim: [64, 128]
+    modes1: [12, 20]
+    modes2: [12, 20]
+    input_representation: [voronoi_mask_coords]
     lr: [0.001]
   senseiver:
-    token_dim: [64, 128]
+    space_bands: [16, 32]
+    num_latents: [4, 16]
+    enc_num_latent_channels: [16, 32]
     lr: [0.001]
   voronoicnn:
     width: [32, 64]

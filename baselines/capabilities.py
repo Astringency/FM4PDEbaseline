@@ -101,6 +101,8 @@ class Capability:
     official_aligned_allowed: bool
     eligible_implementation_modes: tuple[str, ...]
     paper_table_eligible: bool
+    unified_comparison_eligible: bool
+    official_native_eligible: bool
 
     @property
     def unsupported_reason(self) -> str:
@@ -176,6 +178,18 @@ def resolve_capability(
     if baseline not in set(ALL_BASELINES):
         return _cap(baseline, pde, task, sensor_mode, "unsupported", "unsupported", family, f"unknown baseline '{baseline}'")
 
+    if pde == "burger" and task == "sparse_inverse":
+        return _cap(
+            baseline,
+            pde,
+            task,
+            sensor_mode,
+            "unsupported",
+            "unsupported",
+            family,
+            "Burger sparse_inverse is excluded: the sensor-only protocol keeps sparse trajectory reconstruction, while full inverse is u(T)->u(0)",
+        )
+
     if family == "time_varying_da":
         return _time_varying_capability(
             baseline,
@@ -195,11 +209,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "native",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "vanilla FNO is a full-grid supervised forward operator baseline",
-                "Use neuraloperator or a recorded vendored zongyi-li/fourier_neural_operator FNO for paper mode; RecFNO components and local compact FNO are adapted supplement only.",
+                "NeuralOperator 2.0 supplies the FNO component, while this repository supplies unified data, normalization, loss, and training",
+                "Report as NeuralOperator FNO component + unified adapted training, not a classic-paper end-to-end reproduction.",
+                eligible=False,
             )
         if family == "full_inverse":
             return _cap(
@@ -234,11 +249,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "native",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "DeepONet is a supervised operator-learning baseline for full forward maps",
-                "Use DeepXDE or official DeepONet components in paper mode.",
+                "DeepXDE supplies the CartesianProd network component, while this repository supplies unified training and data",
+                "Report as DeepXDE component + unified adapted training, not an official example reproduction.",
+                eligible=False,
             )
         if family == "full_inverse":
             return _cap(
@@ -285,14 +301,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "native",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "iFNO is defined for full forward and inverse operator learning",
-                "Use direct iFNO components if importable; otherwise use the disclosed official-aligned invertible FNO architecture reimplementation.",
-                official_architecture_allowed=True,
-                official_aligned_allowed=True,
-                eligible_implementation_modes=("official", "official_architecture", "official_aligned"),
+                "The local iFNO path is an adapted reimplementation with different normalization, objective, optimizer, and no VAE",
+                "Report only as an iFNO-inspired adapted reimplementation; it is not direct official code.",
+                eligible=False,
             )
         return _cap(
             baseline,
@@ -312,11 +326,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "official_adapter",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "RecFNO is native for sparse-sensor field reconstruction/forward with mask/Voronoi embedding",
-                "Use vendored RecFNO VoronoiFNO2d/model components in paper mode.",
+                "RecFNO contributes its VoronoiFNO2d component, but this repository uses a unified data/training adapter",
+                "Label as an official component with unified adapted training; do not claim an end-to-end official reproduction.",
+                eligible=False,
             )
         if family == "sparse_inverse":
             return _cap(
@@ -324,11 +339,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "official_adapter",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "RecFNO supervised sparse inverse maps sparse solution observations to coefficient/source fields",
-                "Use vendored RecFNO VoronoiFNO2d/model components with coefficient/source target.",
+                "RecFNO sparse inverse changes the paper task and uses the component through a unified supervised adapter",
+                "Report as an adapted data-interface task, not a native RecFNO result.",
+                eligible=False,
             )
         return _cap(
             baseline,
@@ -348,11 +364,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "official_adapter",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "Senseiver is native for sparse/irregular sensor field reconstruction/forward with query coordinates",
-                "Use official Encoder/Decoder where importable; local Perceiver variant is adapted supplement.",
+                "Senseiver contributes official Encoder/Decoder and Fourier coordinate components under unified training",
+                "Label as an official component with unified adapted training.",
+                eligible=False,
             )
         if family == "sparse_inverse":
             return _cap(
@@ -360,11 +377,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "official_adapter",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "Senseiver supervised sparse inverse maps sparse solution observations to coefficient/source fields",
-                "Use official Encoder/Decoder where importable.",
+                "Senseiver sparse inverse changes the native reconstruction target through a unified supervised adapter",
+                "Report as an adapted data-interface task, not a native Senseiver result.",
+                eligible=False,
             )
         return _cap(
             baseline,
@@ -384,12 +402,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "official_adapter",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "VoronoiCNN is native for sparse-sensor field reconstruction/forward via Voronoi tessellation and the published CNN stack",
-                "If original Keras scripts are not importable, label the PyTorch Conv2D architecture reimplementation as official_architecture_reimplementation.",
-                official_architecture_allowed=True,
+                "VoronoiCNN uses a PyTorch reimplementation of the published convolution stack under unified training",
+                "Label as an official-architecture reimplementation with adapted training and disclose the configured width.",
+                eligible=False,
             )
         if family == "sparse_inverse":
             return _cap(
@@ -397,12 +415,12 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "official_adapter",
-                "official",
+                "adapted",
+                "adapted_allowed",
                 family,
-                "VoronoiCNN supervised sparse inverse maps sparse solution observations to coefficient/source fields",
-                "If original Keras scripts are not importable, label the PyTorch Conv2D architecture reimplementation as official_architecture_reimplementation.",
-                official_architecture_allowed=True,
+                "VoronoiCNN sparse inverse changes the published reconstruction target and uses a PyTorch architecture reimplementation",
+                "Report as an adapted data-interface task.",
+                eligible=False,
             )
         return _cap(
             baseline,
@@ -422,11 +440,11 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "official_adapter",
-                "canonical_math",
+                "unsupported",
+                "unsupported",
                 family,
-                "PINN is native for per-instance PDE fitting from sparse observations",
-                "DeepXDE FNN may provide the architecture; the PDE objective is local and must be disclosed.",
+                "sensor-only sparse_solution forbids the hidden full source/coefficient/initial fields required by this PINN objective",
+                "Provide the same explicit PDE context to every method in a separately named protocol before enabling it.",
             )
         if family == "sparse_forward":
             if pde in STATIC_SPARSE_INVERSE_PDES:
@@ -510,8 +528,9 @@ def resolve_capability(
                 "adapted_allowed",
                 family,
                 "official PC-BNN channel/PDE assumptions are not matched by the default FM4PDE scalar-field tasks",
-                "Generic SVGD particles may be run only in smoke/debug as an adapted method.",
+                "Generic SVGD particles are a separate debug/supplement method and are excluded from unified comparison matrices.",
                 eligible=False,
+                unified_comparison_eligible=False,
             )
         if family == "sparse_inverse":
             return _cap(
@@ -542,11 +561,11 @@ def resolve_capability(
                 pde,
                 task,
                 sensor_mode,
-                "native",
-                "canonical_math",
+                "unsupported",
+                "unsupported",
                 family,
-                "PDE-constrained optimization is a canonical per-instance sparse reconstruction/forward baseline",
-                "No single official repository is claimed.",
+                "sensor-only sparse_solution forbids the hidden full source/coefficient/initial fields required by this PDE optimization objective",
+                "Provide the same explicit PDE context to every method in a separately named protocol before enabling it.",
             )
         if family == "sparse_forward":
             if pde in STATIC_SPARSE_INVERSE_PDES:
@@ -674,7 +693,7 @@ def iter_capability_matrix(
     pdes = list(pdes or ALL_PDES)
     baselines = list(baselines or ALL_BASELINES)
     tasks = list(tasks or ["forward", "inverse", "sparse_solution", "sparse_inverse"])
-    sensor_modes = list(sensor_modes or ["none", "random", "grid", "fixed", "time_varying"])
+    sensor_modes = list(sensor_modes or ["none", "random_per_sample", "grid", "fixed", "time_varying"])
     rows: list[Capability] = []
     for baseline in baselines:
         for pde in pdes:
@@ -780,11 +799,12 @@ def _time_varying_capability(
             pde,
             task,
             sensor_mode,
-            "official_adapter",
-            "official",
+            "adapted",
+            "adapted_allowed",
             family,
-            "Senseiver supports sparse/irregular time-varying sensor reconstruction when trajectory query coordinates are supplied",
-            "Use official Encoder/Decoder adapter in paper mode.",
+            "Senseiver supports irregular time-varying coordinates through official components and a unified adapter",
+            "Label as official components with adapted data/training, not an end-to-end native run.",
+            eligible=False,
         )
     if baseline == "var4d":
         return _cap(
@@ -852,6 +872,8 @@ def _cap(
     official_architecture_allowed: bool = False,
     official_aligned_allowed: bool = False,
     eligible_implementation_modes: Iterable[str] | None = None,
+    unified_comparison_eligible: bool = True,
+    official_native_eligible: bool = False,
 ) -> Capability:
     if support_status not in SUPPORT_STATUSES:
         raise ValueError(f"Invalid support_status {support_status!r}")
@@ -891,6 +913,8 @@ def _cap(
         official_aligned_allowed=bool(official_aligned_allowed),
         eligible_implementation_modes=modes,
         paper_table_eligible=bool(eligible),
+        unified_comparison_eligible=bool(unified_comparison_eligible),
+        official_native_eligible=bool(official_native_eligible),
     )
 
 

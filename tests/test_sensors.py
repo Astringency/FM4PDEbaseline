@@ -43,3 +43,38 @@ def test_time_varying_sensor_budget_modes():
     assert sum(per_time["num_sensors_per_time"]) == 20
     assert total["num_observations_total"] <= 5
     assert sum(total["num_sensors_per_time"]) <= 5
+
+
+def test_random_per_sample_masks_are_deterministic_and_sample_specific():
+    target = torch.randn(3, 1, 8, 8)
+    kwargs = {
+        "num_sensors": 7,
+        "mode": "random_per_sample",
+        "seed": 11,
+        "sample_ids": ["train:10", "train:11", "train:12"],
+        "split": "train",
+        "epoch": 2,
+    }
+    first = build_observation_tensors(target, **kwargs)
+    repeat = build_observation_tensors(target, **kwargs)
+    next_epoch = build_observation_tensors(target, **{**kwargs, "epoch": 3})
+
+    assert first["mask"].shape == target.shape
+    assert torch.equal(first["mask"], repeat["mask"])
+    assert not torch.equal(first["mask"][0], first["mask"][1])
+    assert not torch.equal(first["mask"], next_epoch["mask"])
+    assert len(first["mask_ids"]) == len(target)
+
+
+def test_random_per_sample_validation_mask_does_not_depend_on_epoch():
+    target = torch.randn(2, 1, 8, 8)
+    common = {
+        "num_sensors": 5,
+        "mode": "random_per_sample",
+        "seed": 7,
+        "sample_ids": ["val:1", "val:2"],
+        "split": "val",
+    }
+    epoch_zero = build_observation_tensors(target, epoch=0, **common)
+    epoch_late = build_observation_tensors(target, epoch=99, **common)
+    assert torch.equal(epoch_zero["mask"], epoch_late["mask"])

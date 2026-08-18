@@ -32,6 +32,9 @@ class PDEOptBaseline(BaselineModel):
     def parameter_count(self) -> int:
         return int(self.optimized_numel)
 
+    def parameter_storage_count(self) -> int:
+        return self.parameter_count()
+
     def fit(self, train_loader, val_loader=None):
         return {"status": "per_instance_pde_constrained_optimization"}
 
@@ -40,6 +43,11 @@ class PDEOptBaseline(BaselineModel):
             return self._predict_sparse_inverse(batch)
         if batch.task == "sparse_forward":
             return self._predict_sparse_forward(batch)
+        if batch.task in {"sparse_solution", "sparse_reconstruction"}:
+            raise RuntimeError(
+                "PDE-Opt is disabled for the sensor-only sparse_solution protocol because its PDE objective "
+                "requires hidden source/coefficient/initial fields. Use a separately named equal-context protocol."
+            )
         start = time.perf_counter()
         pred = torch.nn.Parameter(batch.metadata.get("voronoi_grid", batch.input_fields).detach().clone())
         steps = int(self.config.get("steps", 3))

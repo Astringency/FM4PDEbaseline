@@ -19,9 +19,11 @@ from .base import (
     _fmt_optional,
     _raise_if_nonfinite_loss,
     _raise_if_nonfinite_scalar,
+    _require_exact_shape,
     _safe_len,
     _scheduler_monitor_name,
     _step_lr_scheduler,
+    _set_dataset_epoch,
     _to_device_batch,
     _write_incremental_history,
     restore_state_dict,
@@ -108,24 +110,21 @@ class IFNOBaseline(BaselineModel):
                 beta=beta,
                 padding=padding,
             )
-            effective = "official_architecture" if implementation_mode == "official_architecture" else "official_aligned"
             self.set_backend(
                 "ifno_official_aligned",
                 "ifno",
                 fallback_used=False,
                 warning=direct_import_warning,
-                implementation_mode_effective=effective,
-                implementation_source="ifno_official_aligned_reimplementation",
+                implementation_mode_effective="adapted",
+                implementation_source="ifno_concept_adapted_reimplementation",
                 official_import_success=False,
-                official_reimplementation_success=True,
-                official_alignment_level="architecture" if effective == "official_architecture" else "objective",
+                official_reimplementation_success=False,
+                official_alignment_level="concept",
                 official_alignment_notes=(
-                    "Reimplements vendored iFNO p1/p2 lift, q1/q2 pointwise projections, "
-                    "multiplicative FNO coupling blocks, grid-coordinate augmentation, and bidirectional/cycle objectives."
+                    "Retains invertible-coupling ideas but omits the official VAE and changes padding, normalization, "
+                    "loss, optimizer, update schedule, and training protocol."
                 ),
-                adapter_status="official_architecture_ifno_reimplementation"
-                if effective == "official_architecture"
-                else "official_aligned_ifno_reimplementation",
+                adapter_status="adapted_ifno_reimplementation",
                 **official_source_info("ifno"),
             )
             return self
@@ -216,6 +215,9 @@ class IFNOBaseline(BaselineModel):
         no_improve_epochs = 0
         best_state = None
         for epoch in range(epochs):
+            _set_dataset_epoch(train_loader, epoch)
+            if val_loader is not None:
+                _set_dataset_epoch(val_loader, 0)
             epoch_start = time.perf_counter()
             total = 0.0
             count = 0
@@ -381,9 +383,13 @@ def _ifno_training_loss(model: IFNOBaseline, batch: PDEBatch, cycle_weight: floa
     x, y = _physical_pair(batch)
     y_pred, recon_x = model._forward_map_with_aux(x)
     x_pred, recon_y = model._inverse_map_with_aux(y)
+    _require_exact_shape(y_pred, y, model.name, "bidirectional-forward")
+    _require_exact_shape(x_pred, x, model.name, "bidirectional-inverse")
     loss = F.mse_loss(y_pred, y) + F.mse_loss(x_pred, x)
     if cycle_weight:
         cycle_x = model._inverse_map(y_pred)
         cycle_y = model._forward_map(x_pred)
+        _require_exact_shape(cycle_x, x, model.name, "cycle-input")
+        _require_exact_shape(cycle_y, y, model.name, "cycle-target")
         loss = loss + cycle_weight * (F.mse_loss(cycle_x, x) + F.mse_loss(cycle_y, y))
     return loss + float(model.config.get("reconstruction_weight", 0.1)) * (recon_x + recon_y)

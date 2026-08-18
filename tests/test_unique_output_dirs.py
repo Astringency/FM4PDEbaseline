@@ -37,7 +37,7 @@ def test_different_noise_levels_have_different_output_dirs(tmp_path: Path):
         and row["baseline"] == "recfno"
         and row["seed"] == 1
         and row["num_sensors"] == 500
-        and row["sensor_mode"] == "random"
+        and row["sensor_mode"] == "random_per_sample"
     ]
     assert len({row["noise_level"] for row in rows}) >= 2
     assert len({row["output_dir"] for row in rows}) == len(rows)

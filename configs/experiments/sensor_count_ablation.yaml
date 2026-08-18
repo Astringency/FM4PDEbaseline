@@ -17,7 +17,7 @@ val_size: 0
 test_size: 10000
 train_shards: 5
 sensor_counts: [25, 50, 100, 250, 500, 1000]
-sensor_mode: random
+sensor_mode: random_per_sample
 noise_level: 0.0
 data_loading_mode: eager
 num_workers: 4

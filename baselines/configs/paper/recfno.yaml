@@ -7,4 +7,4 @@ method:
   width: 64
   modes1: 20
   modes2: 20
-  embedding: mask
+  input_representation: voronoi_mask_coords

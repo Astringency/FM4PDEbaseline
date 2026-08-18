@@ -39,11 +39,15 @@ def obs_mse(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None)
     pred, target = _align(pred, target)
     if mask is None:
         return torch.tensor(float("nan"), device=pred.device)
-    if tuple(mask.shape) != tuple(pred.shape[1:]):
-        # Allow masks generated for the full target to be truncated to pred channels.
-        mask = mask[: pred.shape[1]]
+    if tuple(mask.shape) == tuple(pred.shape[1:]):
+        mask = mask.unsqueeze(0).expand(pred.shape[0], *mask.shape)
+    elif tuple(mask.shape) != tuple(pred.shape):
+        raise ValueError(
+            f"Observation mask shape {tuple(mask.shape)} must exactly match prediction with or without batch "
+            f"({tuple(pred.shape)} or {tuple(pred.shape[1:])})"
+        )
     denom = mask.sum().clamp_min(1.0)
-    return (((pred - target) ** 2) * mask.unsqueeze(0)).sum() / (denom * pred.shape[0])
+    return (((pred - target) ** 2) * mask).sum() / denom
 
 
 def pde_residual_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None = None) -> torch.Tensor:
@@ -138,18 +142,16 @@ def append_result_csv(path: str | Path, row: dict) -> None:
 
 
 def num_parameters(model: torch.nn.Module) -> int:
-    return int(sum(p.numel() for p in model.parameters() if p.requires_grad))
+    return int(sum(p.numel() * (2 if p.is_complex() else 1) for p in model.parameters() if p.requires_grad))
 
 
 def _align(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if pred.shape == target.shape:
         return pred, target
-    if pred.ndim == target.ndim and pred.shape[0] == target.shape[0]:
-        slices = [slice(None)]
-        for a, b in zip(pred.shape[1:], target.shape[1:]):
-            slices.append(slice(0, min(a, b)))
-        return pred[tuple(slices)], target[tuple(slices)]
-    raise ValueError(f"Cannot align prediction shape {tuple(pred.shape)} with target shape {tuple(target.shape)}")
+    raise ValueError(
+        f"Prediction and target shapes must exactly match; got {tuple(pred.shape)} and {tuple(target.shape)}. "
+        "Silent cropping or broadcasting is forbidden."
+    )
 
 
 def _nan(ref: torch.Tensor | None = None) -> torch.Tensor:

@@ -30,6 +30,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.experiments.run_one import build_command  # noqa: E402
+from scripts.experiments.sensor_generalization_common import (  # noqa: E402
+    make_provenance_row,
+    write_eval_request,
+)
 
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_ROOT", "/home/zhangxf/share/zhangxfA100/large_storage/outputs/FM4PDEbaseline"))
 DATA_ROOT = "/home/zhangxf/share/zhangxfA100/large_storage/PDEdata/"
@@ -62,42 +66,6 @@ def load_source_args(baseline: str) -> dict:
     return json.loads(configs[0].read_text())["args"]
 
 
-def make_row(old: dict, *, seed: int, output_dir: Path, run_id: str, run_name: str) -> dict:
-    return {
-        "baseline": old["baseline"],
-        "pde": old["pde"],
-        "task": old["task"],
-        "seed": seed,
-        "device": old.get("device", "cuda"),
-        "output_dir": str(output_dir),
-        "run_id": run_id,
-        "run_name": run_name,
-        "task_group": old.get("task_group", TASK_GROUP),
-        "experiment_kind": old.get("experiment_kind", "main"),
-        "ablation_factor": old.get("ablation_factor", ""),
-        "config": old["config"],
-        "train_size": old["train_size"],
-        "val_size": old["val_size"],
-        "test_size": old["test_size"],
-        "train_shards": old.get("train_shards", 5),
-        "batch_size": old.get("batch_size", 16),
-        "epochs": old.get("epochs", 200),
-        "data_loading_mode": old.get("data_loading_mode", "eager"),
-        "num_workers": old.get("num_workers", 0),
-        "prefetch_factor": old.get("prefetch_factor", 2),
-        "scalar_param_mode": old.get("scalar_param_mode", "metadata"),
-        "num_sensors": old.get("num_sensors", 500),
-        "sensor_mode": old.get("sensor_mode", "random"),
-        "noise_level": old.get("noise_level", 0.0),
-        "load_full_trajectory": old.get("load_full_trajectory", False),
-        "pin_memory": old.get("pin_memory", True),
-        "persistent_workers": old.get("persistent_workers", False),
-        "steps": old.get("steps") or 0,
-        "refine_steps": old.get("refine_steps") or 0,
-        "particles": old.get("particles") or 0,
-    }
-
-
 def run_command(cmd: list[str], out_dir: Path, log_name: str) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / log_name
@@ -115,23 +83,26 @@ def main() -> int:
     args = ap.parse_args()
 
     baseline = args.baseline
-    retrain_run_id = f"retrain_{baseline}_{TASK}_{PDE}_s1"
-
     os.environ["DATA_ROOT"] = DATA_ROOT
     os.environ["PYTHON"] = sys.executable
 
     old = load_source_args(baseline)
     base = OUTPUT_ROOT / "sensor_generalization_retrain" / f"{baseline}_{TASK}_{PDE}"
     train_dir = base / "train"
-    ckpt = train_dir / f"{retrain_run_id}.pt"
+    train_row = make_provenance_row(
+        old,
+        execution_mode="train",
+        output_dir=train_dir,
+        run_label=f"retrain_{baseline}_{TASK}_{PDE}_s1",
+        seed=1,
+        sensor_seed=1,
+        sensor_mode="random_per_sample",
+    )
+    ckpt = train_dir / f"{train_row['run_id']}.pt"
 
     # 1) Retrain (writes checkpoint).
     if not args.skip_train:
         os.environ["SAVE_CHECKPOINT"] = "amortized"
-        train_row = make_row(
-            old, seed=1, output_dir=train_dir,
-            run_id=retrain_run_id, run_name=f"{baseline}/{TASK}/{PDE} retrain seed=1",
-        )
         train_cmd = build_command(train_row)
         if args.dry_run:
             print(f"[dry-run] train: {' '.join(train_cmd)}")
@@ -146,20 +117,36 @@ def main() -> int:
         if not ckpt.exists():
             raise FileNotFoundError(f"checkpoint not found: {ckpt}")
 
+    if args.dry_run and not ckpt.exists():
+        print(
+            "[dry-run] eval rows deferred: their run fingerprints include the actual checkpoint SHA-256 "
+            f"and can only be constructed after {ckpt} exists"
+        )
+        return 0
+
     # 2) Eval at train sensor locations (seed=1) and unseen locations (seed=2,3).
     os.environ["SAVE_CHECKPOINT"] = "off"
     results = {}
     for seed in TEST_SEEDS:
         eval_dir = base / f"eval_testseed{seed}"
-        eval_row = make_row(
-            old, seed=seed, output_dir=eval_dir,
-            run_id=f"{retrain_run_id}_testseed{seed}",
-            run_name=f"{baseline}/{TASK}/{PDE} eval testseed={seed}",
+        eval_row = make_provenance_row(
+            train_row,
+            execution_mode="eval_only",
+            output_dir=eval_dir,
+            run_label=f"sensor_gen_{baseline}_{TASK}_{PDE}_testseed{seed}",
+            seed=1,
+            sensor_seed=seed,
+            sensor_mode="random_per_sample",
+            source_train_run_id=train_row["run_id"],
+            source_train_run_fingerprint=train_row["run_fingerprint"],
+            source_train_seed=1,
+            checkpoint_path=ckpt,
         )
-        eval_cmd = build_command(eval_row) + ["--eval-only", "--checkpoint", str(ckpt)]
+        eval_cmd = build_command(eval_row)
         if args.dry_run:
-            print(f"[dry-run] eval seed={seed}: {' '.join(eval_cmd)}")
+            print(f"[dry-run] eval sensor_seed={seed} run_id={eval_row['run_id']}: {' '.join(eval_cmd)}")
             continue
+        write_eval_request(eval_dir, eval_row, eval_cmd)
         code = run_command(eval_cmd, eval_dir, "eval.log")
         summary = eval_dir / "summary.json"
         metrics = {}

@@ -4,6 +4,14 @@ method:
   normalize: true
   epochs: 200
   lr: 0.001
-  token_dim: 128
-  num_latents: 128
-  heads: 4
+  space_bands: 32
+  enc_preproc_ch: 64
+  num_latents: 4
+  enc_num_latent_channels: 16
+  num_layers: 3
+  num_cross_attention_heads: 2
+  enc_num_self_attention_heads: 2
+  num_self_attention_layers_per_block: 3
+  dec_preproc_ch: null
+  dec_num_latent_channels: 16
+  dec_num_cross_attention_heads: 1

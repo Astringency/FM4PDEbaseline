@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Sequence
 
 import torch
 
 
-SensorMode = Literal["random", "fixed", "grid", "time_varying"]
+SensorMode = Literal["random", "random_per_sample", "fixed", "grid", "time_varying"]
 SensorBudgetMode = Literal["per_time", "total"]
 
 
@@ -46,7 +46,7 @@ def make_sensor_mask(
     total = int(math.prod(obs_shape))
     num = min(int(num_sensors), total)
 
-    if mode in {"random", "fixed"}:
+    if mode in {"random", "random_per_sample", "fixed"}:
         perm = torch.randperm(total, generator=generator)[:num]
         base.reshape(-1)[perm] = 1.0
     elif mode == "grid":
@@ -101,20 +101,40 @@ def add_noise(obs_values: torch.Tensor, noise_level, relative: bool = True, seed
 
 
 def extract_observations(fields: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``obs_values`` and ``obs_coords`` from ``[B,C,*grid]`` fields."""
+    """Return observations from fields using a shared or per-sample mask.
+
+    ``mask`` is either ``[C,*grid]`` (one fixed layout shared by the batch) or
+    ``[B,C,*grid]`` (one layout per sample). All channel masks must share the
+    same locations and all samples must contain the same sensor count so the
+    observations can be represented by a dense ``[B,N,C]`` tensor.
+    """
     if fields.ndim < 4:
         raise ValueError(f"Expected fields [B,C,*grid], got {tuple(fields.shape)}")
-    if tuple(mask.shape) != tuple(fields.shape[1:]):
-        raise ValueError(f"Mask shape {tuple(mask.shape)} does not match fields without batch {tuple(fields.shape[1:])}")
+    shared = tuple(mask.shape) == tuple(fields.shape[1:])
+    batched = tuple(mask.shape) == tuple(fields.shape)
+    if not shared and not batched:
+        raise ValueError(
+            f"Mask shape {tuple(mask.shape)} must match fields with or without batch: "
+            f"{tuple(fields.shape)} or {tuple(fields.shape[1:])}"
+        )
     c = fields.shape[1]
     grid_shape = tuple(fields.shape[2:])
-    spatial_mask = mask[0].bool()
-    flat_idx = spatial_mask.reshape(-1).nonzero(as_tuple=False).squeeze(-1)
     flat = fields.reshape(fields.shape[0], c, -1)
-    values = flat[:, :, flat_idx].permute(0, 2, 1).contiguous()
     coords_all = make_coordinate_grid(grid_shape, batch_size=fields.shape[0], device=fields.device)
-    coords = coords_all[:, flat_idx, :]
-    return values, coords
+    values: list[torch.Tensor] = []
+    coords: list[torch.Tensor] = []
+    counts: list[int] = []
+    for sample in range(fields.shape[0]):
+        sample_mask = mask if shared else mask[sample]
+        if not torch.equal(sample_mask, sample_mask[:1].expand_as(sample_mask)):
+            raise ValueError("Sensor locations must be identical across channels")
+        flat_idx = sample_mask[0].bool().reshape(-1).nonzero(as_tuple=False).squeeze(-1)
+        counts.append(int(flat_idx.numel()))
+        values.append(flat[sample, :, flat_idx].transpose(0, 1).contiguous())
+        coords.append(coords_all[sample, flat_idx])
+    if len(set(counts)) > 1:
+        raise ValueError(f"Per-sample masks must contain the same number of sensors, got {counts}")
+    return torch.stack(values, dim=0), torch.stack(coords, dim=0)
 
 
 def build_observation_tensors(
@@ -125,37 +145,84 @@ def build_observation_tensors(
     noise_level: float = 0.0,
     sensor_budget_mode: SensorBudgetMode = "per_time",
     time_dim: int | None = None,
+    sample_ids: Sequence[str | int] | None = None,
+    split: str = "",
+    epoch: int = 0,
 ) -> dict[str, torch.Tensor | str]:
     from .voronoi import voronoi_fill
 
     if time_dim is None and target_fields.ndim == 5:
         time_dim = 0
-    mask = make_sensor_mask(
-        tuple(target_fields.shape[1:]),
-        num_sensors,
-        mode,
-        seed,
-        time_dim=time_dim,
-        sensor_budget_mode=sensor_budget_mode,
-    ).to(target_fields.device)
-    masked_grid = target_fields * mask.unsqueeze(0)
+    if mode == "random_per_sample":
+        if sample_ids is None:
+            sample_ids = list(range(int(target_fields.shape[0])))
+        if len(sample_ids) != int(target_fields.shape[0]):
+            raise ValueError(
+                f"sample_ids length {len(sample_ids)} does not match batch size {target_fields.shape[0]}"
+            )
+        effective_epoch = int(epoch) if str(split).lower() == "train" else 0
+        masks = [
+            make_sensor_mask(
+                tuple(target_fields.shape[1:]),
+                num_sensors,
+                mode,
+                _sample_mask_seed(seed, str(split), sample_id, effective_epoch),
+                time_dim=time_dim,
+                sensor_budget_mode=sensor_budget_mode,
+            )
+            for sample_id in sample_ids
+        ]
+        mask = torch.stack(masks, dim=0).to(target_fields.device)
+        masked_grid = target_fields * mask
+    else:
+        mask = make_sensor_mask(
+            tuple(target_fields.shape[1:]),
+            num_sensors,
+            mode,
+            seed,
+            time_dim=time_dim,
+            sensor_budget_mode=sensor_budget_mode,
+        ).to(target_fields.device)
+        masked_grid = target_fields * mask.unsqueeze(0)
     obs_values, obs_coords = extract_observations(target_fields, mask)
-    obs_values = add_noise(obs_values, noise_level, relative=True, seed=seed)
+    if mode == "random_per_sample" and noise_level:
+        assert sample_ids is not None
+        obs_values = torch.cat(
+            [
+                add_noise(
+                    obs_values[index : index + 1],
+                    noise_level,
+                    relative=True,
+                    seed=_sample_noise_seed(seed, str(split), sample_id, effective_epoch),
+                )
+                for index, sample_id in enumerate(sample_ids)
+            ],
+            dim=0,
+        )
+    else:
+        obs_values = add_noise(obs_values, noise_level, relative=True, seed=seed)
     if noise_level:
         # Keep the masked-grid values consistent with the noisy observation list.
         masked_grid = torch.zeros_like(target_fields)
         c = target_fields.shape[1]
-        spatial_mask = mask[0].bool()
-        flat_idx = spatial_mask.reshape(-1).nonzero(as_tuple=False).squeeze(-1)
         masked_flat = masked_grid.reshape(target_fields.shape[0], c, -1)
-        masked_flat[:, :, flat_idx] = obs_values.permute(0, 2, 1)
+        for sample in range(target_fields.shape[0]):
+            sample_mask = mask if mask.ndim == target_fields.ndim - 1 else mask[sample]
+            flat_idx = sample_mask[0].bool().reshape(-1).nonzero(as_tuple=False).squeeze(-1)
+            masked_flat[sample, :, flat_idx] = obs_values[sample].transpose(0, 1)
         masked_grid = masked_flat.reshape_as(target_fields)
     voronoi_grid = voronoi_fill(masked_grid, mask)
-    mask_id = hashlib.sha1(mask.detach().cpu().numpy().tobytes()).hexdigest()[:16]
-    num_observations_total = int(mask[0].sum().detach().cpu())
+    if mask.ndim == target_fields.ndim:
+        mask_ids = [_mask_id(sample_mask) for sample_mask in mask]
+        sample_mask = mask[0]
+    else:
+        mask_ids = [_mask_id(mask)] * int(target_fields.shape[0])
+        sample_mask = mask
+    mask_id = _mask_id(mask)
+    num_observations_total = int(sample_mask[0].sum().detach().cpu())
     num_sensors_per_time: int | list[int]
     if mode == "time_varying" and time_dim is not None:
-        spatial_mask = mask[0]
+        spatial_mask = sample_mask[0]
         dims = tuple(i for i in range(spatial_mask.ndim) if i != time_dim)
         counts = spatial_mask.sum(dim=dims).detach().cpu().to(torch.long).tolist()
         num_sensors_per_time = [int(x) for x in counts]
@@ -168,10 +235,25 @@ def build_observation_tensors(
         "masked_grid": masked_grid,
         "voronoi_grid": voronoi_grid,
         "mask_id": mask_id,
+        "mask_ids": mask_ids,
         "num_observations_total": num_observations_total,
         "num_sensors_per_time": num_sensors_per_time,
         "sensor_budget_mode": sensor_budget_mode,
     }
+
+
+def _sample_mask_seed(base_seed: int, split: str, sample_id: str | int, epoch: int) -> int:
+    payload = f"mask|{int(base_seed)}|{split.lower()}|{sample_id}|{int(epoch)}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") % (2**63 - 1)
+
+
+def _sample_noise_seed(base_seed: int, split: str, sample_id: str | int, epoch: int) -> int:
+    payload = f"noise|{int(base_seed)}|{split.lower()}|{sample_id}|{int(epoch)}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") % (2**63 - 1)
+
+
+def _mask_id(mask: torch.Tensor) -> str:
+    return hashlib.sha1(mask.detach().cpu().contiguous().numpy().tobytes()).hexdigest()[:16]
 
 
 def save_mask(mask: torch.Tensor, path: str | Path) -> None:

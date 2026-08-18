@@ -33,11 +33,16 @@ def voronoi_fill(masked_grid: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """
     if masked_grid.ndim < 4:
         raise ValueError(f"Expected masked_grid [B,C,*grid], got {tuple(masked_grid.shape)}")
-    if tuple(mask.shape) != tuple(masked_grid.shape[1:]):
-        raise ValueError(f"Mask shape {tuple(mask.shape)} does not match grid {tuple(masked_grid.shape[1:])}")
+    shared = tuple(mask.shape) == tuple(masked_grid.shape[1:])
+    batched = tuple(mask.shape) == tuple(masked_grid.shape)
+    if not shared and not batched:
+        raise ValueError(
+            f"Mask shape {tuple(mask.shape)} must match grid with or without batch: "
+            f"{tuple(masked_grid.shape)} or {tuple(masked_grid.shape[1:])}"
+        )
     out = torch.empty_like(masked_grid)
     for b in range(masked_grid.shape[0]):
+        sample_mask = mask if shared else mask[b]
         for c in range(masked_grid.shape[1]):
-            out[b, c] = _nearest_fill_single(masked_grid[b, c], mask[c])
+            out[b, c] = _nearest_fill_single(masked_grid[b, c], sample_mask[c])
     return out
-

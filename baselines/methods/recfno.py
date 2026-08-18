@@ -15,10 +15,24 @@ class RecFNOBaseline(BaselineModel):
     def build(self, config, data_spec):
         super().build(config, data_spec)
         target_channels = int(data_spec["target_channels"])
-        # RecFNO sparse embeddings: mask embedding and Voronoi embedding are
-        # implemented here; MLP embedding is reserved for future extension.
+        # The vendored RecFNO VoronoiFNO2d is trained on the four-channel
+        # representation [Voronoi-filled field, observation mask, coordinates].
+        # Keep that representation for the local fallback as well so changing
+        # the backend does not silently change the task input.
         in_channels = target_channels + target_channels + 2
-        self.embedding = str(self.config.get("embedding", "mask"))
+        required_representation = "voronoi_mask_coords"
+        configured_representation = self.config.get("input_representation")
+        legacy_embedding = self.config.get("embedding")
+        if configured_representation is None and legacy_embedding is not None:
+            configured_representation = "voronoi_mask_coords" if str(legacy_embedding).lower() == "voronoi" else str(legacy_embedding)
+        configured_representation = str(configured_representation or required_representation).lower()
+        if configured_representation != required_representation:
+            raise ValueError(
+                "RecFNO input_representation must be 'voronoi_mask_coords' so the vendored "
+                f"VoronoiFNO2d receives its declared input contract, got {configured_representation!r}"
+            )
+        self.input_representation = required_representation
+        self.config["input_representation"] = required_representation
         modes1, modes2 = _clamped_modes(self.config, data_spec)
         backend = str(self.config.get("official_backend", "auto")).lower()
         implementation_mode = requested_implementation_mode(self.config)
@@ -38,9 +52,17 @@ class RecFNOBaseline(BaselineModel):
                     "recfno",
                     fallback_used=False,
                     implementation_mode_effective="official",
-                    implementation_source="recfno",
+                    implementation_source="vendored_recfno_voronoifno2d_component_with_unified_training",
                     official_import_success=True,
-                    adapter_status="official_code_adapter",
+                    official_reimplementation_success=False,
+                    official_alignment_level="component",
+                    official_alignment_notes=(
+                        "Directly imports the vendored RecFNO VoronoiFNO2d component and uses its "
+                        "Voronoi+mask+coordinates representation (with FM4PDE normalized grid coordinates); "
+                        "optimization and data loading use the FM4PDE unified training protocol, not the "
+                        "upstream end-to-end script."
+                    ),
+                    adapter_status="official_component_unified_training_adapter",
                     **official_source_info("recfno"),
                 )
                 return self
@@ -64,8 +86,14 @@ class RecFNOBaseline(BaselineModel):
             fallback_used=not requested_local,
             warning="" if requested_local else self.backend_warning,
             implementation_mode_effective="adapted",
-            implementation_source="local_recfno_adapter",
+            implementation_source="local_recfno_architecture_adaptation",
             official_import_success=False,
+            official_reimplementation_success=False,
+            official_alignment_level="adapted",
+            official_alignment_notes=(
+                "Local FNO-style fallback using the RecFNO Voronoi+mask+coordinates input contract; "
+                "it does not import the official network component."
+            ),
             adapter_status="local_adapted" if requested_local else "fallback_adapted",
         )
         return self
@@ -74,14 +102,13 @@ class RecFNOBaseline(BaselineModel):
         return run_supervised_fit(self, train_loader, val_loader)
 
     def predict(self, batch: PDEBatch):
-        if self.embedding == "voronoi":
-            base = batch.metadata.get("voronoi_grid", batch.input_fields)
-        else:
-            base = batch.metadata.get("masked_grid", batch.input_fields)
+        base = batch.metadata.get("voronoi_grid")
+        if not isinstance(base, torch.Tensor):
+            raise ValueError("RecFNO requires batch.metadata['voronoi_grid']; zero-masked input fallback is not allowed")
         mask = batch.mask
         if mask is None:
-            mask_grid = torch.ones_like(base)
-        elif mask.ndim == base.ndim and mask.shape[0] == base.shape[0]:
+            raise ValueError("RecFNO requires an explicit observation mask")
+        if mask.ndim == base.ndim and mask.shape[0] == base.shape[0]:
             # Per-sample masks already carry the batch dimension.
             mask_grid = mask.to(base.device, base.dtype)
         else:
