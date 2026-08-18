@@ -1,31 +1,24 @@
 # FM4PDE Baseline
 
-This repository implements the external baseline experiments defined in
-`docs/baseline_exp.md`. The formal `main_results` design currently expands to
-76 runnable experiments and 6 explicitly skipped unsupported combinations.
+External baseline experiments for the protocol in
+[`docs/baseline_exp.md`](docs/baseline_exp.md). The formal `main_results`
+design contains 76 runnable experiments and 6 explicitly skipped combinations.
 
-## Layout
+## Entry points
 
-```text
-baselines/                         training, evaluation, metrics, artifacts
-configs/experiments/               declarative main/ablation designs
-scripts/build_experiment_matrix.py public matrix generator
-scripts/run_experiments.py         public local runner, resume, status, retry
-scripts/collect_results.py         public CSV/JSON/XLSX/PDF result collector
-scripts/experiments/               internal matrix/provenance/single-row modules
-scripts/verify_data_protocol.py    data audit required before formal runs
-tests/                             pytest coverage
-outputs/                           generated outputs and audit fixtures
-```
+| Script | Purpose |
+|---|---|
+| `scripts/build_experiment_matrix.py` | Generate a matrix from an experiment YAML |
+| `scripts/run_experiments.py` | Run, resume, inspect, or retry a matrix |
+| `scripts/collect_results.py` | Produce CSV, JSON, XLSX, LaTeX, and PDF artifacts |
 
-The numbered shell launchers were removed. Use only the three public Python
-entry points above for experiments. `offical/` contains vendored source
-snapshots and must not be edited unless those snapshots are intentionally
-updated.
+Reusable implementation modules remain under `scripts/experiments/`. The
+historical `experiment_plan_v2` namespace is immutable audit evidence and is
+rejected by every mutating entry point.
 
-## Run the formal 76-experiment matrix
+## Quick start
 
-Set paths once:
+Set the data and output paths:
 
 ```bash
 export DATA_ROOT=/path/to/PDEdata
@@ -33,8 +26,10 @@ export OUT_ROOT=outputs/main_results
 export DATA_REPORT="$OUT_ROOT/data_protocol/full/data_protocol_report.json"
 ```
 
-1. Verify the exact data/config contract. A changed YAML invalidates the old
-report, so rerun this command after editing the experiment design.
+### 1. Verify the data
+
+Formal matrices require a complete report bound to the exact YAML. Regenerate
+the report whenever the experiment config or data changes.
 
 ```bash
 python scripts/verify_data_protocol.py \
@@ -44,90 +39,93 @@ python scripts/verify_data_protocol.py \
   --full
 ```
 
-2. Generate the matrix. `main_results.yaml` and matrix name `main_results` are
-the defaults.
+### 2. Build and run the matrix
 
 ```bash
 python scripts/build_experiment_matrix.py \
   --output-root "$OUT_ROOT" \
   --data-manifest "$DATA_REPORT"
+
+python scripts/run_experiments.py \
+  "$OUT_ROOT/matrices/main_results.jsonl" \
+  --data-root "$DATA_ROOT" \
+  --gpus 0,1 \
+  --jobs-per-gpu 2
 ```
 
-The primary file is `$OUT_ROOT/matrices/main_results.jsonl`; TSV, summary JSON,
-and skipped-combination JSONL files are created beside it.
+Run the same command again to resume. Valid completed rows are skipped, and
+active `run.running` rows are left untouched.
 
-3. Inspect the plan and status without launching work:
+Inspect the plan or current status without launching work:
 
 ```bash
 python scripts/run_experiments.py \
   "$OUT_ROOT/matrices/main_results.jsonl" \
-  --data-root "$DATA_ROOT" \
-  --gpus 0,1 --jobs-per-gpu 2 --dry-run
+  --data-root "$DATA_ROOT" --gpus 0,1 --dry-run
 
 python scripts/run_experiments.py \
   "$OUT_ROOT/matrices/main_results.jsonl" --status
 ```
 
-4. Run on two GPUs. Completed rows are skipped automatically; rerunning the
-same command resumes the matrix. Invalid partial artifacts are moved into each
-run's `quarantine/` directory before retry. Rows carrying `run.running` are
-left untouched so a second launcher cannot duplicate active work; use
-`--rerun-running` only after confirming the marker is stale.
-
-```bash
-python scripts/run_experiments.py \
-  "$OUT_ROOT/matrices/main_results.jsonl" \
-  --data-root "$DATA_ROOT" \
-  --gpus 0,1 --jobs-per-gpu 2
-```
-
-Useful subsets:
+Useful selections:
 
 ```bash
 # First 8 pending rows
 python scripts/run_experiments.py "$OUT_ROOT/matrices/main_results.jsonl" \
   --data-root "$DATA_ROOT" --gpus 0,1 --first 8
 
-# Exact zero-based rows
+# Zero-based rows 0, 3, and 10 through 15
 python scripts/run_experiments.py "$OUT_ROOT/matrices/main_results.jsonl" \
   --data-root "$DATA_ROOT" --gpus 0,1 --indices 0,3,10-15
 
-# Retry only failed rows
+# Failed rows only
 python scripts/run_experiments.py "$OUT_ROOT/matrices/main_results.jsonl" \
   --data-root "$DATA_ROOT" --gpus 0,1 --failed-only
-
 ```
 
-5. Aggregate completed results. This writes publication/supplement CSV and
-JSON tables, capability/tuning tables, `results.xlsx`, and a collection report.
-Evaluation already saves every sample as a reloadable `.pt` dictionary and
-creates `samples.pdf`; `--redraw-samples` regenerates those PDFs from manifests.
+Use `--rerun-running` only after confirming that all `run.running` markers are
+stale. Existing invalid artifacts are moved into the run's `quarantine/`
+directory before relaunch.
+
+### 3. Collect the results
 
 ```bash
 python scripts/collect_results.py \
   "$OUT_ROOT/matrices/main_results.jsonl" \
   --output-dir "$OUT_ROOT/aggregate/main_results" \
-  --latex --redraw-samples
+  --latex \
+  --redraw-samples
 ```
 
-## Run an ablation
+Collection fails before writing publication tables if any run is missing,
+invalid, from another provenance cohort, or lacks a requested sample manifest.
 
-Use the same three commands with another YAML. Supported designs are
-`sensor_count_ablation`, `noise_ablation`, `sensor_mode_ablation`,
-`time_varying_sensor_ablation`, `runtime_budget_ablation`, and
-`train_size_ablation`.
+## Ablations
+
+Available designs:
+
+- `sensor_count_ablation`
+- `noise_ablation`
+- `sensor_mode_ablation`
+- `time_varying_sensor_ablation`
+- `runtime_budget_ablation`
+- `train_size_ablation`
+
+Use the same workflow with another config:
 
 ```bash
 NAME=noise_ablation
 REPORT="$OUT_ROOT/data_protocol/$NAME/full/data_protocol_report.json"
 
 python scripts/verify_data_protocol.py \
-  --config "configs/experiments/$NAME.yaml" --data-root "$DATA_ROOT" \
+  --config "configs/experiments/$NAME.yaml" \
+  --data-root "$DATA_ROOT" \
   --output-dir "$OUT_ROOT/data_protocol/$NAME/full" --full
 
 python scripts/build_experiment_matrix.py \
-  --config "configs/experiments/$NAME.yaml" --matrix-name "$NAME" \
-  --output-root "$OUT_ROOT" --data-manifest "$REPORT"
+  --config "configs/experiments/$NAME.yaml" \
+  --matrix-name "$NAME" --output-root "$OUT_ROOT" \
+  --data-manifest "$REPORT"
 
 python scripts/run_experiments.py "$OUT_ROOT/matrices/$NAME.jsonl" \
   --data-root "$DATA_ROOT" --gpus 0,1 --jobs-per-gpu 2
@@ -136,14 +134,13 @@ python scripts/collect_results.py "$OUT_ROOT/matrices/$NAME.jsonl" \
   --output-dir "$OUT_ROOT/aggregate/$NAME"
 ```
 
-## Evaluation artifacts
+## Outputs
 
-Each run stores a model checkpoint, `summary.json`, raw/summary result tables,
-and one tensor dictionary per test sample. Formal runs use a run-prefixed sample
-directory; its exact path is recorded in `summary.json`. The sample artifact
-contains inputs, targets, predictions, observations, masks, per-sample metrics,
-predictive standard deviations when available, and PC-BNN posterior particles
-when available.
+Each run stores its checkpoint, status markers, raw metrics, `summary.json`,
+per-sample `.pt` artifacts, a checksum manifest, and a multipage PDF. Exact
+artifact paths are recorded in `summary.json`.
+
+Load the first saved evaluation sample:
 
 ```python
 import json
@@ -153,8 +150,8 @@ from baselines.common.sample_artifacts import load_evaluation_sample
 
 summary = json.loads(Path("outputs/.../summary.json").read_text())
 manifest = Path(summary["sample_manifest_path"])
-first_record = json.loads(manifest.read_text().splitlines()[0])
-sample = load_evaluation_sample(first_record["artifact_path"])
+record = json.loads(manifest.read_text().splitlines()[0])
+sample = load_evaluation_sample(record["artifact_path"])
 ```
 
 ## Tests
@@ -162,10 +159,9 @@ sample = load_evaluation_sample(first_record["artifact_path"])
 ```bash
 python -m py_compile \
   scripts/build_experiment_matrix.py scripts/run_experiments.py \
-  scripts/collect_results.py scripts/experiments/*.py \
-  baselines/run.py baselines/aggregate_results.py
+  scripts/collect_results.py scripts/experiments/*.py
 python -m pytest -q
 ```
 
-The historical `experiment_plan_v2` matrix and outputs are immutable audit
-evidence. All mutating entry points reject that namespace.
+Do not edit `offical/` unless intentionally updating the vendored upstream
+source snapshots.
