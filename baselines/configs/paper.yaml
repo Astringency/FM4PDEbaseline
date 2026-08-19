@@ -3,17 +3,11 @@ output_dir: outputs/baselines/paper
 experiment_mode: paper
 
 pdes:
-  - darcy
   - poisson
   - helmholtz
-  - nsnonbounded
+  - darcy
   - burger
-  - reaction_diffusion
-  - shallow_water
-  - heat
-  - wave
-  - advection_diffusion
-  - steady_heat_conduction
+  - nsnonbounded
 
 batch_size: 16
 epochs: 200
@@ -31,8 +25,8 @@ persistent_workers: true
 prefetch_factor: 2
 seeds: [1]
 sensor_counts: [500]
-sensor_modes: [random_per_sample, grid, fixed]
-noise_levels: [0.0, 0.01, 0.05, 0.10]
+sensor_modes: [random_per_sample]
+noise_levels: [0.0]
 
 method:
   implementation_mode: official_or_skip
@@ -51,14 +45,6 @@ method:
   min_optimization_steps: 5
   restore_best: true
   grad_clip_norm: null
-  width: 48
-  modes1: 16
-  modes2: 16
-  layers: 4
-  hidden: 256
-  basis: 128
-  steps: 200
-  refine_steps: 100
   lambda_obs: 1.0
   lambda_pde: 0.01
   lambda_int: 0.01
@@ -106,7 +92,7 @@ method_by_baseline:
     reconstruction_weight: 1.0
     vae_resolution: 64
     cycle_weight: 0.0
-    lr: 0.0005
+    lr: 0.00025
     vae_grad_clip_norm: 2.0
     ifno_grad_clip_norm: 10.0
     joint_grad_clip_norm: 10.0
@@ -116,6 +102,7 @@ method_by_baseline:
     width: 32
     modes1: 18
     modes2: 18
+    layers: 4
     input_representation: voronoi_mask_coords
     optimizer: adam
     training_loss: l1
@@ -189,6 +176,8 @@ method_by_baseline:
     steps: 500
     lr: 0.01
     lambda_reg: 0.00001
+  # Supplemental ablation-only methods. The formal main_results design does
+  # not select either baseline.
   var4d:
     normalize: false
     steps: 500
@@ -205,16 +194,6 @@ method_by_baseline:
     lr: 0.005
     lambda_inverse_operator: 0.25
     lambda_background: 0.05
-
-method_by_pde:
-  heat:
-    lambda_int: 0.01
-  wave:
-    lambda_int: 0.01
-  advection_diffusion:
-    lambda_int: 0.01
-  steady_heat_conduction:
-    lambda_int: 0.01
 
 method_by_baseline_and_pde:
   ifno:

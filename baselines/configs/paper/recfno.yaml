@@ -7,6 +7,7 @@ method:
   width: 32
   modes1: 18
   modes2: 18
+  layers: 4
   input_representation: voronoi_mask_coords
   optimizer: adam
   training_loss: l1

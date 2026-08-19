@@ -63,6 +63,8 @@ def test_run_id_makes_config_paths_unique_in_shared_output_dir(tmp_path: Path):
         "8",
         "--train-size",
         "4",
+        "--val-size",
+        "0",
         "--test-size",
         "1",
         "--batch-size",

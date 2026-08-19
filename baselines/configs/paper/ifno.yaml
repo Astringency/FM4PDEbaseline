@@ -26,3 +26,4 @@ method:
   joint_grad_clip_norm: 10.0
   vae_geometric_augmentation: true
   cycle_weight: 0.0
+  early_stopping_patience: 12

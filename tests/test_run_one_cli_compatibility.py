@@ -22,7 +22,7 @@ def _rows(name: str, tmp_path: Path, monkeypatch) -> list[dict]:
 def _parse_command(row: dict, monkeypatch):
     monkeypatch.setenv("DATA_ROOT", "/tmp/PDEdata")
     # This file tests that run_one and baselines.run agree on CLI syntax.  A
-    # formal v2 row intentionally requires a real, full data manifest; keep
+    # formal v3 row intentionally requires a real, full data manifest; keep
     # that provenance contract covered by test_data_manifest_provenance.py.
     cli_only_row = dict(row)
     cli_only_row["run_fingerprint"] = ""

@@ -32,9 +32,9 @@ from scripts.experiments.provenance import (
 
 
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_ROOT", ROOT / "outputs"))
-CORRECTED_NAMESPACE = "experiment_plan_v2_corrected"
-MATRIX = OUTPUT_ROOT / CORRECTED_NAMESPACE / "matrices" / f"{CORRECTED_NAMESPACE}.jsonl"
-OUT_XLSX = OUTPUT_ROOT / f"{CORRECTED_NAMESPACE}_summary.xlsx"
+MAIN_RESULTS_NAMESPACE = "main_results"
+MATRIX = OUTPUT_ROOT / MAIN_RESULTS_NAMESPACE / "matrices" / f"{MAIN_RESULTS_NAMESPACE}.jsonl"
+OUT_XLSX = OUTPUT_ROOT / f"{MAIN_RESULTS_NAMESPACE}_summary.xlsx"
 IMMUTABLE_HISTORICAL_WORKBOOK = ROOT / "outputs" / "experiment_plan_v2_summary.xlsx"
 
 PROVENANCE_COLUMNS = [
@@ -397,7 +397,7 @@ def _prepare_blocked_publication(
     quarantine_output: Path,
     manifest: dict[str, Any],
 ) -> None:
-    """Archive stale corrected output while leaving historical evidence in place."""
+    """Archive stale main-results output while leaving historical evidence in place."""
     if _is_immutable_historical_workbook(output):
         manifest["immutable_historical_workbook_preserved"] = str(output)
         return
@@ -410,7 +410,7 @@ def _require_mutable_publication_target(output: Path) -> None:
     if _is_immutable_historical_workbook(output):
         raise ExportValidationError(
             "refusing to overwrite immutable historical workbook "
-            f"{output}; publish the corrected cohort to {OUT_XLSX}"
+            f"{output}; publish the main-results cohort to {OUT_XLSX}"
         )
 
 

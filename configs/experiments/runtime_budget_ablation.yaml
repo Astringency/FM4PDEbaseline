@@ -4,10 +4,10 @@ ablation_factor: runtime_budget
 config: baselines/configs/paper.yaml
 pdes: [poisson, nsnonbounded, reaction_diffusion, shallow_water]
 baselines: [pinn_sparse, pc_bnn, pde_opt, var4d, vivid]
-seeds: [1, 2, 3]
+seeds: [1]
 train_size: 50000
-val_size: 0
-test_size: 10000
+val_size: 1000
+test_size: 1000
 train_shards: 5
 num_sensors: 500
 sensor_mode: random_per_sample

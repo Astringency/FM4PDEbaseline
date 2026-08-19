@@ -29,6 +29,8 @@ def test_result_rows_include_capability_and_backend_fields(tmp_path: Path):
             "8",
             "--train-size",
             "2",
+            "--val-size",
+            "0",
             "--test-size",
             "1",
             "--batch-size",

@@ -9,10 +9,10 @@ pdes:
   - heat
   - advection_diffusion
 baselines: [fno, deeponet, recfno, senseiver, voronoicnn]
-seeds: [1, 2, 3]
+seeds: [1]
 train_sizes: [500, 1000, 5000, 10000, 50000]
 val_size: 0
-test_size: 10000
+test_size: 1000
 train_shards: 5
 num_sensors: 500
 sensor_mode: random_per_sample

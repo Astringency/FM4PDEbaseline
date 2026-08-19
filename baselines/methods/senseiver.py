@@ -26,29 +26,27 @@ class SenseiverBaseline(BaselineModel):
         self.space_bands = int(self.config.get("space_bands", 32))
         if self.space_bands < 1:
             raise ValueError(f"space_bands must be positive, got {self.space_bands}")
+        self.batch_pixels = int(self.config.get("batch_pixels", 2048))
+        if self.batch_pixels < 1:
+            raise ValueError(f"batch_pixels must be positive, got {self.batch_pixels}")
         self.position_channels = 2 * coord_dim * self.space_bands
 
-        legacy_token_dim = self.config.get("token_dim")
-        legacy_heads = self.config.get("heads")
-        enc_preproc_ch = int(self.config.get("enc_preproc_ch", legacy_token_dim if legacy_token_dim is not None else 64))
+        for removed_setting in ("token_dim", "heads"):
+            if removed_setting in self.config:
+                raise ValueError(
+                    f"Senseiver setting {removed_setting!r} has been removed; use the explicit Senseiver architecture settings"
+                )
+        enc_preproc_ch = int(self.config.get("enc_preproc_ch", 64))
         num_latents = int(self.config.get("num_latents", 4))
-        latent_channels = int(
-            self.config.get("enc_num_latent_channels", legacy_token_dim if legacy_token_dim is not None else 16)
-        )
+        latent_channels = int(self.config.get("enc_num_latent_channels", 16))
         num_layers = int(self.config.get("num_layers", 3))
-        cross_heads = int(
-            self.config.get("num_cross_attention_heads", legacy_heads if legacy_heads is not None else 2)
-        )
-        self_heads = int(
-            self.config.get("enc_num_self_attention_heads", legacy_heads if legacy_heads is not None else 2)
-        )
+        cross_heads = int(self.config.get("num_cross_attention_heads", 2))
+        self_heads = int(self.config.get("enc_num_self_attention_heads", 2))
         self_attention_layers = int(self.config.get("num_self_attention_layers_per_block", 3))
         dec_preproc_ch_value = self.config.get("dec_preproc_ch", None)
         dec_preproc_ch = None if dec_preproc_ch_value is None else int(dec_preproc_ch_value)
         decoder_latent_channels = int(self.config.get("dec_num_latent_channels", latent_channels))
-        decoder_heads = int(
-            self.config.get("dec_num_cross_attention_heads", legacy_heads if legacy_heads is not None else 1)
-        )
+        decoder_heads = int(self.config.get("dec_num_cross_attention_heads", 1))
         if decoder_latent_channels != latent_channels:
             raise ValueError(
                 "Senseiver decoder latent channels must match encoder latent channels: "
@@ -57,6 +55,7 @@ class SenseiverBaseline(BaselineModel):
         dropout = float(self.config.get("dropout", 0.0))
         self.config.update(
             {
+                "batch_pixels": self.batch_pixels,
                 "space_bands": self.space_bands,
                 "enc_preproc_ch": enc_preproc_ch,
                 "num_latents": num_latents,
@@ -158,7 +157,9 @@ class SenseiverBaseline(BaselineModel):
     def fit(self, train_loader, val_loader=None):
         return run_supervised_fit(self, train_loader, val_loader)
 
-    def predict(self, batch: PDEBatch):
+    def _inputs_and_queries(self, batch: PDEBatch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if batch.coords is None:
+            raise ValueError("Senseiver requires target-grid coordinates")
         if batch.obs_values is None or batch.obs_coords is None:
             if batch.metadata.get("deferred_dynamic_sensors"):
                 raise ValueError(
@@ -179,21 +180,53 @@ class SenseiverBaseline(BaselineModel):
             )
         b = values.shape[0]
         query = batch.coords.to(batch.input_fields.device, batch.input_fields.dtype)
+        if coords.shape[0] == 1 and b != 1:
+            coords = coords.expand(b, -1, -1)
         if query.shape[0] == 1 and b != 1:
             query = query.expand(b, -1, -1)
+        return values, coords, query
+
+    def _decode_queries(
+        self,
+        values: torch.Tensor,
+        coords: torch.Tensor,
+        query: torch.Tensor,
+    ) -> torch.Tensor:
         sensor_positions = senseiver_fourier_features(coords, self.spatial_shape, self.space_bands)
         query_positions = senseiver_fourier_features(query, self.spatial_shape, self.space_bands)
         if self.official_encoder is not None and self.official_decoder is not None:
             latents = self.official_encoder(torch.cat([values, sensor_positions], dim=-1))
             decoded = self.official_decoder(latents, query_positions)
-            spatial = tuple(self.out_shape[1:])
-            return decoded.permute(0, 2, 1).reshape(b, self.out_channels, *spatial)
+            return decoded.permute(0, 2, 1)
         tokens = self.sensor_proj(torch.cat([values, sensor_positions], dim=-1))
+        b = values.shape[0]
         latents = self.latents.unsqueeze(0).repeat(b, 1, 1)
         latents = latents + self.enc_attn(latents, tokens, tokens)[0]
         latents = latents + self.self_attn(latents, latents, latents)[0]
         q = self.query_proj(query_positions)
         decoded = q + self.dec_attn(q, latents, latents)[0]
         values = self.out(decoded)
+        return values.permute(0, 2, 1)
+
+    def supervised_training_pair(self, batch: PDEBatch) -> tuple[torch.Tensor, torch.Tensor]:
+        values, coords, query = self._inputs_and_queries(batch)
+        target = batch.target_fields.flatten(start_dim=2)
+        spatial_points = int(query.shape[1])
+        if int(target.shape[2]) != spatial_points:
+            raise ValueError(
+                "Senseiver query count must match flattened target pixels: "
+                f"{spatial_points} != {int(target.shape[2])}"
+            )
+        sampled_points = min(self.batch_pixels, spatial_points)
+        if sampled_points < spatial_points:
+            indices = torch.randperm(spatial_points, device=query.device)[:sampled_points]
+            query = query.index_select(1, indices)
+            target = target.index_select(2, indices)
+        return self._decode_queries(values, coords, query), target
+
+    def predict(self, batch: PDEBatch):
+        values, coords, query = self._inputs_and_queries(batch)
+        decoded = self._decode_queries(values, coords, query)
+        b = values.shape[0]
         spatial = tuple(self.out_shape[1:])
-        return values.permute(0, 2, 1).reshape(b, self.out_channels, *spatial)
+        return decoded.reshape(b, self.out_channels, *spatial)

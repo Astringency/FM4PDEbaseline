@@ -82,7 +82,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="configs/experiments/experiment_plan_v2_corrected.yaml",
+        default="configs/experiments/main_results.yaml",
         help="Experiment YAML whose PDEs and split sizes define the audit cohort.",
     )
     parser.add_argument(

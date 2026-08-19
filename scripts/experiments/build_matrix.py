@@ -143,8 +143,8 @@ FACTOR_TO_VARIED_FIELDS = {
     "train_size": {"train_size"},
 }
 
-# Backwards-compatible public name used by downstream tooling.  The v2 list is
-# defined in one place alongside the summary validation contract.
+# Public alias used by downstream tooling. The fingerprint list is defined in
+# one place alongside the summary validation contract.
 HASH_FIELDS = list(FINGERPRINT_FIELDS)
 
 MATRIX_FIELDS = [
@@ -525,7 +525,7 @@ def _reject_historical_matrix_target(
     if str(matrix_name) == HISTORICAL_EXPERIMENT_NAMESPACE:
         raise HistoricalExperimentError(
             f"refusing to rebuild historical matrix {matrix_name!r}; "
-            "use experiment_plan_v2_corrected and preserve the original evidence"
+            "use main_results and preserve the original evidence"
         )
 
 
@@ -619,10 +619,10 @@ def _comparison_track(cfg: dict[str, Any]) -> str:
 def _global_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     train_size = _env_int("TRAIN_SIZE", int(cfg.get("train_size", 50000)))
     return {
-        "seeds": _env_list("SEEDS", cfg.get("seeds", [1, 2, 3]), int),
+        "seeds": _env_list("SEEDS", cfg.get("seeds", [1]), int),
         "train_size": train_size,
-        "val_size": _env_int("VAL_SIZE", int(cfg.get("val_size", 0))),
-        "test_size": _env_int("TEST_SIZE", int(cfg.get("test_size", 10000))),
+        "val_size": _env_int("VAL_SIZE", int(cfg.get("val_size", 1000))),
+        "test_size": _env_int("TEST_SIZE", int(cfg.get("test_size", 1000))),
         "train_shards": _env_int("TRAIN_SHARDS", int(cfg.get("train_shards", 5))),
         "sensor_counts": _env_list("SENSOR_COUNTS", _first_present(cfg, ["sensor_counts", "num_sensors", "sensor_count"], [500]), int),
         "sensor_modes": _env_list(

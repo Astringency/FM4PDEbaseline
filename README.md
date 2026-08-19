@@ -2,7 +2,9 @@
 
 External baseline experiments for the protocol in
 [`docs/baseline_exp.md`](docs/baseline_exp.md). The formal `main_results`
-design contains 76 runnable experiments and 6 explicitly skipped combinations.
+design is the single source of truth and contains 76 runnable experiments.
+`baselines/configs/paper.yaml` contains the shared runtime and canonical
+per-method recipes; supplemental-only methods are labeled in place.
 
 ## Entry points
 
@@ -14,9 +16,9 @@ design contains 76 runnable experiments and 6 explicitly skipped combinations.
 | `scripts/plot_results.py` | Render one PDF per stored evaluation sample |
 | `scripts/run_baseline.sh` | Run the complete resumable workflow |
 
-Reusable implementation modules remain under `scripts/experiments/`. The
-historical `experiment_plan_v2` namespace is immutable audit evidence and is
-rejected by every mutating entry point.
+Reusable implementation modules remain under `scripts/experiments/`. There is
+no runnable v2 design; its historical output namespace remains protected from
+accidental overwrite by mutating entry points.
 
 ## Quick start
 
@@ -132,6 +134,10 @@ manifests, writes one PDF per sample, skips complete PDFs, and can be rerun
 without retraining.
 
 ## Ablations
+
+These are supplemental designs, not alternate definitions of the formal
+experiment. They inherit the formal one-seed, 50,000-total-training-sample and
+1,000-test-sample defaults, then vary only their named factor.
 
 Available designs:
 

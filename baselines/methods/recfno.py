@@ -22,10 +22,12 @@ class RecFNOBaseline(BaselineModel):
         # the backend does not silently change the task input.
         in_channels = input_channels + input_channels + 2
         required_representation = "voronoi_mask_coords"
+        if "embedding" in self.config:
+            raise ValueError(
+                "RecFNO setting 'embedding' has been removed; use "
+                "input_representation='voronoi_mask_coords'"
+            )
         configured_representation = self.config.get("input_representation")
-        legacy_embedding = self.config.get("embedding")
-        if configured_representation is None and legacy_embedding is not None:
-            configured_representation = "voronoi_mask_coords" if str(legacy_embedding).lower() == "voronoi" else str(legacy_embedding)
         configured_representation = str(configured_representation or required_representation).lower()
         if configured_representation != required_representation:
             raise ValueError(

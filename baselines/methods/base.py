@@ -121,6 +121,15 @@ class BaselineModel(nn.Module):
     def predict(self, batch: PDEBatch):
         raise NotImplementedError
 
+    def supervised_training_pair(self, batch: PDEBatch) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the prediction and target used by the supervised optimizer.
+
+        Most baselines train on their complete output field. Models whose
+        official training recipe samples outputs before an expensive decoder
+        can override this seam without changing full-field inference.
+        """
+        return self.predict(batch), batch.target_fields
+
     def predict_physical(self, batch: PDEBatch):
         if self.uses_normalization and self.normalization_stats is not None:
             norm_batch = normalize_batch_input_target(batch, self.normalization_stats)
@@ -204,14 +213,14 @@ class BaselineModel(nn.Module):
 def _requested_implementation_mode(config: dict[str, Any]) -> str:
     if "implementation_mode" in config:
         return str(config.get("implementation_mode") or "").lower()
-    legacy = str(config.get("official_backend", "auto")).lower()
-    if legacy in {"local", "none", "adapted"}:
+    backend = str(config.get("official_backend", "auto")).lower()
+    if backend in {"local", "none", "adapted"}:
         return "adapted"
-    if legacy == "official":
+    if backend == "official":
         return "official"
-    if legacy in {"neuraloperator", "deepxde", "recfno", "senseiver", "pc_bnn", "ifno"}:
+    if backend in {"neuraloperator", "deepxde", "recfno", "senseiver", "pc_bnn", "ifno"}:
         return "official"
-    return legacy or "auto"
+    return backend or "auto"
 
 
 def _default_effective_mode(backend_used: str, fallback_used: bool) -> str:
@@ -510,9 +519,8 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
             train_samples += int(batch.input_fields.shape[0])
             if model.uses_normalization and model.normalization_stats is not None:
                 batch = normalize_batch_input_target(batch, model.normalization_stats)
-            target = batch.target_fields
             opt.zero_grad(set_to_none=True)
-            pred = model.predict(batch)
+            pred, target = model.supervised_training_pair(batch)
             _require_exact_shape(pred, target, model.name, "train")
             optimization_loss, reported_loss = _supervised_losses(model, pred, target)
             _raise_if_nonfinite_loss(optimization_loss, model, epoch + 1, step + 1, "train_loss")
@@ -705,16 +713,6 @@ def _supervised_losses(
         loss = F.l1_loss(prediction, target)
         return loss, loss
     if loss_name == "sum_mse":
-        # Senseiver optimizes the upstream reduction='sum' objective but logs
-        # the element mean.  Its dataloader also selects random output pixels;
-        # preserve that stochastic objective while retaining PDEBatch loading.
-        if model.name == "senseiver" and model.training:
-            spatial_points = int(math.prod(prediction.shape[2:]))
-            requested_points = int(model.config.get("batch_pixels", spatial_points))
-            if 0 < requested_points < spatial_points:
-                indices = torch.randperm(spatial_points, device=prediction.device)[:requested_points]
-                prediction = prediction.reshape(prediction.shape[0], prediction.shape[1], -1)[..., indices]
-                target = target.reshape(target.shape[0], target.shape[1], -1)[..., indices]
         return F.mse_loss(prediction, target, reduction="sum"), F.mse_loss(prediction, target)
     if loss_name in {"relative_l2", "l2"}:
         per_sample = torch.linalg.vector_norm(

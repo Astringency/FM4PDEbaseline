@@ -52,6 +52,7 @@ from baselines.methods.vivid import VIVIDBaseline
 from baselines.methods.voronoicnn import VoronoiCNNBaseline
 from baselines.experiment_matrix import capability_skip_row
 from scripts.experiments.provenance import (
+    DEFAULT_SENSOR_PROTOCOL_VERSION,
     DEFAULT_TASK_PROTOCOL_VERSION,
     MATRIX_SCHEMA_VERSION,
     reject_historical_experiment_path,
@@ -106,8 +107,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sensor-budget-mode", choices=["per_time", "total"], default=None)
     parser.add_argument("--noise-level", type=float, default=0.0)
     parser.add_argument("--train-size", type=int, default=50000)
-    parser.add_argument("--val-size", type=int, default=0)
-    parser.add_argument("--test-size", type=int, default=10000)
+    parser.add_argument("--val-size", type=int, default=1000)
+    parser.add_argument("--test-size", type=int, default=1000)
     parser.add_argument("--train-shards", type=int, default=5)
     parser.add_argument("--test-split", choices=["test"], default="test")
     parser.add_argument("--batch-size", type=int, default=16)
@@ -147,8 +148,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--summary-schema-version", type=int, default=2)
     parser.add_argument("--execution-mode", choices=["train", "eval_only"], default=None)
-    parser.add_argument("--task-protocol-version", default="2")
-    parser.add_argument("--sensor-protocol-version", default="2")
+    parser.add_argument("--task-protocol-version", default=DEFAULT_TASK_PROTOCOL_VERSION)
+    parser.add_argument("--sensor-protocol-version", default=DEFAULT_SENSOR_PROTOCOL_VERSION)
     parser.add_argument("--comparison-track", choices=["unified_adapted", "official_native"], default="unified_adapted")
     parser.add_argument("--source-train-run-id", default="", help="Training run identifier expected for eval-only checkpoints.")
     parser.add_argument(
@@ -208,19 +209,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="save_sample_artifacts",
         action="store_false",
         help="Disable per-sample artifacts in non-paper diagnostic runs.",
-    )
-    parser.add_argument(
-        "--plot-sample-pdf",
-        dest="plot_sample_pdf",
-        action="store_true",
-        default=False,
-        help="Deprecated compatibility flag. Use scripts/plot_results.py after the run.",
-    )
-    parser.add_argument(
-        "--no-plot-sample-pdf",
-        dest="plot_sample_pdf",
-        action="store_false",
-        help="Compatibility flag; experiment runs never render PDFs.",
     )
     return parser.parse_args(argv)
 
@@ -768,14 +756,6 @@ def _validate_mode(args: argparse.Namespace) -> None:
         raise ValueError("--synthetic-data is restricted to smoke/debug modes")
     if args.experiment_mode == "paper" and not bool(args.save_sample_artifacts):
         raise ValueError("paper mode requires --save-sample-artifacts")
-    if bool(args.plot_sample_pdf):
-        warnings.warn(
-            "--plot-sample-pdf is deprecated and ignored; run scripts/plot_results.py after results are stored",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-
 def _resolve_physics_metric_mode(args: argparse.Namespace, cfg: dict[str, Any]) -> str:
     if args.physics_metric_mode:
         return str(args.physics_metric_mode)

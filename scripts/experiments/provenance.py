@@ -134,7 +134,7 @@ def reject_historical_experiment_path(
     ):
         raise HistoricalExperimentError(
             f"refusing historical {HISTORICAL_EXPERIMENT_NAMESPACE} {field}: {path}; "
-            "use a corrected namespace and leave historical audit evidence untouched"
+            "use the main_results namespace and leave historical audit evidence untouched"
         )
 
 

@@ -49,11 +49,26 @@ def test_main_results_config_covers_expected_pdes_and_resources():
 
 def test_paper_baseline_config_uses_eager_multi_worker_loading():
     cfg = yaml.safe_load((ROOT / "baselines" / "configs" / "paper.yaml").read_text(encoding="utf-8"))
+    assert cfg["pdes"] == ["poisson", "helmholtz", "darcy", "burger", "nsnonbounded"]
+    assert cfg["seeds"] == [1]
+    assert cfg["sensor_counts"] == [500]
+    assert cfg["sensor_modes"] == ["random_per_sample"]
+    assert cfg["noise_levels"] == [0.0]
     assert cfg["data_loading_mode"] == "eager"
     assert cfg["num_workers"] == 4
     assert cfg["pin_memory"] is True
     assert cfg["persistent_workers"] is True
     assert cfg["prefetch_factor"] == 2
+
+
+def test_only_one_formal_main_experiment_config_remains():
+    obsolete = {
+        "experiment_plan_v2.yaml",
+        "experiment_plan_v2_corrected.yaml",
+        "main_results_focused.yaml",
+    }
+    config_dir = ROOT / "configs" / "experiments"
+    assert obsolete.isdisjoint(path.name for path in config_dir.glob("*.yaml"))
 
 
 def test_aggregate_script_finds_results_files(tmp_path: Path):

@@ -10,6 +10,16 @@ from baselines.methods.official import OfficialImportError
 from baselines.run import main
 
 
+NON_FORMAL_PAPER_ARGS = [
+    "--task-protocol-version",
+    "backend-test-v1",
+    "--sensor-protocol-version",
+    "backend-test-v1",
+    "--val-size",
+    "0",
+]
+
+
 def _missing_fno_backends(monkeypatch):
     def missing_neuralop():
         raise OfficialImportError("no neuraloperator")
@@ -52,6 +62,7 @@ def test_paper_strict_official_missing_backend_raises(monkeypatch, tiny_data_roo
                 "forward",
                 "--experiment-mode",
                 "paper",
+                *NON_FORMAL_PAPER_ARGS,
                 "--data-root",
                 str(tiny_data_root),
                 "--config",
@@ -84,6 +95,7 @@ def test_paper_official_or_skip_missing_backend_writes_skip(monkeypatch, tiny_da
             "forward",
             "--experiment-mode",
             "paper",
+            *NON_FORMAL_PAPER_ARGS,
             "--data-root",
             str(tiny_data_root),
             "--config",
@@ -140,6 +152,7 @@ def test_paper_official_or_skip_runs_official_aligned_when_allowed(tiny_data_roo
             "forward",
             "--experiment-mode",
             "paper",
+            *NON_FORMAL_PAPER_ARGS,
             "--data-root",
             str(tiny_data_root),
             "--config",
@@ -179,6 +192,7 @@ def test_official_or_skip_wraps_constructor_typeerror_as_skip(monkeypatch, tiny_
             "forward",
             "--experiment-mode",
             "paper",
+            *NON_FORMAL_PAPER_ARGS,
             "--data-root",
             str(tiny_data_root),
             "--config",
@@ -214,6 +228,7 @@ def test_strict_official_wraps_constructor_typeerror_as_raise(monkeypatch, tiny_
                 "forward",
                 "--experiment-mode",
                 "paper",
+                *NON_FORMAL_PAPER_ARGS,
                 "--data-root",
                 str(tiny_data_root),
                 "--config",

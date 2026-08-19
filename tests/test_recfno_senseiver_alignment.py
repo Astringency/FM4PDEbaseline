@@ -71,6 +71,15 @@ def test_recfno_rejects_a_misleading_non_voronoi_input_config():
         )
 
 
+def test_recfno_rejects_removed_embedding_setting():
+    batch = _poisson_sparse_batch()
+    with pytest.raises(ValueError, match="embedding.*input_representation"):
+        RecFNOBaseline().build(
+            {"implementation_mode": "adapted", "embedding": "voronoi"},
+            build_data_spec(batch),
+        )
+
+
 def test_recfno_requires_explicit_voronoi_grid_and_mask():
     batch = _poisson_sparse_batch()
     model = RecFNOBaseline().build(
@@ -109,6 +118,13 @@ class _CaptureSenseiverDecoder(torch.nn.Module):
         self.last_coords = coords.detach().clone()
         channels = int(self.init_kwargs["num_output_channels"])
         return torch.zeros(coords.shape[0], coords.shape[1], channels, device=coords.device, dtype=coords.dtype)
+
+
+class _CoordinateSenseiverDecoder(_CaptureSenseiverDecoder):
+    def forward(self, latents, coords):
+        self.last_coords = coords.detach().clone()
+        channels = int(self.init_kwargs["num_output_channels"])
+        return coords[..., :channels]
 
 
 def _official_senseiver_positional_grid(shape: tuple[int, int], bands: int) -> torch.Tensor:
@@ -170,6 +186,63 @@ def test_senseiver_official_components_receive_official_fourier_features(monkeyp
     assert "sum-mse" in backend["official_alignment_notes"].lower()
 
 
+def test_senseiver_samples_query_pixels_before_training_decode(monkeypatch):
+    batch = _poisson_sparse_batch()
+    expected_grid = _official_senseiver_positional_grid((4, 4), bands=2)
+    batch.target_fields = (
+        expected_grid[:, :2]
+        .transpose(0, 1)
+        .reshape(1, 2, 4, 4)
+        .expand(batch.input_fields.shape[0], -1, -1, -1)
+        .clone()
+    )
+    monkeypatch.setattr(
+        senseiver_module,
+        "get_senseiver_classes",
+        lambda: (_CaptureSenseiverEncoder, _CoordinateSenseiverDecoder),
+    )
+
+    model = SenseiverBaseline().build(
+        {
+            "implementation_mode": "official_or_skip",
+            "official_backend": "senseiver",
+            "batch_pixels": 3,
+            "space_bands": 2,
+            "enc_preproc_ch": 8,
+            "num_latents": 4,
+            "enc_num_latent_channels": 6,
+            "num_layers": 3,
+            "num_cross_attention_heads": 2,
+            "enc_num_self_attention_heads": 2,
+            "num_self_attention_layers_per_block": 3,
+            "dec_preproc_ch": None,
+            "dec_num_cross_attention_heads": 1,
+        },
+        build_data_spec(batch),
+    )
+
+    model.train()
+    prediction, target = model.supervised_training_pair(batch)
+
+    assert model.official_decoder.last_coords.shape == (2, 3, 8)
+    assert prediction.shape == target.shape == (2, 2, 3)
+    assert torch.allclose(prediction, target)
+
+    model.eval()
+    assert model.predict(batch).shape == batch.target_fields.shape
+    assert model.official_decoder.last_coords.shape == (2, 16, 8)
+
+
+@pytest.mark.parametrize("setting", ["token_dim", "heads"])
+def test_senseiver_rejects_removed_architecture_aliases(setting):
+    batch = _poisson_sparse_batch()
+    with pytest.raises(ValueError, match=f"{setting}.*explicit Senseiver architecture"):
+        SenseiverBaseline().build(
+            {"implementation_mode": "adapted", setting: 8},
+            build_data_spec(batch),
+        )
+
+
 def test_paper_configs_disclose_recfno_input_and_senseiver_architecture():
     root = Path(__file__).resolve().parents[1]
     main = yaml.safe_load((root / "baselines" / "configs" / "paper.yaml").read_text(encoding="utf-8"))
@@ -215,19 +288,5 @@ def test_paper_configs_disclose_recfno_input_and_senseiver_architecture():
     assert method_recfno["epochs"] == 200
     assert method_senseiver["epochs"] == 200
 
-    default = yaml.safe_load((root / "baselines" / "configs" / "default.yaml").read_text(encoding="utf-8"))
-    assert {"token_dim", "num_latents", "heads"}.isdisjoint(default["method"])
-    assert default["method_by_baseline"]["recfno"]["input_representation"] == "voronoi_mask_coords"
-    assert {key: default["method_by_baseline"]["senseiver"][key] for key in architecture} == architecture
-
-    tuning = yaml.safe_load((root / "baselines" / "configs" / "tuning.yaml").read_text(encoding="utf-8"))[
-        "tuning_grid"
-    ]
-    assert "token_dim" not in tuning["recfno"]
-    assert tuning["recfno"]["input_representation"] == ["voronoi_mask_coords"]
-    assert tuning["recfno"]["modes1"] == [12, 20]
-    assert tuning["recfno"]["modes2"] == [12, 20]
-    assert "token_dim" not in tuning["senseiver"]
-    assert tuning["senseiver"]["space_bands"] == [16, 32]
-    assert tuning["senseiver"]["num_latents"] == [4, 16]
-    assert tuning["senseiver"]["enc_num_latent_channels"] == [16, 32]
+    assert not (root / "baselines" / "configs" / "default.yaml").exists()
+    assert not (root / "baselines" / "configs" / "tuning.yaml").exists()

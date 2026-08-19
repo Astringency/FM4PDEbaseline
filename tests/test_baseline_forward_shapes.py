@@ -29,7 +29,7 @@ def test_baseline_predict_shape(baseline, pde, task):
     registry = build_default_registry()
     raw = registry.synthetic_raw(pde, n=2, resolution=8)
     batch = registry.make_task(raw, pde, task, num_sensors=6, seed=1)
-    cfg = {"width": 8, "modes1": 4, "modes2": 4, "layers": 2, "hidden": 16, "basis": 8, "token_dim": 16, "num_latents": 8, "heads": 2, "steps": 1, "refine_steps": 1}
+    cfg = {"width": 8, "modes1": 4, "modes2": 4, "layers": 2, "hidden": 16, "basis": 8, "num_latents": 8, "steps": 1, "refine_steps": 1}
     model = BASELINES[baseline]().build(cfg, build_data_spec(batch))
     with torch.set_grad_enabled(baseline in {"pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"}):
         pred = model.predict(batch)

@@ -33,7 +33,7 @@ def _config(method_config: Path) -> dict:
         "name": "provenance_test",
         "experiment_kind": "main",
         # These generic provenance unit tests intentionally use a non-paper
-        # protocol. Formal v2 manifest enforcement has dedicated coverage in
+        # protocol. Formal v3 manifest enforcement has dedicated coverage in
         # test_data_manifest_provenance.py.
         "task_protocol_version": "provenance-unit-test-v1",
         "config": str(method_config),
@@ -356,16 +356,16 @@ def test_run_command_rejects_fingerprint_bound_environment_override(tmp_path: Pa
         build_command(row)
 
 
-def test_exporter_defaults_to_the_corrected_namespace():
+def test_exporter_defaults_to_the_main_results_namespace():
     args = exporter.parse_args([])
 
     assert Path(args.matrix) == (
         exporter.OUTPUT_ROOT
-        / "experiment_plan_v2_corrected"
+        / "main_results"
         / "matrices"
-        / "experiment_plan_v2_corrected.jsonl"
+        / "main_results.jsonl"
     )
-    assert Path(args.output) == exporter.OUTPUT_ROOT / "experiment_plan_v2_corrected_summary.xlsx"
+    assert Path(args.output) == exporter.OUTPUT_ROOT / "main_results_summary.xlsx"
     assert exporter.IMMUTABLE_HISTORICAL_WORKBOOK == (
         exporter.ROOT / "outputs" / "experiment_plan_v2_summary.xlsx"
     )
