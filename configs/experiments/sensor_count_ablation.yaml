@@ -3,14 +3,12 @@ experiment_kind: ablation
 ablation_factor: sensor_count
 config: baselines/configs/paper.yaml
 pdes:
-  - darcy
   - poisson
+  - helmholtz
+  - darcy
+  - burger
   - nsnonbounded
-  - reaction_diffusion
-  - shallow_water
-  - heat
-  - advection_diffusion
-baselines: [recfno, senseiver, voronoicnn, pinn_sparse, pde_opt]
+baselines: [recfno, senseiver, voronoicnn]
 seeds: [1]
 train_size: 50000
 val_size: 1000
@@ -18,6 +16,7 @@ test_size: 1000
 train_shards: 5
 sensor_counts: [25, 50, 100, 250, 500, 1000]
 sensor_mode: random_per_sample
+sensor_budget_mode: total
 noise_level: 0.0
 data_loading_mode: eager
 num_workers: 4

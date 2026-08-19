@@ -23,7 +23,9 @@ def test_sensor_count_ablation_only_varies_num_sensors(tmp_path: Path, monkeypat
     assert summary["ablation_factor"] == "sensor_count"
     assert {row["num_sensors"] for row in rows} == {25, 50, 100, 250, 500, 1000}
     assert {row["sensor_mode"] for row in rows} == {"random_per_sample"}
+    assert {row["sensor_budget_mode"] for row in rows} == {"total"}
     assert {row["noise_level"] for row in rows} == {0.0}
+    assert {row["baseline"] for row in rows} == {"recfno", "senseiver", "voronoicnn"}
 
 
 def test_noise_ablation_only_varies_noise_level(tmp_path: Path, monkeypatch):
@@ -31,26 +33,33 @@ def test_noise_ablation_only_varies_noise_level(tmp_path: Path, monkeypatch):
     assert {row["noise_level"] for row in rows} == {0.0, 0.01, 0.05, 0.10}
     assert {row["num_sensors"] for row in rows} == {500}
     assert {row["sensor_mode"] for row in rows} == {"random_per_sample"}
+    assert {row["sensor_budget_mode"] for row in rows} == {"total"}
+    assert {row["baseline"] for row in rows} == {"recfno", "senseiver", "voronoicnn"}
 
 
 def test_sensor_mode_ablation_only_varies_sensor_mode(tmp_path: Path, monkeypatch):
     rows, _skipped, _summary = _matrix("sensor_mode_ablation", tmp_path, monkeypatch)
     assert {row["sensor_mode"] for row in rows} == {"random_per_sample", "fixed", "grid"}
     assert {row["num_sensors"] for row in rows} == {500}
+    assert {row["sensor_budget_mode"] for row in rows} == {"total"}
     assert {row["noise_level"] for row in rows} == {0.0}
+    assert {row["baseline"] for row in rows} == {"recfno", "senseiver", "voronoicnn"}
 
 
 def test_train_size_ablation_only_varies_train_size(tmp_path: Path, monkeypatch):
     rows, _skipped, _summary = _matrix("train_size_ablation", tmp_path, monkeypatch)
-    assert {row["train_size"] for row in rows} == {500, 1000, 5000, 10000, 50000}
+    assert {row["train_size"] for row in rows} == {5000, 10000, 20000, 30000, 50000}
+    assert {row["val_size"] for row in rows} == {1000}
     assert {row["num_sensors"] for row in rows} == {500}
     assert {row["sensor_mode"] for row in rows} == {"random_per_sample"}
+    assert {row["sensor_budget_mode"] for row in rows} == {"total"}
     assert {row["noise_level"] for row in rows} == {0.0}
+    assert {row["baseline"] for row in rows} == {"recfno", "senseiver", "voronoicnn"}
 
 
 def test_time_varying_sensor_ablation_scope_and_full_trajectory(tmp_path: Path, monkeypatch):
     rows, _skipped, _summary = _matrix("time_varying_sensor_ablation", tmp_path, monkeypatch)
-    assert {row["pde"] for row in rows} == {"nsnonbounded", "burger", "reaction_diffusion", "shallow_water"}
+    assert {row["pde"] for row in rows} == {"nsnonbounded"}
     assert {row["baseline"] for row in rows} == {"var4d", "vivid", "senseiver"}
     assert {row["sensor_mode"] for row in rows} == {"time_varying"}
     assert {row["load_full_trajectory"] for row in rows} == {True}
@@ -77,6 +86,9 @@ def test_runtime_budget_ablation_varies_one_budget_per_baseline(tmp_path: Path, 
     assert {row["refine_steps"] for row in vivid_rows} == {50, 100, 250, 500}
     assert {row["steps"] for row in vivid_rows} == {0}
     assert {row["particles"] for row in vivid_rows} == {0}
+
+    time_varying_rows = [row for row in rows if row["task_group"] == "runtime_budget_time_varying_da"]
+    assert {row["pde"] for row in time_varying_rows} == {"nsnonbounded"}
 
     for baseline, baseline_rows in by_baseline.items():
         expected = 4 if baseline == "vivid" else 5

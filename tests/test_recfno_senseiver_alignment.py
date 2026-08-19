@@ -233,6 +233,47 @@ def test_senseiver_samples_query_pixels_before_training_decode(monkeypatch):
     assert model.official_decoder.last_coords.shape == (2, 16, 8)
 
 
+def test_senseiver_preserves_official_query_batch_volume_per_epoch():
+    batch = _poisson_sparse_batch()
+    model = SenseiverBaseline().build(
+        {
+            "implementation_mode": "adapted",
+            "official_backend": "local",
+            "epochs": 1,
+            "lr": 0.0,
+            "normalize": False,
+            "training_loss": "sum_mse",
+            "batch_pixels": 3,
+            "space_bands": 2,
+            "enc_preproc_ch": 8,
+            "num_latents": 4,
+            "enc_num_latent_channels": 6,
+            "num_layers": 3,
+            "num_cross_attention_heads": 2,
+            "enc_num_self_attention_heads": 2,
+            "num_self_attention_layers_per_block": 3,
+            "dec_num_latent_channels": 6,
+            "dec_num_cross_attention_heads": 1,
+        },
+        build_data_spec(batch),
+    )
+    original = model.supervised_training_pair
+    calls = 0
+
+    def counted_training_pair(current_batch):
+        nonlocal calls
+        calls += 1
+        return original(current_batch)
+
+    model.supervised_training_pair = counted_training_pair
+    model.fit([batch])
+
+    # The official loader defines int(spatial_pixels / batch_pixels) query
+    # batches per epoch. A 4x4 field with 3 query pixels therefore gets five
+    # independent optimizer updates, not one sampled update.
+    assert calls == 5
+
+
 @pytest.mark.parametrize("setting", ["token_dim", "heads"])
 def test_senseiver_rejects_removed_architecture_aliases(setting):
     batch = _poisson_sparse_batch()
@@ -276,17 +317,7 @@ def test_paper_configs_disclose_recfno_input_and_senseiver_architecture():
         "early_stopping_patience": 100,
     }
 
-    method_recfno = yaml.safe_load(
-        (root / "baselines" / "configs" / "paper" / "recfno.yaml").read_text(encoding="utf-8")
-    )["method"]
-    method_senseiver = yaml.safe_load(
-        (root / "baselines" / "configs" / "paper" / "senseiver.yaml").read_text(encoding="utf-8")
-    )["method"]
-    assert method_recfno["input_representation"] == "voronoi_mask_coords"
-    for key, value in senseiver.items():
-        assert method_senseiver[key] == value
-    assert method_recfno["epochs"] == 200
-    assert method_senseiver["epochs"] == 200
-
     assert not (root / "baselines" / "configs" / "default.yaml").exists()
     assert not (root / "baselines" / "configs" / "tuning.yaml").exists()
+    standalone_dir = root / "baselines" / "configs" / "paper"
+    assert not standalone_dir.exists() or not list(standalone_dir.glob("*.yaml"))

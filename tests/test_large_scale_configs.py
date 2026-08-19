@@ -71,6 +71,22 @@ def test_only_one_formal_main_experiment_config_remains():
     assert obsolete.isdisjoint(path.name for path in config_dir.glob("*.yaml"))
 
 
+def test_all_runnable_experiment_configs_only_reference_documented_pdes():
+    config_dir = ROOT / "configs" / "experiments"
+    for path in sorted(config_dir.glob("*.yaml")):
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert set(cfg.get("pdes", [])).issubset(ALL_PDES), path.name
+        for group in (cfg.get("task_group_overrides", {}) or {}).values():
+            assert set(group.get("pdes", [])).issubset(ALL_PDES), path.name
+
+
+def test_experiment_configs_do_not_disable_the_validation_split():
+    config_dir = ROOT / "configs" / "experiments"
+    for path in sorted(config_dir.glob("*.yaml")):
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert int(cfg.get("val_size", 1000)) > 0, path.name
+
+
 def test_aggregate_script_finds_results_files(tmp_path: Path):
     out_root = tmp_path / "large"
     result_dir = out_root / "runs" / "main_results" / "task_group=full_forward_main" / "dummy"

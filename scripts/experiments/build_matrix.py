@@ -86,15 +86,15 @@ DEFAULT_BASELINES_BY_GROUP = {
     "sparse_inverse_main_amortized": ["recfno", "senseiver", "voronoicnn"],
     "sparse_inverse_main": ["pinn_sparse", "pde_opt"],
     "time_varying_da_main": ["senseiver", "var4d", "vivid"],
-    "sensor_count_ablation": ["recfno", "senseiver", "voronoicnn", "pinn_sparse", "pde_opt"],
-    "noise_ablation": ["recfno", "senseiver", "voronoicnn", "pinn_sparse", "pde_opt"],
-    "sensor_mode_ablation": ["recfno", "senseiver", "voronoicnn", "pde_opt"],
+    "sensor_count_ablation": ["recfno", "senseiver", "voronoicnn"],
+    "noise_ablation": ["recfno", "senseiver", "voronoicnn"],
+    "sensor_mode_ablation": ["recfno", "senseiver", "voronoicnn"],
     "time_varying_sensor_ablation": ["var4d", "vivid", "senseiver"],
     "runtime_budget_ablation": ["pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"],
     "runtime_budget_sparse_forward": ["pinn_sparse", "pde_opt"],
     "runtime_budget_pcbnn": ["pc_bnn"],
     "runtime_budget_time_varying_da": ["var4d", "vivid"],
-    "train_size_ablation": ["fno", "deeponet", "recfno", "senseiver", "voronoicnn"],
+    "train_size_ablation": ["recfno", "senseiver", "voronoicnn"],
 }
 
 VALID_EXPERIMENT_KINDS = {"main", "ablation"}

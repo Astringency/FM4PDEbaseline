@@ -4,9 +4,6 @@ ablation_factor: time_varying_sensor_count
 config: baselines/configs/paper.yaml
 pdes:
   - nsnonbounded
-  - burger
-  - reaction_diffusion
-  - shallow_water
 baselines: [var4d, vivid, senseiver]
 seeds: [1]
 train_size: 50000

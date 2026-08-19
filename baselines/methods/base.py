@@ -130,6 +130,16 @@ class BaselineModel(nn.Module):
         """
         return self.predict(batch), batch.target_fields
 
+    def supervised_training_updates_per_batch(self, batch: PDEBatch) -> int:
+        """Return the optimizer updates represented by one loader batch.
+
+        The default supervised recipe consumes every target value in one
+        update. Methods such as Senseiver whose official data loader emits
+        several independently sampled query batches per field can override
+        this without changing the common data adapter.
+        """
+        return 1
+
     def predict_physical(self, batch: PDEBatch):
         if self.uses_normalization and self.normalization_stats is not None:
             norm_batch = normalize_batch_input_target(batch, self.normalization_stats)
@@ -516,28 +526,35 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
             if max_steps is not None and step >= int(max_steps):
                 break
             batch = _to_device_batch(batch, device)
-            train_samples += int(batch.input_fields.shape[0])
             if model.uses_normalization and model.normalization_stats is not None:
                 batch = normalize_batch_input_target(batch, model.normalization_stats)
-            opt.zero_grad(set_to_none=True)
-            pred, target = model.supervised_training_pair(batch)
-            _require_exact_shape(pred, target, model.name, "train")
-            optimization_loss, reported_loss = _supervised_losses(model, pred, target)
-            _raise_if_nonfinite_loss(optimization_loss, model, epoch + 1, step + 1, "train_loss")
-            optimization_loss.backward()
-            if grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-            opt.step()
-            batch_samples = int(target.shape[0])
-            total += float(reported_loss.detach().cpu()) * batch_samples
-            count += batch_samples
-            train_batches += 1
+            updates_per_batch = int(model.supervised_training_updates_per_batch(batch))
+            if updates_per_batch < 1:
+                raise ValueError(
+                    f"{model.name} supervised_training_updates_per_batch must be positive, got {updates_per_batch}"
+                )
+            for _update in range(updates_per_batch):
+                opt.zero_grad(set_to_none=True)
+                pred, target = model.supervised_training_pair(batch)
+                _require_exact_shape(pred, target, model.name, "train")
+                optimization_loss, reported_loss = _supervised_losses(model, pred, target)
+                _raise_if_nonfinite_loss(optimization_loss, model, epoch + 1, train_batches + 1, "train_loss")
+                optimization_loss.backward()
+                if grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+                opt.step()
+                batch_samples = int(target.shape[0])
+                total += float(reported_loss.detach().cpu()) * batch_samples
+                count += batch_samples
+                train_samples += batch_samples
+                train_batches += 1
             if log_interval > 0 and (step + 1) % log_interval == 0:
                 running = total / max(count, 1)
                 print(
                     f"[fit step] baseline={model.name} pde={model.data_spec.get('pde', '')} "
                     f"task={model.data_spec.get('task', '')} epoch={epoch + 1}/{epochs} "
-                    f"step={step + 1}/{_safe_len(train_loader)} batch_loss={float(reported_loss.detach().cpu()):.6g} "
+                    f"step={step + 1}/{_safe_len(train_loader)} optimizer_updates={train_batches} "
+                    f"batch_loss={float(reported_loss.detach().cpu()):.6g} "
                     f"running_train_loss={running:.6g} device={device}{_cuda_mem_text(device)}",
                     file=sys.stderr,
                     flush=True,

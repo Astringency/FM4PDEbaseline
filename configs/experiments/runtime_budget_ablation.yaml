@@ -2,7 +2,7 @@ name: runtime_budget_ablation
 experiment_kind: ablation
 ablation_factor: runtime_budget
 config: baselines/configs/paper.yaml
-pdes: [poisson, nsnonbounded, reaction_diffusion, shallow_water]
+pdes: [poisson, nsnonbounded]
 baselines: [pinn_sparse, pc_bnn, pde_opt, var4d, vivid]
 seeds: [1]
 train_size: 50000
@@ -42,7 +42,7 @@ task_group_overrides:
         particles: 8
   runtime_budget_time_varying_da:
     task: sparse_solution
-    pdes: [nsnonbounded, reaction_diffusion, shallow_water]
+    pdes: [nsnonbounded]
     baselines: [var4d, vivid]
     sensor_mode: time_varying
     load_full_trajectory: true

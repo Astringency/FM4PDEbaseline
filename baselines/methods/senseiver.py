@@ -108,8 +108,9 @@ class SenseiverBaseline(BaselineModel):
                     official_alignment_level="algorithm_training",
                     official_alignment_notes=(
                         "Directly imports the vendored Senseiver Encoder and Decoder, ports its Fourier "
-                        "positions, and preserves sum-MSE, Adam, train-loss monitoring, and patience=100; "
-                        "the Lightning data interface is adapted to PDEBatch."
+                        "positions, and preserves pre-decoder query sampling, the official query-batch "
+                        "volume, sum-MSE, Adam, train-loss monitoring, and patience=100; the Lightning "
+                        "data interface is adapted to PDEBatch."
                     ),
                     adapter_status="official_training_flow_adapter",
                     **official_source_info("senseiver"),
@@ -223,6 +224,11 @@ class SenseiverBaseline(BaselineModel):
             query = query.index_select(1, indices)
             target = target.index_select(2, indices)
         return self._decode_queries(values, coords, query), target
+
+    def supervised_training_updates_per_batch(self, batch: PDEBatch) -> int:
+        """Match the official loader's query-batch count for each field batch."""
+        spatial_points = int(batch.target_fields.flatten(start_dim=2).shape[2])
+        return max(spatial_points // min(self.batch_pixels, spatial_points), 1)
 
     def predict(self, batch: PDEBatch):
         values, coords, query = self._inputs_and_queries(batch)

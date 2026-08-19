@@ -66,7 +66,7 @@ def test_sanity_main_includes_main_table_ifno_inverse(tmp_path: Path):
     assert not any(row["task_group"] == "full_inverse_main" and row["baseline"] == "deeponet" for row in rows)
 
 
-def test_future_supervised_defaults_to_materialize(tmp_path: Path):
+def test_sanity_matrix_only_uses_documented_pdes(tmp_path: Path):
     out = tmp_path / "large"
     subprocess.run(
         [
@@ -83,9 +83,7 @@ def test_future_supervised_defaults_to_materialize(tmp_path: Path):
         check=True,
     )
     rows = _read_jsonl(out / "matrices" / "sanity_main.jsonl")
-    heat_forward = [row for row in rows if row["pde"] == "heat" and row["task"] == "forward"]
-    assert heat_forward
-    assert {row["scalar_param_mode"] for row in heat_forward} == {"materialize"}
+    assert {row["pde"] for row in rows}.issubset({"poisson", "helmholtz", "darcy", "burger", "nsnonbounded"})
 
 
 def test_sparse_inverse_per_instance_and_time_varying_unsupported_are_skipped():

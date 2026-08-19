@@ -44,13 +44,6 @@ def test_ifno_budget_records_all_three_stages_and_total():
     )
 
 
-def test_standalone_method_configs_do_not_override_central_recipes():
-    config = yaml.safe_load((ROOT / "baselines" / "configs" / "paper.yaml").read_text(encoding="utf-8"))
-    for path in sorted((ROOT / "baselines" / "configs" / "paper").glob("*.yaml")):
-        standalone = yaml.safe_load(path.read_text(encoding="utf-8"))["method"]
-        central = config["method_by_baseline"][path.stem]
-        assert set(central).issubset(standalone), path.name
-        shared_keys = set(standalone).intersection(central)
-        assert {key: standalone[key] for key in shared_keys} == {
-            key: central[key] for key in shared_keys
-        }, path.name
+def test_central_paper_config_is_the_only_method_recipe_source():
+    standalone_dir = ROOT / "baselines" / "configs" / "paper"
+    assert not standalone_dir.exists() or not list(standalone_dir.glob("*.yaml"))
