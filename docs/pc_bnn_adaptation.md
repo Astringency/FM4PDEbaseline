@@ -20,6 +20,10 @@ SVGD direction is written back as each particle's gradient, and independent
 Adam optimizers update network weights and noise precision with separate
 learning rates. The default official-aligned configuration uses five particles,
 2000 steps, `lr=1e-3`, `lr_noise=1e-5`, and equation variance `1e-4`.
+The mean PDE residual is multiplied by the adapted collocation count before
+applying equation precision, preserving the official summed likelihood scale.
+Known boundary residuals are counted with sparse observations under the learned
+noise precision; the fixed equation precision is applied only to PDE residuals.
 
 The task seam is implemented by sparse-forward and sparse-inverse Adapters.
 They select the observed field, returned field, and PDE residual semantics.

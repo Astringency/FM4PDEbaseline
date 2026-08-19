@@ -34,6 +34,7 @@ from .official import (
     OfficialImportError,
     get_ifno_official_aligned_status,
     get_ifno_official_status,
+    get_neuraloperator_fno_blocks_class,
     official_source_info,
     requested_implementation_mode,
 )
@@ -112,6 +113,7 @@ class IFNOBaseline(BaselineModel):
                 rank=int(self.config.get("rank", 24)),
                 vae_hidden_dims=self.config.get("vae_hidden_dims"),
                 vae_resolution=int(self.config.get("vae_resolution", 64)),
+                fno_blocks_class=get_neuraloperator_fno_blocks_class(),
             )
             self.set_backend(
                 "ifno_official_aligned",
@@ -124,8 +126,9 @@ class IFNOBaseline(BaselineModel):
                 official_reimplementation_success=True,
                 official_alignment_level="algorithm_training",
                 official_alignment_notes=(
-                    "Retains the bidirectional invertible coupling, official VanillaVAE topology, posterior-mean inverse "
-                    "inference, and iFNO/VAE/joint three-stage AdamW training behind the FM4PDE data adapter."
+                    "Retains the bidirectional invertible coupling with vendored neuraloperator FNOBlocks, official "
+                    "VanillaVAE topology, posterior-mean inverse inference, and iFNO/VAE/joint three-stage AdamW "
+                    "training behind the FM4PDE data adapter."
                 ),
                 adapter_status="official_training_ifno_task_adapter",
                 **official_source_info("ifno"),
@@ -402,13 +405,19 @@ class IFNOBaseline(BaselineModel):
                 x, y = _physical_pair(batch)
                 pretrain_optimizer.zero_grad(set_to_none=True)
                 y_pred, recon_x = self.operator.forward_map(x)
-                forward_loss = _relative_l2_loss(y_pred, y) + reconstruction_weight * recon_x
+                forward_loss = _relative_l2_loss(
+                    _ifno_physical_scale(self, batch, y_pred, "y"),
+                    _ifno_physical_scale(self, batch, y, "y"),
+                ) + reconstruction_weight * recon_x
                 forward_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
                 pretrain_optimizer.step()
                 pretrain_optimizer.zero_grad(set_to_none=True)
                 x_pred, recon_y = self.operator.inverse_map(y)
-                backward_loss = _relative_l2_loss(x_pred, x) + reconstruction_weight * recon_y
+                backward_loss = _relative_l2_loss(
+                    _ifno_physical_scale(self, batch, x_pred, "x"),
+                    _ifno_physical_scale(self, batch, x, "x"),
+                ) + reconstruction_weight * recon_y
                 backward_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
                 pretrain_optimizer.step()
@@ -429,7 +438,10 @@ class IFNOBaseline(BaselineModel):
                 x, _ = _physical_pair(batch)
                 vae_optimizer.zero_grad(set_to_none=True)
                 reconstructed, mu, log_var = self.operator.vae_reconstruct(x, sample=True)
-                loss = _relative_l2_loss(reconstructed, x) + kl_weight * _vae_kl(mu, log_var)
+                loss = _relative_l2_loss(
+                    _ifno_physical_scale(self, batch, reconstructed, "x"),
+                    _ifno_physical_scale(self, batch, x, "x"),
+                ) + kl_weight * _vae_kl(mu, log_var)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
                 vae_optimizer.step()
@@ -456,14 +468,20 @@ class IFNOBaseline(BaselineModel):
                 x, y = _physical_pair(batch)
                 forward_optimizer.zero_grad(set_to_none=True)
                 y_pred, _ = self.operator.forward_map(x)
-                forward_loss = _relative_l2_loss(y_pred, y)
+                forward_loss = _relative_l2_loss(
+                    _ifno_physical_scale(self, batch, y_pred, "y"),
+                    _ifno_physical_scale(self, batch, y, "y"),
+                )
                 forward_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
                 forward_optimizer.step()
                 backward_optimizer.zero_grad(set_to_none=True)
                 raw_inverse, _ = self.operator.inverse_map(y)
                 filtered_inverse, mu, log_var = self.operator.vae_reconstruct(raw_inverse, sample=True)
-                backward_loss = _relative_l2_loss(filtered_inverse, x) + kl_weight * _vae_kl(mu, log_var)
+                backward_loss = _relative_l2_loss(
+                    _ifno_physical_scale(self, batch, filtered_inverse, "x"),
+                    _ifno_physical_scale(self, batch, x, "x"),
+                ) + kl_weight * _vae_kl(mu, log_var)
                 backward_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
                 backward_optimizer.step()
@@ -518,7 +536,18 @@ class IFNOBaseline(BaselineModel):
                 forward, _ = self.operator.forward_map(x)
                 inverse, _ = self.operator.inverse_map(y)
                 inverse, _, _ = self.operator.vae_reconstruct(inverse, sample=False)
-                total += float((_relative_l2_loss(forward, y) + _relative_l2_loss(inverse, x)).cpu())
+                total += float(
+                    (
+                        _relative_l2_loss(
+                            _ifno_physical_scale(self, batch, forward, "y"),
+                            _ifno_physical_scale(self, batch, y, "y"),
+                        )
+                        + _relative_l2_loss(
+                            _ifno_physical_scale(self, batch, inverse, "x"),
+                            _ifno_physical_scale(self, batch, x, "x"),
+                        )
+                    ).cpu()
+                )
                 count += 1
         return total / max(count, 1)
 
@@ -586,6 +615,30 @@ def _relative_l2_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.T
     difference = torch.linalg.vector_norm((prediction - target).reshape(prediction.shape[0], -1), dim=1)
     denominator = torch.linalg.vector_norm(target.reshape(target.shape[0], -1), dim=1).clamp_min(1e-12)
     return (difference / denominator).sum()
+
+
+def _ifno_physical_scale(
+    model: IFNOBaseline,
+    batch: PDEBatch,
+    field: torch.Tensor,
+    role: str,
+) -> torch.Tensor:
+    """Decode normalized iFNO fields before the official relative-L2 objective."""
+
+    if not model.uses_normalization or model.normalization_stats is None:
+        return field
+    if role not in {"x", "y"}:
+        raise ValueError(f"Unknown iFNO physical role {role!r}")
+    inverse_task = batch.task in {"inverse", "sparse_inverse"}
+    use_input_stats = (role == "x") != inverse_task
+    stats = model.normalization_stats.to(field.device)
+    mean = stats.input_mean if use_input_stats else stats.target_mean
+    std = stats.input_std if use_input_stats else stats.target_std
+    channels = min(int(field.shape[1]), int(mean.numel()))
+    view = (1, channels, *([1] * (field.ndim - 2)))
+    decoded = field.clone()
+    decoded[:, :channels] = decoded[:, :channels] * std[:channels].reshape(view) + mean[:channels].reshape(view)
+    return decoded
 
 
 def _vae_kl(mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:

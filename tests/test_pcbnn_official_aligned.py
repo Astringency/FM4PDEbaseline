@@ -68,9 +68,11 @@ def test_pcbnn_adapted_static_tasks_return_calibratable_particle_artifacts(task)
         "noise_lr": cfg.get("lr_noise", 1e-5),
         "initialization": "independent_kaiming_normal",
         "noise_precision_initialization": "gamma_prior",
-        "svgd_kernel": "official_rbf_median",
-        "equation_precision": 1.0e4,
-    }
+            "svgd_kernel": "official_rbf_median",
+            "equation_precision": 1.0e4,
+            "equation_likelihood_reduction": "collocation_sum",
+            "boundary_likelihood": "learned_noise_precision",
+        }
 
     backend = _backend_info(model, model.config)
     cap = resolve_capability("pc_bnn", "poisson", task, "fixed")

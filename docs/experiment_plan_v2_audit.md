@@ -60,7 +60,7 @@ vendored source metadata 中的 upstream revision 和 local modifications 仍为
 |---|---|---:|---|
 | fno | `official_component_reuse` | 否 | 复用了 NeuralOperator FNO 组件，但训练器、优化器、归一化、早停和评估均为本地协议。 |
 | deeponet | `official_component_reuse` | 否 | 复用了 DeepXDE Cartesian-product 网络组件，但未使用官方 Model.compile/Model.train 实验协议。 |
-| ifno | `official_training_aligned_adaptation` | 否 | 保留可逆耦合、官方 VAE 拓扑、posterior-mean 逆推理和三阶段训练；数据与任务由 FM4PDE adapter 提供。 |
+| ifno | `official_training_aligned_adaptation` | 否 | 保留 vendored FNOBlocks 可逆耦合、官方 VAE 拓扑、posterior-mean 逆推理和 iFNO/VAE/joint 三阶段训练；数据与任务由 FM4PDE adapter 提供。 |
 | recfno | `adapted_reimplementation_major_input_divergence` | 否 | 审计适配器使用 zero-filled field + mask + coordinates，width/modes/loss/训练设置均不同于 vendored recipe。 |
 | senseiver | `adapted_reimplementation_major_encoding_divergence` | 否 | 审计适配器使用 raw coordinates 和不同 latent/layer 设置，没有采用 vendored Fourier positional encoding recipe。 |
 | voronoicnn | `architecture_reimplementation` | 否 | 复现了核心层类型，但 width、batch size、epochs 和统一任务协议不同于 vendored 实验。 |

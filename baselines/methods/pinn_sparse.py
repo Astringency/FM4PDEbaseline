@@ -23,6 +23,7 @@ from .official import (
 from .shared import NeuralField
 
 STATIC_SPARSE_INVERSE_PDES = {"poisson", "helmholtz", "darcy", "steady_heat_conduction"}
+DEEPXDE_STATIC_PDES = {"poisson", "helmholtz", "darcy"}
 
 
 def _synchronized_perf_counter(batch: PDEBatch) -> float:
@@ -46,10 +47,14 @@ class PINNSparseBaseline(BaselineModel):
         self.deepxde = None
         backend = str(self.config.get("official_backend", "auto")).lower()
         implementation_mode = requested_implementation_mode(self.config)
+        pde_name = str(data_spec.get("pde", "")).lower()
         fallback_reason = ""
-        native_deepxde = bool(self.config.get("deepxde_native", False)) or (
-            implementation_mode in {"official", "official_or_skip", "official_aligned"}
-            and backend in {"deepxde", "official"}
+        native_deepxde = pde_name in DEEPXDE_STATIC_PDES and (
+            bool(self.config.get("deepxde_native", False))
+            or (
+                implementation_mode in {"official", "official_or_skip", "official_aligned"}
+                and backend in {"deepxde", "official"}
+            )
         )
         if native_deepxde:
             try:
@@ -128,7 +133,11 @@ class PINNSparseBaseline(BaselineModel):
         return {"status": "per_instance_method_no_amortized_fit"}
 
     def predict(self, batch: PDEBatch):
-        if self.deepxde is not None and batch.task in {"sparse_forward", "sparse_inverse"}:
+        if (
+            self.deepxde is not None
+            and batch.pde_name.lower() in DEEPXDE_STATIC_PDES
+            and batch.task in {"sparse_forward", "sparse_inverse"}
+        ):
             return self._predict_deepxde(batch)
         if batch.task == "sparse_inverse":
             return self._predict_sparse_inverse(batch)
@@ -178,8 +187,17 @@ class PINNSparseBaseline(BaselineModel):
         return torch.cat(preds, dim=0).detach()
 
     def _predict_deepxde(self, batch: PDEBatch) -> torch.Tensor:
+        requested_device = torch.device(self.config.get("device", batch.target_fields.device))
+        previous_device = torch.get_default_device()
+        torch.set_default_device(requested_device)
+        try:
+            return self._predict_deepxde_on_default_device(batch)
+        finally:
+            torch.set_default_device(previous_device)
+
+    def _predict_deepxde_on_default_device(self, batch: PDEBatch) -> torch.Tensor:
         pde = batch.pde_name.lower()
-        if pde not in STATIC_SPARSE_INVERSE_PDES:
+        if pde not in DEEPXDE_STATIC_PDES:
             raise NotImplementedError(f"DeepXDE PINN-Sparse supports static PDEs only, got {batch.pde_name}")
         if batch.obs_coords is None or batch.obs_values is None:
             raise ValueError("DeepXDE PINN-Sparse requires explicit obs_coords and obs_values")
@@ -204,23 +222,32 @@ class PINNSparseBaseline(BaselineModel):
             conditions = [
                 dde.icbc.PointSetBC(observation_coords, observation_values, component=observed_component)
             ]
-            use_zero_boundary = bool(self.config.get("deepxde_zero_boundary", pde != "helmholtz"))
-            if use_zero_boundary:
-                conditions.insert(
-                    0,
+            if pde == "helmholtz":
+                boundary_conditions = _deepxde_helmholtz_boundary_conditions(
+                    dde, geometry, batch, self.config
+                )
+                conditions[0:0] = boundary_conditions
+            elif bool(self.config.get("deepxde_zero_boundary", True)):
+                boundary_conditions = [
                     dde.icbc.DirichletBC(
                         geometry,
                         lambda x: np.zeros((len(x), 1), dtype=np.float32),
                         lambda _, on_boundary: on_boundary,
                         component=0,
-                    ),
+                    )
+                ]
+                conditions.insert(
+                    0,
+                    boundary_conditions[0],
                 )
+            else:
+                boundary_conditions = []
             data = dde.data.PDE(
                 geometry,
                 pde_fn,
                 conditions,
                 num_domain=num_domain,
-                num_boundary=num_boundary if use_zero_boundary else 0,
+                num_boundary=num_boundary if boundary_conditions else 0,
                 train_distribution=str(self.config.get("train_distribution", "Hammersley")),
                 anchors=observation_coords,
                 num_test=int(self.config.get("num_test_collocation", min(num_domain, 1024))),
@@ -240,7 +267,7 @@ class PINNSparseBaseline(BaselineModel):
 
                 net.apply_output_transform(output_transform)
             model = dde.Model(data, net)
-            loss_weights = _deepxde_loss_weights(self.config, use_zero_boundary)
+            loss_weights = _deepxde_loss_weights(self.config, len(boundary_conditions))
             callbacks = []
             if bool(self.config.get("early_stopping", False)) and adam_iterations > 0:
                 callbacks.append(
@@ -293,7 +320,8 @@ class PINNSparseBaseline(BaselineModel):
             "adam_iterations": adam_iterations,
             "lbfgs_steps": lbfgs_steps,
             "num_domain": num_domain,
-            "num_boundary": num_boundary if bool(self.config.get("deepxde_zero_boundary", pde != "helmholtz")) else 0,
+            "num_boundary": num_boundary,
+            "boundary_conditions": "generator_aligned_kronecker" if pde == "helmholtz" else "zero_dirichlet",
         }
         record_optimization_status(batch, statuses)
         return torch.cat(predictions, dim=0).detach()
@@ -477,10 +505,45 @@ def _deepxde_static_pde(dde, pde_name: str, batch: PDEBatch, item: int, config: 
     raise NotImplementedError(f"No DeepXDE-native static residual for {pde_name}")
 
 
-def _deepxde_loss_weights(config: dict, use_zero_boundary: bool) -> list[float]:
+def _deepxde_helmholtz_boundary_conditions(dde, geometry, batch: PDEBatch, config: dict):
+    """Express the MATLAB Kronecker boundary rows as DeepXDE operator BCs."""
+
+    wave_number = float(config.get("k", batch.metadata.get("k", 1.0)))
+    operator_sign = float(
+        config.get("elliptic_operator_sign", batch.metadata.get("elliptic_operator_sign", 1.0))
+    )
+
+    def horizontal(inputs, outputs, _):
+        tangent = dde.grad.hessian(outputs, inputs, component=0, i=1, j=1)
+        return operator_sign * (tangent + (1.0 + wave_number**2) * outputs[:, :1])
+
+    def vertical(inputs, outputs, _):
+        tangent = dde.grad.hessian(outputs, inputs, component=0, i=0, j=0)
+        return operator_sign * (tangent + (1.0 + wave_number**2) * outputs[:, :1])
+
+    def corners(_, outputs, __):
+        return operator_sign * (2.0 + wave_number**2) * outputs[:, :1]
+
+    def is_horizontal(x, on_boundary):
+        return bool(on_boundary and np.isclose(x[0], (0.0, 1.0)).any() and not np.isclose(x[1], (0.0, 1.0)).any())
+
+    def is_vertical(x, on_boundary):
+        return bool(on_boundary and np.isclose(x[1], (0.0, 1.0)).any() and not np.isclose(x[0], (0.0, 1.0)).any())
+
+    return [
+        dde.icbc.OperatorBC(geometry, horizontal, is_horizontal),
+        dde.icbc.OperatorBC(geometry, vertical, is_vertical),
+        dde.icbc.PointSetOperatorBC(
+            np.asarray([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], dtype=np.float32),
+            np.zeros((4, 1), dtype=np.float32),
+            corners,
+        ),
+    ]
+
+
+def _deepxde_loss_weights(config: dict, boundary_condition_count: int) -> list[float]:
     weights = [float(config.get("lambda_int", config.get("lambda_pde", 1.0)))]
-    if use_zero_boundary:
-        weights.append(float(config.get("lambda_bc", 1.0)))
+    weights.extend([float(config.get("lambda_bc", 1.0))] * int(boundary_condition_count))
     weights.append(float(config.get("lambda_obs", 1.0)))
     return weights
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 import torch
 from torch.utils.data import DataLoader
@@ -62,7 +64,7 @@ def test_ifno_strict_official_does_not_fallback_to_aligned():
         IFNOBaseline().build(_cfg(implementation_mode="official", official_backend="ifno"), build_data_spec(batch))
 
 
-def test_ifno_official_aligned_runs_vae_three_stage_training_and_uses_posterior_mean_for_inverse():
+def test_ifno_official_aligned_runs_vae_three_stage_training_and_uses_posterior_mean_for_inverse(tmp_path):
     batch = _batch("forward")
     loader = DataLoader(PDEBatchDataset(batch), batch_size=2, collate_fn=pde_collate)
     model = IFNOBaseline().build(
@@ -75,6 +77,7 @@ def test_ifno_official_aligned_runs_vae_three_stage_training_and_uses_posterior_
             max_steps=1,
             rank=2,
             vae_hidden_dims=[2, 4, 8, 16, 32],
+            train_history_jsonl_path=str(tmp_path / "history.jsonl"),
         ),
         build_data_spec(batch),
     )
@@ -91,3 +94,9 @@ def test_ifno_official_aligned_runs_vae_three_stage_training_and_uses_posterior_
     backend = _backend_info(model, model.config)
     assert backend["adapter_status"] == "official_training_ifno_task_adapter"
     assert backend["official_alignment_level"] == "algorithm_training"
+    assert model.operator.layers[0].conv12.__class__.__module__.startswith("neuralop.layers")
+    stages = [
+        json.loads(line)["completed_stage"]
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert stages == ["ifno_pretrain", "vae_pretrain", "joint_train"]

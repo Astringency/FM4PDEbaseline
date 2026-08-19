@@ -37,6 +37,8 @@ def test_deepxde_native_static_pde_uses_sparse_observations_and_returns_requeste
     assert batch.metadata["pinn_sparse_training_protocol"]["observation_bc"] == "dde.icbc.PointSetBC"
     assert batch.metadata["pinn_sparse_training_protocol"]["derivatives"] == "deepxde_autodiff"
     assert batch.metadata["pinn_sparse_training_protocol"]["network_outputs"] == ["solution", "unknown"]
+    expected_boundary = "generator_aligned_kronecker" if pde == "helmholtz" else "zero_dirichlet"
+    assert batch.metadata["pinn_sparse_training_protocol"]["boundary_conditions"] == expected_boundary
     backend = _backend_info(model, model.config)
     assert backend["adapter_status"] == "deepxde_native_task_adapter"
     assert backend["official_alignment_level"] == "training_api"

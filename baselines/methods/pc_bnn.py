@@ -16,12 +16,10 @@ from .official import official_source_info
 from .pinn_sparse import (
     STATIC_SPARSE_INVERSE_PDES,
     _physics_weight_metadata,
-    _select_physics_loss,
     _single_meta,
     observation_loss_from_batch,
     sparse_forward_observation_loss,
     sparse_inverse_observation_loss,
-    sparse_inverse_physics_loss,
 )
 @dataclass(frozen=True)
 class PCBNNPosteriorResult:
@@ -41,15 +39,20 @@ class _SparseTaskAdapter:
     def result(self, unknown: torch.Tensor, solution: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def physics_loss(
+    def physics_losses(
         self,
         unknown: torch.Tensor,
         solution: torch.Tensor,
         batch: PDEBatch,
         item: int,
         config: dict,
-    ) -> torch.Tensor:
-        return sparse_inverse_physics_loss(unknown, solution, batch, item, config)
+    ) -> dict:
+        meta = _single_meta(batch, item)
+        meta.update(_physics_weight_metadata(config))
+        meta["task"] = "sparse_inverse"
+        meta["solution_fields"] = solution
+        meta["input_fields"] = solution
+        return physics_loss_metric(unknown, batch.pde_name, meta)
 
 
 class _SparseForwardAdapter(_SparseTaskAdapter):
@@ -148,12 +151,17 @@ class PCBNNBaseline(BaselineModel):
                     obs = observation_loss_from_batch(pred, batch, item=item)
                     meta = _single_meta(batch, item)
                     meta.update(_physics_weight_metadata(self.config))
-                    physics_value = _select_physics_loss(physics_loss_metric(pred, batch.pde_name, meta), self.config, pred)
+                    physics_losses = physics_loss_metric(pred, batch.pde_name, meta)
+                    boundary_count = _boundary_observation_count(batch.pde_name, pred)
                     loss = _negative_log_posterior(
                         particle,
                         lam_obs * obs,
-                        physics_value,
                         _observation_count(batch, item),
+                        float(self.config.get("lambda_bc", 1.0)) * physics_losses["bc"],
+                        boundary_count,
+                        float(self.config.get("lambda_int", self.config.get("lambda_pde", 1.0)))
+                        * physics_losses["interior"],
+                        _physics_residual_count(physics_losses, target),
                         self.config,
                     )
                     grad = torch.autograd.grad(loss, tuple(particle.parameters()), retain_graph=False, create_graph=False)
@@ -232,12 +240,17 @@ class PCBNNBaseline(BaselineModel):
                     unknown = _transform_unknown(joint[:, :unknown_channels], batch.pde_name, self.config)
                     solution = joint[:, unknown_channels:]
                     obs = adapter.observation_loss(unknown, solution, batch, item)
-                    physics = adapter.physics_loss(unknown, solution, batch, item, self.config)
+                    physics_losses = adapter.physics_losses(unknown, solution, batch, item, self.config)
+                    boundary_count = _boundary_observation_count(batch.pde_name, solution)
                     loss = _negative_log_posterior(
                         particle,
                         lam_obs * obs,
-                        physics,
                         _observation_count(batch, item),
+                        float(self.config.get("lambda_bc", 1.0)) * physics_losses["bc"],
+                        boundary_count,
+                        float(self.config.get("lambda_int", self.config.get("lambda_pde", 1.0)))
+                        * physics_losses["interior"],
+                        _physics_residual_count(physics_losses, solution),
                         self.config,
                     )
                     losses.append(loss.detach())
@@ -317,11 +330,29 @@ class _Swish(nn.Module):
 _POSTERIOR_OBJECTIVE = "gaussian_observation+student_t_weight_prior+gamma_noise_precision+pde_likelihood"
 
 
+def _physics_residual_count(losses: dict, reference: torch.Tensor) -> int:
+    residual = losses.get("residual")
+    if isinstance(residual, torch.Tensor):
+        return int(residual.numel())
+    return int(math.prod(reference.shape[2:]) * max(int(reference.shape[1]), 1))
+
+
+def _boundary_observation_count(pde_name: str, solution: torch.Tensor) -> int:
+    if str(pde_name).lower() == "helmholtz" or solution.ndim < 4:
+        return 0
+    height, width = (int(value) for value in solution.shape[-2:])
+    spatial_boundary = 2 * height + 2 * width - 4 if height > 1 and width > 1 else height * width
+    return int(solution.shape[0] * solution.shape[1] * spatial_boundary)
+
+
 def _negative_log_posterior(
     particle: PCBNNParticle,
     observation_mse: torch.Tensor,
-    physics_loss: torch.Tensor,
     observation_count: int,
+    boundary_mse: torch.Tensor,
+    boundary_count: int,
+    physics_loss: torch.Tensor,
+    physics_count: int,
     config: dict,
 ) -> torch.Tensor:
     """Negative log posterior following the official PC-BNN hierarchy.
@@ -331,10 +362,14 @@ def _negative_log_posterior(
     and ``log_beta`` retains the official Gamma prior.  PDE-specific residuals
     are supplied by the task Adapter rather than embedded in the engine.
     """
-    count = max(int(observation_count), 1)
+    observation_count = max(int(observation_count), 1)
+    boundary_count = max(int(boundary_count), 0)
+    data_count = observation_count + boundary_count
     log_beta = particle.log_beta
     beta = log_beta.exp()
-    observation_nll = 0.5 * beta * float(count) * observation_mse - 0.5 * float(count) * log_beta
+    boundary = boundary_mse if torch.isfinite(boundary_mse) else torch.zeros_like(observation_mse)
+    data_squared_error = float(observation_count) * observation_mse + float(boundary_count) * boundary
+    observation_nll = 0.5 * beta * data_squared_error - 0.5 * float(data_count) * log_beta
 
     weight_shape = float(config.get("weight_prior_shape", 1.0))
     weight_rate = max(float(config.get("weight_prior_rate", 0.05)), 1e-12)
@@ -348,7 +383,7 @@ def _negative_log_posterior(
     beta_prior = beta_rate * beta - (beta_shape - 1.0) * log_beta
     physics = physics_loss if torch.isfinite(physics_loss) else torch.zeros_like(observation_nll)
     equation_variance = max(float(config.get("equation_variance", 1e-4)), 1e-12)
-    physics_nll = 0.5 / equation_variance * physics
+    physics_nll = 0.5 * float(max(int(physics_count), 1)) / equation_variance * physics
     return observation_nll + physics_nll + weight_prior + beta_prior
 
 
@@ -467,6 +502,8 @@ def _record_training_protocol(batch: PDEBatch, *, lr: float, lr_noise: float, co
         "noise_precision_initialization": "gamma_prior",
         "svgd_kernel": "official_rbf_median",
         "equation_precision": 1.0 / equation_variance,
+        "equation_likelihood_reduction": "collocation_sum",
+        "boundary_likelihood": "learned_noise_precision",
     }
 
 

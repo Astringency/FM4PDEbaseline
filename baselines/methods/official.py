@@ -144,6 +144,17 @@ def get_neuraloperator_fno_class() -> type[Any]:
             raise OfficialImportError(str(exc)) from exc
 
 
+def get_neuraloperator_fno_blocks_class() -> type[Any]:
+    """Return the vendored FNO block class used by the official iFNO scripts."""
+
+    with _prepend_path(OFFICIAL_ROOT / "neuraloperator"):
+        try:
+            module = importlib.import_module("neuralop.layers.fno_block")
+            return module.FNOBlocks
+        except Exception as exc:
+            raise OfficialImportError(str(exc)) from exc
+
+
 def get_deepxde_deeponet_class() -> type[Any]:
     return _deepxde_import("deepxde.nn.pytorch.deeponet", "DeepONetCartesianProd")
 

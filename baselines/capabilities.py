@@ -304,7 +304,7 @@ def resolve_capability(
                 "adapted",
                 "adapted_allowed",
                 family,
-                "The iFNO adapter preserves bidirectional coupling, the official VAE topology, posterior-mean inverse inference, and three-stage training on FM4PDE fields",
+                "The iFNO adapter preserves vendored FNOBlocks inside bidirectional coupling, the official VAE topology, posterior-mean inverse inference, and iFNO/VAE/joint training on FM4PDE fields",
                 "Report as an official-training-aligned iFNO task adaptation; it is not a native official dataset run.",
                 eligible=False,
             )
@@ -447,6 +447,18 @@ def resolve_capability(
                 "Provide the same explicit PDE context to every method in a separately named protocol before enabling it.",
             )
         if family == "sparse_forward":
+            if pde == "steady_heat_conduction":
+                return _cap(
+                    baseline,
+                    pde,
+                    task,
+                    sensor_mode,
+                    "adapted",
+                    "canonical_math",
+                    family,
+                    "steady heat conduction uses the local generator-aligned discrete PINN objective, not the DeepXDE-native PDE adapter",
+                    "Report separately from the Poisson/Helmholtz/Darcy DeepXDE training-API runs.",
+                )
             if pde in STATIC_SPARSE_INVERSE_PDES:
                 return _cap(
                     baseline,
@@ -470,6 +482,18 @@ def resolve_capability(
                 "time-dependent sparse forward is disabled until the source/coefficient residual is explicit",
             )
         if family == "sparse_inverse":
+            if pde == "steady_heat_conduction":
+                return _cap(
+                    baseline,
+                    pde,
+                    task,
+                    sensor_mode,
+                    "adapted",
+                    "canonical_math",
+                    family,
+                    "steady heat conduction uses the local generator-aligned discrete PINN objective, not the DeepXDE-native PDE adapter",
+                    "Report separately from the Poisson/Helmholtz/Darcy DeepXDE training-API runs.",
+                )
             if pde in STATIC_SPARSE_INVERSE_PDES:
                 return _cap(
                     baseline,

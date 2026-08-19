@@ -80,6 +80,9 @@ method_by_baseline:
     official_backend: ifno
     width: 64
     layers: 4
+    modes1: 16
+    modes2: 16
+    padding: 20
     rank: 24
     training_protocol: official_three_stage
     ifno_pretrain_epochs: 200
@@ -94,7 +97,7 @@ method_by_baseline:
     vae_resolution: 64
     cycle_weight: 0.0
     lr: 0.0005
-    grad_clip_norm: 1.0
+    grad_clip_norm: 10.0
     early_stopping_patience: 12
   recfno:
     width: 64
@@ -148,6 +151,9 @@ method_by_baseline:
     weight_prior_shape: 1.0
     weight_prior_rate: 0.05
     equation_variance: 0.0001
+    lambda_int: 1.0
+    lambda_bc: 1.0
+    lambda_ic: 1.0
   pde_opt:
     normalize: false
     steps: 500

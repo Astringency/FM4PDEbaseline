@@ -55,6 +55,26 @@ def _as_float_tensor(array: np.ndarray) -> torch.Tensor:
     return torch.as_tensor(np.asarray(array), dtype=torch.float32)
 
 
+def _coordinates_for_grid_layout(
+    coordinates: torch.Tensor | None,
+    grid_shape: tuple[int, ...],
+    layout: str,
+) -> torch.Tensor | None:
+    """Map normalized integer indices to the physical coordinates of a grid layout."""
+
+    if coordinates is None or layout not in {"cell_centered", "periodic_endpoint_excluded"}:
+        return coordinates
+    mapped = coordinates.clone()
+    for axis, size in enumerate(grid_shape):
+        if size <= 1:
+            mapped[..., axis] = 0.5 if layout == "cell_centered" else 0.0
+        elif layout == "cell_centered":
+            mapped[..., axis] = (mapped[..., axis] * (size - 1) + 0.5) / size
+        else:
+            mapped[..., axis] = mapped[..., axis] * (size - 1) / size
+    return mapped
+
+
 def _take_np(array: np.ndarray, max_samples: int | None) -> np.ndarray:
     if max_samples is None:
         return array
@@ -574,6 +594,11 @@ class PDEDataRegistry:
             tuple(target_fields.shape[2:]),
             batch_size=1 if deferred_dynamic_sensors else target_fields.shape[0],
         )
+        grid_shape = tuple(int(size) for size in target_fields.shape[2:])
+        grid_layout = str(metadata.get("grid_layout", "nodal_endpoint_included"))
+        coords = _coordinates_for_grid_layout(coords, grid_shape, grid_layout)
+        obs_coords = _coordinates_for_grid_layout(obs_coords, grid_shape, grid_layout)
+        metadata["coordinate_layout"] = grid_layout
 
         metadata["input_shape"] = tuple(input_fields.shape)
         metadata["target_shape"] = tuple(target_fields.shape)
@@ -1056,7 +1081,11 @@ class PDEBatchDataset(Dataset):
             )
         item.mask = obs["mask"]
         item.obs_values = obs["obs_values"]
-        item.obs_coords = obs["obs_coords"]
+        item.obs_coords = _coordinates_for_grid_layout(
+            obs["obs_coords"],
+            tuple(int(size) for size in source.shape[2:]),
+            str(item.metadata.get("grid_layout", "nodal_endpoint_included")),
+        )
         item.input_fields = obs["masked_grid"].float()
         observation_metadata = {
             "masked_grid": obs["masked_grid"],

@@ -14,6 +14,11 @@ from scripts.experiments.run_one import build_command
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_shell_launcher_default_data_root_uses_expandable_home():
+    text = (ROOT / "scripts/run_baseline.sh").read_text(encoding="utf-8")
+    assert '${DATA_ROOT:-${HOME}/share/PDEdata}' in text
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 

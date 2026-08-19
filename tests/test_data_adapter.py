@@ -257,6 +257,18 @@ def test_sensor_budget_metadata_static_and_time_varying():
     assert total.metadata["num_observations_total"] <= 4
 
 
+def test_cell_centered_layout_maps_grid_and_sensor_coordinates_to_cell_centers():
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("darcy", n=1, resolution=4)
+    raw["metadata"]["grid_layout"] = "cell_centered"
+    batch = registry.make_task(raw, "darcy", "sparse_forward", num_sensors=4, sensor_mode="fixed", seed=1)
+
+    assert torch.isclose(batch.coords.min(), torch.tensor(0.125))
+    assert torch.isclose(batch.coords.max(), torch.tensor(0.875))
+    assert batch.obs_coords is not None
+    assert bool(((batch.obs_coords >= 0.125) & (batch.obs_coords <= 0.875)).all())
+
+
 def test_legacy_random_sensor_mode_is_rejected_in_paper_mode():
     registry = build_default_registry()
     raw = registry.synthetic_raw("poisson", n=2, resolution=8)

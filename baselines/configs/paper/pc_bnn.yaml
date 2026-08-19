@@ -9,9 +9,9 @@ method:
   particles: 5
   lr_noise: 0.00001
   lambda_obs: 1.0
-  lambda_int: 0.01
-  lambda_bc: 0.01
-  lambda_ic: 0.01
+  lambda_int: 1.0
+  lambda_bc: 1.0
+  lambda_ic: 1.0
   beta_prior_shape: 2.0
   beta_prior_rate: 1.0e-6
   weight_prior_shape: 1.0

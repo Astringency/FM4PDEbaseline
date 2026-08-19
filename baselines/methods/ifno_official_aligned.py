@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .shared import SpectralConv2d, grid_channels
+from .shared import grid_channels
 
 
 class IFNOMLP2d(nn.Module):
@@ -93,14 +93,23 @@ class OfficialVanillaVAE(nn.Module):
 class IFNOCouplingLayer2d(nn.Module):
     """Multiplicative invertible FNO coupling layer matching the iFNO scripts."""
 
-    def __init__(self, half_width: int, modes1: int, modes2: int, beta: float = 2.0, padding: int = 0) -> None:
+    def __init__(
+        self,
+        half_width: int,
+        modes1: int,
+        modes2: int,
+        *,
+        fno_blocks_class: type[nn.Module],
+        beta: float = 2.0,
+        padding: int = 0,
+    ) -> None:
         super().__init__()
         self.beta = float(beta)
         self.padding = int(max(padding, 0))
-        self.conv12 = SpectralConv2d(half_width, half_width, modes1, modes2)
+        self.conv12 = fno_blocks_class(half_width, half_width, (modes1, modes2))
         self.mlp12 = IFNOMLP2d(half_width, half_width, half_width)
         self.w12 = nn.Conv2d(half_width, half_width, 1)
-        self.conv21 = SpectralConv2d(half_width, half_width, modes1, modes2)
+        self.conv21 = fno_blocks_class(half_width, half_width, (modes1, modes2))
         self.mlp21 = IFNOMLP2d(half_width, half_width, half_width)
         self.w21 = nn.Conv2d(half_width, half_width, 1)
 
@@ -127,7 +136,7 @@ class IFNOCouplingLayer2d(nn.Module):
     def _positive_scale(self, x: torch.Tensor) -> torch.Tensor:
         return F.softplus(F.gelu(x), beta=self.beta).clamp_min(1e-4)
 
-    def _spectral_with_padding(self, conv: SpectralConv2d, x: torch.Tensor) -> torch.Tensor:
+    def _spectral_with_padding(self, conv: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if self.padding <= 0:
             return conv(x)
         padded = F.pad(x, [0, self.padding, 0, self.padding])
@@ -157,6 +166,7 @@ class OfficialAlignedIFNO2d(nn.Module):
         rank: int = 24,
         vae_hidden_dims: list[int] | None = None,
         vae_resolution: int = 64,
+        fno_blocks_class: type[nn.Module] | None = None,
     ) -> None:
         super().__init__()
         if width % 2:
@@ -168,9 +178,21 @@ class OfficialAlignedIFNO2d(nn.Module):
         self.lift_y = nn.Conv2d(self.target_channels + 2, self.width, 1)
         self.proj_y = IFNOMLP2d(self.width, self.target_channels + 2, self.width * 4)
         self.proj_x = IFNOMLP2d(self.width, self.input_channels + 2, self.width * 4)
+        if fno_blocks_class is None:
+            raise ValueError("OfficialAlignedIFNO2d requires the vendored neuraloperator FNOBlocks class")
         half = self.width // 2
         self.layers = nn.ModuleList(
-            [IFNOCouplingLayer2d(half, modes1, modes2, beta=beta, padding=padding) for _ in range(max(int(layers), 1))]
+            [
+                IFNOCouplingLayer2d(
+                    half,
+                    modes1,
+                    modes2,
+                    fno_blocks_class=fno_blocks_class,
+                    beta=beta,
+                    padding=padding,
+                )
+                for _ in range(max(int(layers), 1))
+            ]
         )
         self.vae_net = OfficialVanillaVAE(rank, hidden_dims=vae_hidden_dims, resolution=vae_resolution)
 
