@@ -1449,6 +1449,8 @@ def _evaluate_full_test_loader(
             "physics_loss": metric_payload["physics_loss"],
             "residual_mode": metric_payload["residual_mode"],
             "residual_mode_counts": json.dumps(metric_payload["residual_mode_counts"], sort_keys=True),
+            "bc_status": metric_payload["bc_status"],
+            "bc_status_counts": json.dumps(metric_payload["bc_status_counts"], sort_keys=True),
             "assimilation_mode": str(batch.metadata.get("assimilation_mode", "")),
             "assimilation_mode_counts": json.dumps(_assimilation_mode_counts(batch), sort_keys=True),
             "inverse_observation_operator_used": bool(batch.metadata.get("inverse_observation_operator_used", False)),
@@ -1566,6 +1568,7 @@ def _batch_metric_payload(
         }
         physics_metrics = physics_loss_metric(physics_pred, args.pde, dict(metric_meta))
         mode = str(physics_metrics["mode"])
+        bc_status = str(physics_metrics["bc_status"])
         clean = _obs_mse_clean(pred, target, batch)
         noisy = _obs_mse_noisy(pred, batch)
         return {
@@ -1578,6 +1581,8 @@ def _batch_metric_payload(
             "physics_loss": _tensor_float(physics_metrics["total"]),
             "residual_mode": mode,
             "residual_mode_counts": {mode: int(target.shape[0])},
+            "bc_status": bc_status,
+            "bc_status_counts": {bc_status: int(target.shape[0])},
         }
 
     values: dict[str, list[float]] = {
@@ -1590,6 +1595,7 @@ def _batch_metric_payload(
         "physics_loss": [],
     }
     residual_counts: Counter[str] = Counter()
+    bc_status_counts: Counter[str] = Counter()
     for item in range(int(target.shape[0])):
         item_batch = slice_pde_batch(batch, item)
         pred_i = pred[item : item + 1]
@@ -1614,9 +1620,12 @@ def _batch_metric_payload(
         values["ic_residual"].append(_tensor_float(physics_metrics["ic"]))
         values["physics_loss"].append(_tensor_float(physics_metrics["total"]))
         residual_counts[str(physics_metrics["mode"])] += 1
+        bc_status_counts[str(physics_metrics["bc_status"])] += 1
     payload: dict[str, Any] = {
         "residual_mode": _mode_label(residual_counts),
         "residual_mode_counts": dict(residual_counts),
+        "bc_status": _mode_label(bc_status_counts),
+        "bc_status_counts": dict(bc_status_counts),
     }
     for key, metric_values in values.items():
         payload[key] = _mean_list(metric_values)
@@ -1755,6 +1764,7 @@ def _summarize_run(
         "metric_granularity": args.physics_metric_mode,
         "batch_count": len(rows),
         "residual_mode_counts": json.dumps(dict(_residual_mode_counter(rows)), sort_keys=True),
+        "bc_status_counts": json.dumps(dict(_bc_status_counter(rows)), sort_keys=True),
         "assimilation_mode_counts": json.dumps(dict(_assimilation_mode_counter(rows)), sort_keys=True),
         "inverse_observation_operator_used": any(bool(row.get("inverse_observation_operator_used", False)) for row in rows),
         "learned_state_injection_mode_counts": json.dumps(dict(Counter(str(row.get("learned_state_injection_mode", "")) for row in rows if row.get("learned_state_injection_mode"))), sort_keys=True),
@@ -1805,6 +1815,20 @@ def _residual_mode_counter(rows: list[dict[str, Any]]) -> Counter[str]:
             except Exception:
                 pass
         counts[str(row.get("residual_mode", ""))] += int(row.get("sample_count", 1) or 1)
+    return counts
+
+
+def _bc_status_counter(rows: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        if "bc_status_counts" in row:
+            try:
+                parsed = json.loads(row["bc_status_counts"]) if isinstance(row["bc_status_counts"], str) else row["bc_status_counts"]
+                counts.update({str(k): int(v) for k, v in parsed.items()})
+                continue
+            except Exception:
+                pass
+        counts[str(row.get("bc_status", ""))] += int(row.get("sample_count", 1) or 1)
     return counts
 
 

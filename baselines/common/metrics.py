@@ -93,17 +93,25 @@ def physics_loss_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None
     except NotImplementedError:
         warnings.warn(f"No structured physics loss implemented for '{pde_name}'. Returning nan.", NotImplementedWarning, stacklevel=2)
         nan = _nan(pred)
-        return {"interior": nan, "bc": nan, "ic": nan, "total": nan, "mode": "not_implemented"}
+        return {
+            "interior": nan,
+            "bc": nan,
+            "ic": nan,
+            "total": nan,
+            "mode": "not_implemented",
+            "bc_status": "not_implemented",
+        }
     except Exception as exc:
         warnings.warn(f"Could not compute {pde_name} structured physics loss: {exc}", RuntimeWarning, stacklevel=2)
         nan = _nan(pred)
-        return {"interior": nan, "bc": nan, "ic": nan, "total": nan, "mode": "error"}
+        return {"interior": nan, "bc": nan, "ic": nan, "total": nan, "mode": "error", "bc_status": "error"}
     return {
         "interior": losses["interior"],
         "bc": losses["bc"],
         "ic": losses["ic"],
         "total": losses["total"],
         "mode": losses["mode"],
+        "bc_status": losses["bc_status"],
     }
 
 

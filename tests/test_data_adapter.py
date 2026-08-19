@@ -3,6 +3,7 @@ from __future__ import annotations
 import h5py
 import numpy as np
 import pytest
+import scipy.io
 import torch
 from torch.utils.data import DataLoader
 
@@ -22,6 +23,32 @@ CURRENT_PDES = [
     "advection_diffusion",
     "steady_heat_conduction",
 ]
+
+
+@pytest.mark.parametrize("operator_sign", [1.0, -1.0])
+def test_poisson_loader_infers_equation_sign_from_exact_dataset_pairs(tmp_path, operator_sign):
+    pde_dir = tmp_path / "poisson"
+    pde_dir.mkdir()
+    n = 16
+    x = np.linspace(0.0, 1.0, n)
+    yy, xx = np.meshgrid(x, x, indexing="ij")
+    solution = np.sin(np.pi * xx) * np.sin(np.pi * yy)
+    h = 1.0 / (n - 1)
+    lap = np.zeros_like(solution)
+    lap[1:-1, 1:-1] = (
+        solution[1:-1, :-2]
+        + solution[1:-1, 2:]
+        + solution[:-2, 1:-1]
+        + solution[2:, 1:-1]
+        - 4.0 * solution[1:-1, 1:-1]
+    ) / h**2
+    source = operator_sign * lap
+    scipy.io.savemat(
+        pde_dir / "poisson_10000-128-128_1.mat",
+        {"f_data": source[None].astype("float32"), "phi_data": solution[None].astype("float32")},
+    )
+    raw = build_default_registry().load_raw("poisson", tmp_path, split="train", max_samples=1)
+    assert raw["metadata"]["elliptic_operator_sign"] == operator_sign
 
 
 @pytest.mark.parametrize("pde", CURRENT_PDES)

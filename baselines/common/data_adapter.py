@@ -1496,7 +1496,13 @@ def _load_darcy(
         "file_paths": [str(p) for p in files],
         "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
         "global_sample_ids": global_ids,
-        "metadata": {"files": [str(p) for p in files], "canonical_layout": "NCHW", "split": split},
+        "metadata": {
+            "files": [str(p) for p in files],
+            "canonical_layout": "NCHW",
+            "grid_layout": "cell_centered",
+            "domain_length": 1.0,
+            "split": split,
+        },
     }
     return _finalize_loaded_raw(raw, max_samples, strict_size)
 
@@ -1603,12 +1609,15 @@ def _load_static_mat(
                 break
     if not parts:
         raise _missing_error(root, pde, active_split, patterns)
+    full_tensor = torch.cat(parts, dim=0)
     meta = {"files": [str(p) for p in files], "canonical_layout": "NCHW"}
     if metadata:
         meta.update(metadata)
+    if pde in {"poisson", "helmholtz"}:
+        meta.update(_infer_elliptic_operator_convention(full_tensor, pde, float(meta.get("k", 1.0))))
     meta.update({"split": split})
     raw = {
-        "full_tensor": torch.cat(parts, dim=0),
+        "full_tensor": full_tensor,
         "channel_names": channel_names,
         "input_channel_names": [channel_names[0]],
         "target_channel_names": [channel_names[1]],
@@ -1619,6 +1628,37 @@ def _load_static_mat(
         "global_sample_ids": global_ids,
     }
     return _finalize_loaded_raw(raw, max_samples, strict_size)
+
+
+def _infer_elliptic_operator_convention(full: torch.Tensor, pde: str, k: float) -> dict[str, Any]:
+    """Infer whether a stored elliptic dataset uses L(u)=f or -L(u)=f.
+
+    Both conventions exist in historical FM4PDE-compatible files.  The
+    inference uses exact source/solution pairs while loading the dataset and
+    records the result so predictions never determine the equation sign.
+    """
+    sample = full[: min(int(full.shape[0]), 8)].double()
+    source, solution = sample[:, :1], sample[:, 1:2]
+    h = 1.0 / max(int(solution.shape[-1]) - 1, 1)
+    lap = (
+        solution[..., 1:-1, :-2]
+        + solution[..., 1:-1, 2:]
+        + solution[..., :-2, 1:-1]
+        + solution[..., 2:, 1:-1]
+        - 4.0 * solution[..., 1:-1, 1:-1]
+    ) / (h**2)
+    operator = lap
+    if pde == "helmholtz":
+        operator = operator + (k**2) * solution[..., 1:-1, 1:-1]
+    source_i = source[..., 1:-1, 1:-1]
+    positive_mse = float((operator - source_i).square().mean())
+    negative_mse = float((-operator - source_i).square().mean())
+    sign = 1.0 if positive_mse <= negative_mse else -1.0
+    return {
+        "elliptic_operator_sign": sign,
+        "elliptic_operator_convention": "L(u)=f" if sign > 0 else "-L(u)=f",
+        "elliptic_operator_inference_mse": {"positive": positive_mse, "negative": negative_mse},
+    }
 
 
 def _static_patterns(pde: str, split: str) -> list[str]:
@@ -1662,8 +1702,16 @@ def _load_nsnonbounded(
     global_ids: list[str] = []
     sample_indices: list[int] = []
     loaded_start = offset
+    dataset_meta: dict[str, Any] = {}
     for path in files:
         with h5py.File(path, "r") as f:
+            attrs = _h5_attrs_to_python(f)
+            for key, value in attrs.items():
+                dataset_meta.setdefault(key, value)
+            stored_time_key = "t" if "t" in f else ("sol_t" if "sol_t" in f else None)
+            if stored_time_key is not None:
+                saved_times = np.asarray(f[stored_time_key][:], dtype=np.float32).tolist()
+                dataset_meta.setdefault("time_values", [0.0, *saved_times])
             n_total = f["w0"].shape[0]
             if offset >= n_total:
                 offset -= n_total
@@ -1697,11 +1745,14 @@ def _load_nsnonbounded(
         "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
         "global_sample_ids": global_ids,
         "metadata": {
+            **dataset_meta,
             "files": [str(p) for p in files],
             "canonical_layout": "NCTHW" if load_full_trajectory else "NCHW",
-            "time_values": [i / 10 for i in range(11)],
-            "final_time": 1.0,
-            "nu": 1e-3,
+            "time_values": dataset_meta.get("time_values", [i / 10 for i in range(11)]),
+            "final_time": float(dataset_meta.get("T", 1.0)),
+            "nu": float(dataset_meta.get("viscosity", dataset_meta.get("nu", 1e-3))),
+            "grid_layout": "periodic_endpoint_excluded",
+            "domain_length": 1.0,
             "split": split,
             "input_indices": [0] if not load_full_trajectory else None,
             "target_indices": [1] if not load_full_trajectory else None,
@@ -1830,6 +1881,11 @@ def _load_reaction_diffusion(
                     continue
                 group = f[key]
                 data = np.asarray(group["data"][:])
+                if "grid" in group and "t" in group["grid"]:
+                    meta_extra.setdefault(
+                        "time_values",
+                        np.asarray(group["grid"]["t"][:], dtype=np.float32).tolist(),
+                    )
                 sample_meta = _reaction_diffusion_sample_metadata(group, file_metadata)
                 for meta_key, value in sample_meta.items():
                     sample_meta_values.setdefault(meta_key, []).append(value)
@@ -1893,6 +1949,8 @@ def _load_reaction_diffusion(
         "loaded_full_trajectory": bool(load_full_trajectory),
         "pde_params": pde_params,
         "pde_params_available": sorted(pde_params),
+        "grid_layout": "cell_centered",
+        "domain_length": float(meta_extra.get("x_right", 1.0)) - float(meta_extra.get("x_left", -1.0)),
     }
     raw = {
         "full_tensor": full,
@@ -1938,8 +1996,11 @@ def _load_shallow_water(
     sample_indices: list[int] = []
     global_ids: list[str] = []
     seen = 0
+    dataset_meta: dict[str, Any] = {}
     for path in files:
         with h5py.File(path, "r") as f:
+            for key, value in _h5_attrs_to_python(f).items():
+                dataset_meta.setdefault(key, value)
             keys = list(f.keys())
             for key in keys:
                 if skip > 0:
@@ -1947,6 +2008,13 @@ def _load_shallow_water(
                     seen += 1
                     continue
                 group = f[key]["data"]
+                sample_group = f[key]
+                for attr_key, value in _h5_attrs_to_python(sample_group).items():
+                    dataset_meta.setdefault(attr_key, value)
+                if "grid" in sample_group:
+                    for axis in ("x", "y", "t"):
+                        if axis in sample_group["grid"]:
+                            dataset_meta.setdefault(f"{axis}_values", np.asarray(sample_group["grid"][axis][:], dtype=np.float32).tolist())
                 channels = []
                 for field in ("h", "hu", "hv"):
                     arr = np.asarray(group[field][:])
@@ -1979,13 +2047,18 @@ def _load_shallow_water(
         "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
         "global_sample_ids": global_ids,
         "metadata": {
+            **dataset_meta,
             "files": [str(p) for p in files],
             "canonical_layout": "NCTHW" if load_full_trajectory else "NCHW",
             "input_indices": [0, 1, 2] if not load_full_trajectory else None,
             "target_indices": [3, 4, 5] if not load_full_trajectory else None,
-            "final_time": 1.0,
-            "g": 1.0,
-            "domain_length": 5.0,
+            "time_values": dataset_meta.get("t_values"),
+            "final_time": float(dataset_meta.get("T", 1.0)),
+            "g": float(dataset_meta.get("grav", dataset_meta.get("g", 1.0))),
+            "domain_length": float(
+                dataset_meta.get("x_range", [-2.5, 2.5])[1] - dataset_meta.get("x_range", [-2.5, 2.5])[0]
+            ),
+            "grid_layout": "cell_centered",
             "split": split,
             "load_full_trajectory": bool(load_full_trajectory),
             "loaded_full_trajectory": bool(load_full_trajectory),
@@ -2258,6 +2331,13 @@ def _load_future_field_h5(
         meta["source_params"] = {key: torch.cat(values, dim=0) for key, values in array_meta.items()}
     meta["pde_params"] = pde_params
     meta["pde_params_available"] = sorted(pde_params)
+    if pde == "steady_heat_conduction":
+        meta["grid_layout"] = "nodal_endpoint_included"
+    elif "periodic" in str(meta.get("bc", meta.get("boundary_condition", "periodic"))).lower():
+        meta["grid_layout"] = "periodic_endpoint_excluded"
+    else:
+        meta["grid_layout"] = "cell_centered"
+    meta.setdefault("domain_length", 1.0)
     if full_traj_parts:
         full_traj = torch.cat(full_traj_parts, dim=0)
         meta["full_trajectory"] = full_traj

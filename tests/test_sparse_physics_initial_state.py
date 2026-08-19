@@ -18,7 +18,7 @@ def test_reaction_diffusion_sparse_background_uses_true_initial_state():
 
     meta = {"input_fields": batch.input_fields, "full_tensor": batch.full_tensor, "task": batch.task, **batch.metadata}
     traj, mode = _as_rd_trajectory(batch.target_fields, meta)
-    assert mode == "two_level"
+    assert mode == "two_level_midpoint_approx"
     assert torch.allclose(traj[:, :2, 0], true_initial)
     losses = physics_losses(batch.target_fields, "reaction_diffusion", meta)
     assert torch.isfinite(losses["ic"])
@@ -35,7 +35,7 @@ def test_shallow_water_sparse_background_uses_true_initial_state():
 
     meta = {"input_fields": batch.input_fields, "full_tensor": batch.full_tensor, "task": batch.task, **batch.metadata}
     traj, mode = _as_swe_trajectory(batch.target_fields, meta)
-    assert mode == "two_level"
+    assert mode == "two_level_midpoint_approx"
     assert torch.allclose(traj[:, :3, 0], true_initial)
     losses = physics_losses(batch.target_fields, "shallow_water", meta)
     assert torch.isfinite(losses["ic"])
