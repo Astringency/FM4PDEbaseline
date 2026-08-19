@@ -62,7 +62,7 @@ def test_steady_dirichlet_pdes_have_zero_ic_loss(pde):
     assert ic_residual_metric(pred, pde, meta).item() == 0.0
 
 
-@pytest.mark.parametrize("pde", ["darcy", "poisson", "helmholtz"])
+@pytest.mark.parametrize("pde", ["darcy", "poisson"])
 def test_dirichlet_bc_loss_detects_boundary_values(pde):
     pred = torch.zeros(1, 1, 8, 8)
     meta = {"input_fields": torch.ones(1, 1, 8, 8), "task": "forward", "k": 1.0}
@@ -70,6 +70,14 @@ def test_dirichlet_bc_loss_detects_boundary_values(pde):
     pred_bad = pred.clone()
     pred_bad[..., 0, :] = 1.0
     assert bc_residual_metric(pred_bad, pde, meta).item() > 0.0
+
+
+def test_helmholtz_generator_boundary_rows_are_part_of_the_pde_residual():
+    pred = torch.zeros(1, 1, 8, 8)
+    meta = {"input_fields": torch.ones(1, 1, 8, 8), "task": "forward", "k": 1.0}
+    assert bc_residual_metric(pred, "helmholtz", meta).item() == pytest.approx(0.0)
+    pred[..., 0, :] = 1.0
+    assert pde_residual_metric(pred, "helmholtz", meta).item() > 0.0
 
 
 def test_periodic_bc_loss_for_burgers_and_ns_consistent_tensors_is_zero():

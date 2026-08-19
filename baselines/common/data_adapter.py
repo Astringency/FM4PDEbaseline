@@ -1561,6 +1561,7 @@ def _load_helmholtz(
         sample_offset=sample_offset,
         active_split=active_split,
         strict_size=strict_size,
+        exclude_pattern=r"(?:_|-)k\d+\.mat$",
     )
 
 
@@ -1577,10 +1578,13 @@ def _load_static_mat(
     sample_offset: int = 0,
     active_split: str | None = None,
     strict_size: bool = False,
+    exclude_pattern: str | None = None,
 ) -> dict[str, Any]:
     split = _validate_split(split)
     active_split = active_split or split
     files = _train_limited(_candidate_files(root, pde, active_split, patterns), active_split, train_shards)
+    if exclude_pattern is not None:
+        files = [path for path in files if re.search(exclude_pattern, path.name) is None]
     if not files:
         raise _missing_error(root, pde, active_split, patterns)
     parts = []
@@ -1856,7 +1860,13 @@ def _load_reaction_diffusion(
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
     patterns = _reaction_diffusion_patterns(active_split)
-    files = _train_limited(_candidate_files(root, "reaction_diffusion", active_split, patterns), active_split, train_shards)
+    files = _candidate_files(root, "reaction_diffusion", active_split, patterns)
+    current_profile_files = [
+        path for path in files if "_grf_" in path.name.lower() or "_iid_" in path.name.lower()
+    ]
+    if current_profile_files:
+        files = current_profile_files
+    files = _train_limited(files, active_split, train_shards)
     if not files:
         raise _missing_error(root, "reaction_diffusion", active_split, patterns)
     parts = []
@@ -1866,10 +1876,15 @@ def _load_reaction_diffusion(
     global_ids: list[str] = []
     seen = 0
     meta_extra: dict[str, Any] = {}
+    generator_profiles: set[str] = set()
     sample_meta_values: dict[str, list[Any]] = {}
     for path in files:
         with h5py.File(path, "r") as f:
             file_metadata = _reaction_diffusion_file_metadata(f)
+            filename = path.name.lower()
+            current_named = "_grf_" in filename or "_iid_" in filename
+            has_current_signature = any(name in f.attrs for name in ("n_save_steps", "tdim", "init_mode"))
+            generator_profiles.add("current" if current_named or has_current_signature else "legacy")
             meta_extra.update({k: v for k, v in file_metadata.items() if k not in meta_extra})
             if "t" in f:
                 meta_extra.setdefault("time_values", np.asarray(f["t"][:], dtype=np.float32).tolist())
@@ -1908,19 +1923,21 @@ def _load_reaction_diffusion(
         raise _missing_error(root, "reaction_diffusion", active_split, patterns)
     full = torch.stack(parts, dim=0)
     input_idx = 0
-    is_test = active_split == "test"
-    defaults = {
-        "D_u": 2e-3 if is_test else 1e-3,
-        "D_v": 4e-3 if is_test else 5e-3,
-        "k": 3e-3 if is_test else 5e-3,
-    }
+    if len(generator_profiles) != 1:
+        raise ValueError(f"Reaction-diffusion files mix incompatible generator profiles: {sorted(generator_profiles)}")
+    generator_profile = next(iter(generator_profiles))
+    defaults = (
+        {"D_u": 2e-3, "D_v": 4e-3, "k": 3e-3, "T": 1.0}
+        if generator_profile == "current"
+        else {"D_u": 1e-3, "D_v": 5e-3, "k": 5e-3, "T": 5.0}
+    )
     for param_key, default_value in defaults.items():
         sample_meta_values.setdefault(param_key, [meta_extra.get(param_key, default_value)] * full.shape[0])
     sample_meta = {key: _sample_metadata_field(values) for key, values in sample_meta_values.items()}
     du = sample_meta.get("D_u", defaults["D_u"])
     dv = sample_meta.get("D_v", defaults["D_v"])
     k = sample_meta.get("k", defaults["k"])
-    final_time = float(meta_extra.get("T", meta_extra.get("final_time", 5.0)))
+    final_time = float(meta_extra.get("T", meta_extra.get("final_time", defaults["T"])))
     if "T" in sample_meta and not isinstance(sample_meta["T"], torch.Tensor):
         final_time = float(sample_meta["T"])
     elif "final_time" in sample_meta and not isinstance(sample_meta["final_time"], torch.Tensor):
@@ -1951,6 +1968,7 @@ def _load_reaction_diffusion(
         "pde_params_available": sorted(pde_params),
         "grid_layout": "cell_centered",
         "domain_length": float(meta_extra.get("x_right", 1.0)) - float(meta_extra.get("x_left", -1.0)),
+        "generator_profile": generator_profile,
     }
     raw = {
         "full_tensor": full,

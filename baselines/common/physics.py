@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -85,30 +86,64 @@ def helmholtz_inverse_residual(
     k: float = 1.0,
     operator_sign: float = 1.0,
 ) -> torch.Tensor:
-    h = _unit_spacing(solution)
-    # Dataset convention: Delta u + k^2 u = f.
-    operator = laplacian(solution, spacing=h, boundary="dirichlet") + (k**2) * solution
-    return interior_slice_2d(operator_sign * operator - source)
+    n = int(solution.shape[-1])
+    if solution.shape[-2] != n:
+        raise ValueError(f"Helmholtz generator-aligned residual expects square fields, got {tuple(solution.shape)}")
+    h = 1.0 / max(n - 1, 1)
+    one_d = torch.diag(torch.full((n,), -2.0, dtype=solution.dtype, device=solution.device))
+    if n > 1:
+        off = torch.ones(n - 1, dtype=solution.dtype, device=solution.device)
+        one_d = one_d + torch.diag(off, 1) + torch.diag(off, -1)
+    one_d = one_d / h**2
+    one_d[0] = 0.0
+    one_d[0, 0] = 1.0
+    one_d[-1] = 0.0
+    one_d[-1, -1] = 1.0
+    rhs = source.clone()
+    rhs[..., 0, :] = 0.0
+    rhs[..., -1, :] = 0.0
+    rhs[..., :, 0] = 0.0
+    rhs[..., :, -1] = 0.0
+    operator = one_d @ solution + solution @ one_d.T + (k**2) * solution
+    return operator_sign * operator - rhs
 
 
 def darcy_residual(coeff: torch.Tensor, solution: torch.Tensor) -> torch.Tensor:
-    # Darcy files store cell-centred coefficient/solution fields.  This is a
-    # continuum-aligned conservative proxy on that stored grid.  The MATLAB
-    # generator spline-interpolates to an endpoint-included nodal solve and
-    # back, so exact stored pairs are not expected to make this proxy zero.
-    hx = 1.0 / max(solution.shape[-1], 1)
-    hy = 1.0 / max(solution.shape[-2], 1)
-    center_u = solution[..., 1:-1, 1:-1]
-    center_a = coeff[..., 1:-1, 1:-1]
-    div = torch.zeros_like(center_u)
-    for neighbor_u, neighbor_a, spacing in (
-        (solution[..., 1:-1, 2:], coeff[..., 1:-1, 2:], hx),
-        (solution[..., 1:-1, :-2], coeff[..., 1:-1, :-2], hx),
-        (solution[..., 2:, 1:-1], coeff[..., 2:, 1:-1], hy),
-        (solution[..., :-2, 1:-1], coeff[..., :-2, 1:-1], hy),
+    coefficient, pressure = _darcy_nodal_fields(coeff, solution)
+    h = 1.0 / max(pressure.shape[-1] - 1, 1)
+    center_u = pressure[..., 1:-1, 1:-1]
+    center_a = coefficient[..., 1:-1, 1:-1]
+    operator = torch.zeros_like(center_u)
+    for neighbor_u, neighbor_a in (
+        (pressure[..., :-2, 1:-1], coefficient[..., :-2, 1:-1]),
+        (pressure[..., 2:, 1:-1], coefficient[..., 2:, 1:-1]),
+        (pressure[..., 1:-1, :-2], coefficient[..., 1:-1, :-2]),
+        (pressure[..., 1:-1, 2:], coefficient[..., 1:-1, 2:]),
     ):
-        div = div + 0.5 * (center_a + neighbor_a) * (neighbor_u - center_u) / (spacing**2)
-    return -div - 1.0
+        operator = operator + 0.5 * (center_a + neighbor_a) * (center_u - neighbor_u) / h**2
+    return operator - 1.0
+
+
+@lru_cache(maxsize=16)
+def _darcy_spline_matrices_numpy(resolution: int) -> tuple[Any, Any]:
+    import numpy as np
+    from scipy.interpolate import CubicSpline
+
+    cell = (np.arange(resolution, dtype=np.float64) + 0.5) / resolution
+    nodal = np.linspace(0.0, 1.0, resolution, dtype=np.float64)
+    identity = np.eye(resolution, dtype=np.float64)
+    cell_to_nodal = CubicSpline(cell, identity, axis=0)(nodal)
+    nodal_to_cell = CubicSpline(nodal, identity, axis=0)(cell)
+    return cell_to_nodal, np.linalg.inv(nodal_to_cell)
+
+
+def _darcy_nodal_fields(coeff: torch.Tensor, solution: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if coeff.shape[-2:] != solution.shape[-2:] or coeff.shape[-2] != coeff.shape[-1]:
+        raise ValueError(f"Darcy generator-aligned residual expects matching square fields, got {coeff.shape}, {solution.shape}")
+    c2n_np, n2c_inverse_np = _darcy_spline_matrices_numpy(int(solution.shape[-1]))
+    c2n = torch.as_tensor(c2n_np, dtype=solution.dtype, device=solution.device)
+    n2c_inverse = torch.as_tensor(n2c_inverse_np, dtype=solution.dtype, device=solution.device)
+    return c2n @ coeff @ c2n.T, n2c_inverse @ solution @ n2c_inverse.T
 
 
 def burgers_residual(u: torch.Tensor, nu: float = 0.01, metadata: dict | None = None) -> torch.Tensor:
@@ -117,14 +152,14 @@ def burgers_residual(u: torch.Tensor, nu: float = 0.01, metadata: dict | None = 
     dt = _time_step(u.shape[-2], float(metadata.get("final_time", 1.0)), metadata)
     # Chebfun generator stores x=0,...,(N-1)/N without a duplicate endpoint.
     dx = 1.0 / max(u.shape[-1], 1)
-    if u.shape[-2] == 2:
-        state = 0.5 * (u[:, :, :1] + u[:, :, 1:])
-        u_t = (u[:, :, 1:] - u[:, :, :1]) / dt
-    else:
-        state = u[:, :, 1:-1]
-        u_t = central_diff(u, dim=-2, spacing=dt, boundary="replicate")[:, :, 1:-1]
-    u_x = central_diff(state, dim=-1, spacing=dx, boundary="periodic")
-    u_xx = laplacian_1d(state, dim=-1, spacing=dx, boundary="periodic")
+    if u.shape[-2] < 3:
+        raise ValueError("Burgers full_trajectory_fd residual requires at least three saved time levels")
+    state = u[:, :, 1:-1]
+    u_t = (u[:, :, 2:] - u[:, :, :-2]) / (2.0 * dt)
+    wave_number = 2.0 * math.pi * torch.fft.fftfreq(u.shape[-1], d=dx, device=u.device, dtype=u.dtype).view(1, 1, 1, -1)
+    state_hat = torch.fft.fft(state, dim=-1)
+    u_x = torch.fft.ifft(1j * wave_number * state_hat, dim=-1).real
+    u_xx = torch.fft.ifft(-(wave_number**2) * state_hat, dim=-1).real
     return u_t + state * u_x - nu * u_xx
 
 
@@ -169,10 +204,11 @@ def navier_stokes_vorticity_residual(w: torch.Tensor, metadata: dict | None = No
 def reaction_diffusion_residual(uv: torch.Tensor, metadata: dict | None = None) -> torch.Tensor:
     # uv: [B,2,T,H,W], Neumann on [-1,1]^2.
     metadata = metadata or {}
-    du = _rd_parameter(metadata, ("D_u", "du"), 1e-3, uv)
-    dv = _rd_parameter(metadata, ("D_v", "dv"), 5e-3, uv)
-    k = _rd_parameter(metadata, ("k",), 5e-3, uv)
-    final_time = float(metadata.get("final_time", 5.0))
+    defaults = _reaction_diffusion_profile_defaults(metadata)
+    du = _rd_parameter(metadata, ("D_u", "du"), defaults["D_u"], uv)
+    dv = _rd_parameter(metadata, ("D_v", "dv"), defaults["D_v"], uv)
+    k = _rd_parameter(metadata, ("k",), defaults["k"], uv)
+    final_time = float(metadata.get("final_time", defaults["T"]))
     dt = _time_step(uv.shape[2], final_time, metadata)
     # PDEBench simulator uses a cell-centred grid with dx=domain/N.
     dx = float(metadata.get("dx", 2.0 / max(uv.shape[-1], 1)))
@@ -192,6 +228,14 @@ def reaction_diffusion_residual(uv: torch.Tensor, metadata: dict | None = None) 
     res_u = u_t - (du * lap_u + (state_u - state_u**3 - k - state_v))
     res_v = v_t - (dv * lap_v + (state_u - state_v))
     return torch.stack([res_u, res_v], dim=1)
+
+
+def _reaction_diffusion_profile_defaults(metadata: dict) -> dict[str, float]:
+    profile = str(metadata.get("generator_profile", "current")).lower()
+    if profile in {"legacy", "pdebench_legacy", "reaction_diffusion_old"}:
+        return {"D_u": 1e-3, "D_v": 5e-3, "k": 5e-3, "T": 5.0}
+    # gen_rd.py uses the same coefficients for current train and test splits.
+    return {"D_u": 2e-3, "D_v": 4e-3, "k": 3e-3, "T": 1.0}
 
 
 def _rd_parameter(metadata: dict, keys: tuple[str, ...], default: float, uv: torch.Tensor) -> torch.Tensor:
@@ -561,7 +605,10 @@ def _helmholtz_losses(pred: torch.Tensor, metadata: dict, inverse: bool, reducti
         solution = pred[:, :1]
         source = _coefficient_from_metadata(metadata, pred)
         residual = helmholtz_inverse_residual(source[:, :1], solution, k=k, operator_sign=operator_sign)
-    return _loss_dict(pred, residual, dirichlet_zero_bc_loss(solution, reduction), _zero_scalar(pred), "steady_dirichlet", reduction)
+    # The authoritative MATLAB generator embeds its non-standard Kronecker
+    # boundary rows in the residual itself; a separate zero-Dirichlet loss
+    # would contradict generated pairs.
+    return _loss_dict(pred, residual, _zero_scalar(pred), _zero_scalar(pred), "steady_matlab_kronecker", reduction)
 
 
 def _darcy_losses(pred: torch.Tensor, metadata: dict, inverse: bool, reduction: str) -> dict[str, Any]:
@@ -572,12 +619,16 @@ def _darcy_losses(pred: torch.Tensor, metadata: dict, inverse: bool, reduction: 
         coeff = _coefficient_from_metadata(metadata, pred)
         solution = pred[:, :1]
     residual = darcy_residual(coeff[:, :1], solution[:, :1])
-    bc = _cell_centered_dirichlet_zero_bc_loss(solution[:, :1], reduction)
-    return _loss_dict(pred, residual, bc, _zero_scalar(pred), "steady_dirichlet_cell_centered_proxy", reduction)
+    _, nodal_solution = _darcy_nodal_fields(coeff[:, :1], solution[:, :1])
+    bc = dirichlet_zero_bc_loss(nodal_solution, reduction)
+    return _loss_dict(pred, residual, bc, _zero_scalar(pred), "steady_matlab_spline_nodal", reduction)
 
 
 def _burgers_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
     trajectory, mode = _as_burgers_trajectory(pred, metadata)
+    if trajectory.shape[-2] < 3:
+        raise ValueError("Burgers residual requires the full trajectory with at least three time levels")
+    mode = "full_trajectory"
     nu = float(metadata.get("nu", metadata.get("viscosity", 0.01)))
     residual = burgers_residual(trajectory, nu=nu, metadata=metadata)
     bc = periodic_bc_loss(trajectory, dims=(-1,), reduction=reduction)
@@ -590,6 +641,7 @@ def _burgers_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[
 
 def _navier_stokes_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
     trajectory, mode = _as_ns_trajectory(pred, metadata)
+    trajectory, mode = _apply_requested_temporal_mode(trajectory, metadata)
     residual = navier_stokes_vorticity_residual(trajectory, metadata)
     bc = periodic_bc_loss(trajectory, dims=(-2, -1), reduction=reduction)
     initial = _initial_from_metadata(metadata, trajectory, channels=1)
@@ -601,6 +653,7 @@ def _navier_stokes_losses(pred: torch.Tensor, metadata: dict, reduction: str) ->
 
 def _reaction_diffusion_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
     trajectory, mode = _as_rd_trajectory(pred, metadata)
+    trajectory, mode = _apply_requested_temporal_mode(trajectory, metadata)
     residual = reaction_diffusion_residual(trajectory, metadata)
     # Homogeneous Neumann is imposed through replicated ghost cells in the
     # cell-centred operator.  It does not imply equality of the first two
@@ -615,6 +668,7 @@ def _reaction_diffusion_losses(pred: torch.Tensor, metadata: dict, reduction: st
 
 def _shallow_water_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
     trajectory, mode = _as_swe_trajectory(pred, metadata)
+    trajectory, mode = _apply_requested_temporal_mode(trajectory, metadata)
     residual = shallow_water_residual(trajectory, metadata)
     # PyClaw's extrapolation boundary fills ghost cells from the edge cell;
     # it does not constrain adjacent physical cell values to be equal.
@@ -628,6 +682,7 @@ def _shallow_water_losses(pred: torch.Tensor, metadata: dict, reduction: str) ->
 
 def _heat_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
     trajectory, mode = _as_heat_trajectory(pred, metadata)
+    trajectory, mode = _apply_requested_temporal_mode(trajectory, metadata)
     residual = heat_residual(trajectory, metadata=metadata, pred=pred)
     boundary = _boundary_mode(metadata, default="periodic")
     dx = _spatial_step(trajectory, metadata, boundary=boundary, default_domain=1.0)
@@ -642,6 +697,7 @@ def _heat_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str
 
 def _wave_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
     trajectory, mode = _as_wave_trajectory(pred, metadata)
+    trajectory, mode = _apply_requested_temporal_mode(trajectory, metadata)
     residual = wave_residual(trajectory, metadata=metadata, pred=pred)
     boundary = _boundary_mode(metadata, default="periodic")
     dx = _spatial_step(trajectory, metadata, boundary=boundary, default_domain=1.0)
@@ -659,6 +715,7 @@ def _wave_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str
 
 def _advection_diffusion_losses(pred: torch.Tensor, metadata: dict, reduction: str) -> dict[str, Any]:
     trajectory, mode = _as_advection_diffusion_trajectory(pred, metadata)
+    trajectory, mode = _apply_requested_temporal_mode(trajectory, metadata)
     residual = advection_diffusion_residual(trajectory, metadata, pred=pred)
     boundary = _boundary_mode(metadata, default="periodic")
     dx = _spatial_step(trajectory, metadata, boundary=boundary, default_domain=1.0)
@@ -703,6 +760,7 @@ def _loss_dict(ref: torch.Tensor, residual: torch.Tensor, bc: torch.Tensor, ic: 
         "total": _zero_scalar(ref),
         "residual": residual,
         "mode": mode,
+        "resolved_residual_mode": "full_trajectory_fd" if mode == "full_trajectory" else mode,
         "bc_status": "measured",
     }
 
@@ -735,6 +793,35 @@ def _solution_from_metadata(metadata: dict, pred: torch.Tensor) -> torch.Tensor:
     if isinstance(input_fields, torch.Tensor):
         return input_fields.to(pred.device, pred.dtype)
     raise ValueError("Missing solution field for inverse PDE residual")
+
+
+def _apply_requested_temporal_mode(trajectory: torch.Tensor, metadata: dict) -> tuple[torch.Tensor, str]:
+    requested = str(metadata.get("residual_mode", "auto")).lower().replace("-", "_")
+    aliases = {
+        "auto": "auto",
+        "full_trajectory": "full_trajectory_fd",
+        "full_trajectory_fd": "full_trajectory_fd",
+        "full_fd": "full_trajectory_fd",
+        "endpoint": "endpoint_secant",
+        "endpoint_secant": "endpoint_secant",
+        "two_level_midpoint_approx": "endpoint_secant",
+        "secant": "endpoint_secant",
+    }
+    if requested not in aliases:
+        raise ValueError(
+            f"Unsupported temporal residual_mode={requested!r}; baseline physics supports "
+            "'full_trajectory_fd' and the endpoint-only approximation 'endpoint_secant'"
+        )
+    mode = aliases[requested]
+    if mode == "auto":
+        mode = "full_trajectory_fd" if trajectory.shape[2] > 2 else "endpoint_secant"
+    if mode == "full_trajectory_fd":
+        if trajectory.shape[2] < 3:
+            raise ValueError("full_trajectory_fd residual requires a prediction with at least three time levels")
+        return trajectory, "full_trajectory"
+    if trajectory.shape[1] == 1 and trajectory.shape[2] > 2 and str(metadata.get("pde_name", "")).lower() in {"wave", "wave_equation"}:
+        raise ValueError("endpoint_secant wave residual requires endpoint [u,v] states; displacement-only endpoints are insufficient")
+    return torch.stack([trajectory[:, :, 0], trajectory[:, :, -1]], dim=2), mode
 
 
 def _as_burgers_trajectory(pred: torch.Tensor, metadata: dict) -> tuple[torch.Tensor, str]:
@@ -1071,13 +1158,15 @@ def _trajectory_bc_loss(trajectory: torch.Tensor, boundary: str, spacing: float,
 def _steady_heat_mixed_bc_loss(solution: torch.Tensor, u_d: torch.Tensor, spacing: float, reduction: str) -> torch.Tensor:
     if solution.shape[-2] < 2 or solution.shape[-1] < 2:
         return _zero_scalar(solution)
+    del spacing  # The generator's algebraic boundary rows are raw differences.
     bottom_target = u_d[..., 0, :]
     terms = [
         (solution[..., 0, :] - bottom_target).reshape(-1),
-        ((solution[..., -1, :] - solution[..., -2, :]) / spacing).reshape(-1),
-        ((solution[..., 1:, 0] - solution[..., 1:, 1]) / spacing).reshape(-1),
-        ((solution[..., 1:, -1] - solution[..., 1:, -2]) / spacing).reshape(-1),
+        (solution[..., 1:, 0] - solution[..., 1:, 1]).reshape(-1),
+        (solution[..., 1:, -1] - solution[..., 1:, -2]).reshape(-1),
     ]
+    if solution.shape[-1] > 2:
+        terms.append((solution[..., -1, 1:-1] - solution[..., -2, 1:-1]).reshape(-1))
     return _mean_square(torch.cat(terms), reduction)
 
 
