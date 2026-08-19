@@ -226,7 +226,7 @@ def resolve_capability(
                 "adapted_allowed",
                 family,
                 "FNO inverse is a supervised inverse-operator adaptation, not a native FNO claim",
-                "Report only as FNO-inverse adaptation in supplement.",
+                "Report explicitly as an FNO-inverse adaptation.",
                 eligible=False,
             )
         if family in {"sparse_reconstruction", "sparse_inverse"}:
@@ -239,7 +239,7 @@ def resolve_capability(
                 "unsupported",
                 family,
                 "vanilla FNO has no native sparse-sensor reconstruction/inverse interface",
-                "A masked-grid FNO can be run only as an explicitly named adapted supplement.",
+                "A masked-grid FNO can be run only as an explicitly named adaptation.",
             )
 
     if baseline == "deeponet":
@@ -266,7 +266,7 @@ def resolve_capability(
                 "adapted_allowed",
                 family,
                 "DeepONet inverse is a supervised inverse-operator adaptation",
-                "Report as adapted supplement, not native DeepONet inverse ability.",
+                "Report as an adaptation, not native DeepONet inverse ability.",
                 eligible=False,
             )
         if family == "sparse_reconstruction":
@@ -552,7 +552,7 @@ def resolve_capability(
                 "adapted_allowed",
                 family,
                 "official PC-BNN channel/PDE assumptions are not matched by the default FM4PDE scalar-field tasks",
-                "Generic SVGD particles are a separate debug/supplement method and are excluded from unified comparison matrices.",
+                "Generic SVGD particles are a separate debug method and are excluded from unified comparison matrices.",
                 eligible=False,
                 unified_comparison_eligible=False,
             )
@@ -674,7 +674,7 @@ def resolve_capability(
                 "adapted_allowed",
                 family,
                 f"{baseline} without time-varying trajectory observations is a {label}, not native DA",
-                "Supplement only; use sensor_mode=time_varying with --load-full-trajectory for main-table DA.",
+                "Endpoint-only adaptation; use sensor_mode=time_varying with --load-full-trajectory for trajectory DA.",
                 eligible=False,
             )
         return _cap(
@@ -805,7 +805,7 @@ def _time_varying_capability(
                 "adapted_allowed",
                 family,
                 "endpoint-only two-level surrogate is not full 4D-Var/VIVID",
-                "Report only as two_level_surrogate supplement.",
+                "Report explicitly as a two_level_surrogate adaptation.",
                 eligible=False,
             )
         return _cap(

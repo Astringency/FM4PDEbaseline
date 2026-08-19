@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from baselines.capabilities import paper_table_eligible, resolve_capability
 from baselines.common.data_adapter import PDEBatchDataset, build_default_registry, pde_collate
-from baselines.methods.ifno import IFNOBaseline
+from baselines.methods.ifno import IFNOBaseline, _ifno_official_stage_order, _ifno_vae_augmentation
 from baselines.methods.official import OfficialImportError
 from baselines.run import _backend_info, build_data_spec
 
@@ -87,6 +87,7 @@ def test_ifno_official_aligned_runs_vae_three_stage_training_and_uses_posterior_
 
     assert history["training_protocol"] == "official_three_stage"
     assert history["stage_epochs"] == {"ifno_pretrain": 1, "vae_pretrain": 1, "joint_train": 1}
+    assert history["stage_order"] == ["ifno_pretrain", "vae_pretrain", "joint_train"]
     assert len(history["stage_losses"]["ifno_pretrain"]) == 1
     assert len(history["stage_losses"]["vae_pretrain"]) == 1
     assert len(history["stage_losses"]["joint_train"]) == 1
@@ -100,3 +101,15 @@ def test_ifno_official_aligned_runs_vae_three_stage_training_and_uses_posterior_
         for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert stages == ["ifno_pretrain", "vae_pretrain", "joint_train"]
+
+
+def test_ifno_official_stage_order_and_vae_augmentation_match_upstream_scripts():
+    assert _ifno_official_stage_order("darcy") == ["ifno_pretrain", "vae_pretrain", "joint_train"]
+    assert _ifno_official_stage_order("nsnonbounded") == ["vae_pretrain", "ifno_pretrain", "joint_train"]
+    field = torch.arange(2 * 1 * 3 * 3, dtype=torch.float32).reshape(2, 1, 3, 3)
+
+    augmented = _ifno_vae_augmentation(field, enabled=True)
+
+    assert augmented.shape[0] == 4 * field.shape[0]
+    assert torch.equal(augmented[:2], field)
+    assert torch.equal(augmented[2:4], field.transpose(-2, -1))

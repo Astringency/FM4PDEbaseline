@@ -1,6 +1,5 @@
 name: experiment_plan_v2
 experiment_kind: main
-main_table_only: true
 config: baselines/configs/paper.yaml
 pdes:
   - poisson

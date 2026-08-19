@@ -1,6 +1,5 @@
 name: sanity_main
 experiment_kind: main
-main_table_only: true
 config: baselines/configs/paper.yaml
 pdes: [darcy, poisson, nsnonbounded, reaction_diffusion, shallow_water, heat]
 seeds: [1]
@@ -18,7 +17,6 @@ task_groups:
   - full_forward_main
   - full_inverse_main
   - sparse_solution_main_amortized
-  - sparse_solution_main_physics
   - sparse_inverse_main
 task_group_overrides:
   full_forward_main:
@@ -36,12 +34,6 @@ task_group_overrides:
   sparse_solution_main_amortized:
     pdes: [darcy, reaction_diffusion]
     baselines: [recfno, senseiver]
-    num_sensors: 50
-    sensor_mode: random_per_sample
-    noise_level: 0.0
-  sparse_solution_main_physics:
-    pdes: [poisson, shallow_water]
-    baselines: [pde_opt, pinn_sparse]
     num_sensors: 50
     sensor_mode: random_per_sample
     noise_level: 0.0

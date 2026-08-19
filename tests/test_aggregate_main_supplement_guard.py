@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from baselines.aggregate_results import partition_rows_for_tables
+from baselines.aggregate_results import _latex_rows, aggregate_rows
 
 
 def _row(**overrides):
@@ -18,32 +18,35 @@ def _row(**overrides):
     return base
 
 
-def test_vivid_style_true_flag_is_downgraded_to_supplement():
-    row = _row(
-        baseline="vivid",
-        capability_status="official_adapter",
-        implementation_required="official",
-        implementation_mode_effective="official_architecture",
-        eligible_implementation_modes='["official"]',
-        adapter_status="vivid_style_trained_inverse_operator",
+def test_aggregation_keeps_every_completed_result_without_table_tiers():
+    rows = [
+        _row(baseline="fno", fallback_used=True, relative_l2_solution=1.0),
+        _row(baseline="pde_opt", paper_table_eligible=False, relative_l2_solution=2.0),
+    ]
+
+    summary = aggregate_rows(rows)
+
+    assert {row["baseline"] for row in summary} == {"fno", "pde_opt"}
+
+
+def test_latex_rows_report_solution_and_inverse_coefficient_metrics():
+    summary = aggregate_rows(
+        [
+            _row(
+                pde="poisson",
+                task="inverse",
+                baseline="ifno",
+                relative_l2_solution=float("nan"),
+                relative_l2_input_or_coeff=0.25,
+                mse=0.1,
+            )
+        ]
     )
-    main, supplement = partition_rows_for_tables([row])
-    assert main == []
-    assert len(supplement) == 1
-    assert supplement[0]["paper_table_eligible"] is False
-    assert "downgraded_to_supplement" in supplement[0]["aggregation_warning"]
 
+    latex = _latex_rows(summary)[0]
 
-def test_fallback_true_flag_is_downgraded_to_supplement():
-    row = _row(fallback_used=True, adapter_status="official_code")
-    main, supplement = partition_rows_for_tables([row])
-    assert main == []
-    assert len(supplement) == 1
-    assert "fallback_used=true" in supplement[0]["aggregation_warning"]
-
-
-def test_canonical_math_pde_opt_stays_main():
-    row = _row(baseline="pde_opt", capability_status="native", adapter_status="canonical_math")
-    main, supplement = partition_rows_for_tables([row])
-    assert main == [row]
-    assert supplement == []
+    assert "relative_l2_solution" in latex
+    assert "relative_l2_input_or_coeff" in latex
+    assert set(("mae", "obs_mse", "obs_mse_clean", "obs_mse_noisy", "bc_residual", "ic_residual")) <= set(latex)
+    assert latex["relative_l2_input_or_coeff_n"] == 1
+    assert latex["relative_l2_solution_nan_count"] == 1

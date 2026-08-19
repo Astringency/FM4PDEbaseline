@@ -57,9 +57,9 @@ def test_recfno_official_component_receives_voronoi_mask_and_coordinates(monkeyp
     backend = model.backend_metadata()
     assert backend["official_import_success"] is True
     assert backend["implementation_mode_effective"] == "adapted"
-    assert backend["official_alignment_level"] == "component"
-    assert "component" in backend["adapter_status"]
-    assert "unified" in backend["official_alignment_notes"].lower()
+    assert backend["official_alignment_level"] == "algorithm_training"
+    assert backend["adapter_status"] == "official_training_flow_adapter"
+    assert "l1" in backend["official_alignment_notes"].lower()
 
 
 def test_recfno_rejects_a_misleading_non_voronoi_input_config():
@@ -165,9 +165,9 @@ def test_senseiver_official_components_receive_official_fourier_features(monkeyp
     backend = model.backend_metadata()
     assert backend["official_import_success"] is True
     assert backend["implementation_mode_effective"] == "adapted"
-    assert backend["official_alignment_level"] == "component"
-    assert "component" in backend["adapter_status"]
-    assert "unified" in backend["official_alignment_notes"].lower()
+    assert backend["official_alignment_level"] == "algorithm_training"
+    assert backend["adapter_status"] == "official_training_flow_adapter"
+    assert "sum-mse" in backend["official_alignment_notes"].lower()
 
 
 def test_paper_configs_disclose_recfno_input_and_senseiver_architecture():
@@ -179,7 +179,7 @@ def test_paper_configs_disclose_recfno_input_and_senseiver_architecture():
     assert {"token_dim", "num_latents", "heads"}.isdisjoint(main["method"])
     assert recfno["input_representation"] == "voronoi_mask_coords"
     assert "embedding" not in recfno
-    assert senseiver == {
+    architecture = {
         "space_bands": 32,
         "enc_preproc_ch": 64,
         "num_latents": 4,
@@ -191,6 +191,16 @@ def test_paper_configs_disclose_recfno_input_and_senseiver_architecture():
         "dec_preproc_ch": None,
         "dec_num_latent_channels": 16,
         "dec_num_cross_attention_heads": 1,
+    }
+    assert {key: senseiver[key] for key in architecture} == architecture
+    assert {key: senseiver[key] for key in ("lr", "batch_pixels", "optimizer", "training_loss", "lr_scheduler", "scheduler_monitor", "early_stopping_patience")} == {
+        "lr": 0.0001,
+        "batch_pixels": 2048,
+        "optimizer": "adam",
+        "training_loss": "sum_mse",
+        "lr_scheduler": "none",
+        "scheduler_monitor": "train_loss",
+        "early_stopping_patience": 100,
     }
 
     method_recfno = yaml.safe_load(
@@ -208,7 +218,7 @@ def test_paper_configs_disclose_recfno_input_and_senseiver_architecture():
     default = yaml.safe_load((root / "baselines" / "configs" / "default.yaml").read_text(encoding="utf-8"))
     assert {"token_dim", "num_latents", "heads"}.isdisjoint(default["method"])
     assert default["method_by_baseline"]["recfno"]["input_representation"] == "voronoi_mask_coords"
-    assert default["method_by_baseline"]["senseiver"] == senseiver
+    assert {key: default["method_by_baseline"]["senseiver"][key] for key in architecture} == architecture
 
     tuning = yaml.safe_load((root / "baselines" / "configs" / "tuning.yaml").read_text(encoding="utf-8"))[
         "tuning_grid"

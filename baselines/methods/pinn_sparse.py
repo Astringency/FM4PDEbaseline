@@ -12,7 +12,13 @@ import torch.nn as nn
 from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import NotImplementedWarning, physics_loss_metric
 
-from .base import BaselineModel, record_optimization_status, run_per_instance_optimizer
+from .base import (
+    BaselineModel,
+    record_optimization_status,
+    restore_state_dict,
+    run_per_instance_optimizer,
+    snapshot_state_dict,
+)
 from .official import (
     OfficialImportError,
     get_deepxde_fnn_class,
@@ -30,6 +36,27 @@ def _synchronized_perf_counter(batch: PDEBatch) -> float:
     if batch.input_fields.device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize(batch.input_fields.device)
     return time.perf_counter()
+
+
+def _deepxde_best_state_callback(dde):
+    class _InMemoryBestState(dde.callbacks.Callback):
+        def __init__(self):
+            super().__init__()
+            self.best_loss: float | None = None
+            self.best_state = None
+
+        def on_epoch_end(self):
+            losses = getattr(self.model.train_state, "loss_train", None)
+            if losses is None:
+                return
+            value = float(np.asarray(losses, dtype=np.float64).sum())
+            if not np.isfinite(value):
+                return
+            if self.best_loss is None or value < self.best_loss:
+                self.best_loss = value
+                self.best_state = snapshot_state_dict(self.model.net)
+
+    return _InMemoryBestState()
 
 
 class PINNSparseBaseline(BaselineModel):
@@ -269,24 +296,29 @@ class PINNSparseBaseline(BaselineModel):
                 net.apply_output_transform(output_transform)
             model = dde.Model(data, net)
             loss_weights = _deepxde_loss_weights(self.config, len(boundary_conditions))
-            callbacks = []
+            best_callback = _deepxde_best_state_callback(dde) if bool(self.config.get("restore_best", True)) else None
+            callbacks = [best_callback] if best_callback is not None else []
             if bool(self.config.get("early_stopping", False)) and adam_iterations > 0:
                 callbacks.append(
                     dde.callbacks.EarlyStopping(
                         min_delta=float(self.config.get("early_stopping_min_delta", 1e-4)),
                         patience=int(self.config.get("early_stopping_patience", 20)),
                         monitor="loss_train",
-                        start_from_epoch=int(self.config.get("min_steps", 0)),
+                        start_from_epoch=int(self.config.get("min_steps", self.config.get("min_epochs", 0))),
                     )
                 )
             completed = 0
             early_stopped = False
             if adam_iterations > 0:
                 model.compile("adam", lr=lr, loss_weights=loss_weights)
-                model.train(iterations=adam_iterations, callbacks=callbacks, display_every=max(adam_iterations, 1), verbose=0)
+                # DeepXDE callbacks run every optimizer iteration, while
+                # train_state.loss_train is refreshed only on display steps.
+                # Refresh every iteration so EarlyStopping never observes a
+                # stale loss repeatedly.
+                model.train(iterations=adam_iterations, callbacks=callbacks, display_every=1, verbose=0)
                 completed += int(model.train_state.iteration)
                 early_stopped = any(getattr(callback, "stopped_epoch", 0) > 0 for callback in callbacks)
-            if lbfgs_steps > 0 and not early_stopped:
+            if lbfgs_steps > 0:
                 dde.optimizers.config.set_LBFGS_options(
                     maxiter=lbfgs_steps,
                     ftol=float(self.config.get("lbfgs_ftol", 0.0)),
@@ -294,8 +326,14 @@ class PINNSparseBaseline(BaselineModel):
                 )
                 model.compile("L-BFGS", loss_weights=loss_weights)
                 before = int(model.train_state.iteration)
-                model.train(verbose=0)
+                model.train(
+                    callbacks=[best_callback] if best_callback is not None else [],
+                    display_every=1,
+                    verbose=0,
+                )
                 completed += max(int(model.train_state.iteration) - before, 0)
+            if best_callback is not None and best_callback.best_state is not None:
+                restore_state_dict(net, best_callback.best_state)
             grid_coords = batch.coords[item].detach().cpu().numpy().astype(np.float32, copy=False)
             joint = torch.as_tensor(model.predict(grid_coords), device=batch.target_fields.device, dtype=batch.target_fields.dtype)
             returned_component = 1 if batch.task == "sparse_inverse" else 0
@@ -305,7 +343,7 @@ class PINNSparseBaseline(BaselineModel):
                 {
                     "completed_steps": completed,
                     "early_stopped": early_stopped,
-                    "best_loss": None,
+                    "best_loss": None if best_callback is None else best_callback.best_loss,
                     "min_delta": float(self.config.get("early_stopping_min_delta", 1e-4)),
                     "patience": int(self.config.get("early_stopping_patience", 20)),
                     "stop_reason": "deepxde_early_stopping" if early_stopped else "",
@@ -320,6 +358,12 @@ class PINNSparseBaseline(BaselineModel):
             "network_outputs": ["solution", "unknown"],
             "adam_iterations": adam_iterations,
             "lbfgs_steps": lbfgs_steps,
+            "early_stopping_loss_refresh_interval": 1,
+            "early_stopping_start_iteration": int(
+                self.config.get("min_steps", self.config.get("min_epochs", 0))
+            ),
+            "adam_early_stopped": early_stopped,
+            "restore_best": bool(self.config.get("restore_best", True)),
             "num_domain": num_domain,
             "num_boundary": num_boundary,
             "boundary_conditions": "generator_aligned_kronecker" if pde == "helmholtz" else "zero_dirichlet",

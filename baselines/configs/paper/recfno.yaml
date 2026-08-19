@@ -4,7 +4,11 @@ method:
   normalize: true
   epochs: 200
   lr: 0.001
-  width: 64
-  modes1: 20
-  modes2: 20
+  width: 32
+  modes1: 18
+  modes2: 18
   input_representation: voronoi_mask_coords
+  optimizer: adam
+  training_loss: l1
+  lr_scheduler: exponential
+  scheduler_gamma: 0.98

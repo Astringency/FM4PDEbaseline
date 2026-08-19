@@ -103,16 +103,16 @@ class SenseiverBaseline(BaselineModel):
                     "senseiver",
                     fallback_used=False,
                     implementation_mode_effective="adapted",
-                    implementation_source="vendored_senseiver_encoder_decoder_components_with_fourier_positions_and_unified_training",
+                    implementation_source="vendored_senseiver_sum_mse_adam_training_adapter",
                     official_import_success=True,
                     official_reimplementation_success=False,
-                    official_alignment_level="component",
+                    official_alignment_level="algorithm_training",
                     official_alignment_notes=(
-                        "Directly imports the vendored Senseiver Encoder and Decoder and faithfully ports "
-                        "its Fourier positional encoding; optimization and data loading use the FM4PDE "
-                        "unified training protocol, not the upstream end-to-end script."
+                        "Directly imports the vendored Senseiver Encoder and Decoder, ports its Fourier "
+                        "positions, and preserves sum-MSE, Adam, train-loss monitoring, and patience=100; "
+                        "the Lightning data interface is adapted to PDEBatch."
                     ),
-                    adapter_status="official_component_unified_training_adapter",
+                    adapter_status="official_training_flow_adapter",
                     **official_source_info("senseiver"),
                 )
                 return self

@@ -28,13 +28,16 @@ BASE_GROUP_KEYS = [
     "backend_used",
     "capability_status",
     "implementation_mode_effective",
-    "paper_table_eligible",
 ]
 
 BUDGET_GROUP_KEYS = [
     "steps",
     "refine_steps",
     "particles",
+    "ifno_pretrain_epochs",
+    "vae_pretrain_epochs",
+    "joint_epochs",
+    "total_training_epochs",
     "method_budget_label",
 ]
 
@@ -70,25 +73,19 @@ def main(argv: list[str] | None = None) -> None:
     for path in paths:
         rows.extend(_read_jsonl(path))
     summary_rows = aggregate_rows(rows)
-    main_rows, supplement_rows = partition_rows_for_tables(rows)
-    summary_main = aggregate_rows(main_rows)
-    summary_supplement = aggregate_rows(supplement_rows)
     skipped_rows = _read_skipped_for_inputs(args.inputs)
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_tier_outputs(out)
     _write_csv(out / "summary.csv", summary_rows)
     (out / "summary.json").write_text(json.dumps(summary_rows, indent=2, sort_keys=True), encoding="utf-8")
-    _write_csv(out / "summary_main.csv", summary_main)
-    (out / "summary_main.json").write_text(json.dumps(summary_main, indent=2, sort_keys=True), encoding="utf-8")
-    _write_csv(out / "summary_supplement.csv", summary_supplement)
-    (out / "summary_supplement.json").write_text(json.dumps(summary_supplement, indent=2, sort_keys=True), encoding="utf-8")
     _write_csv(out / "skipped_combinations.csv", skipped_rows)
     (out / "skipped_combinations.json").write_text(json.dumps(skipped_rows, indent=2, sort_keys=True), encoding="utf-8")
     tuning_rows = tuning_summary(rows)
     _write_csv(out / "tuning_summary.csv", tuning_rows)
     (out / "tuning_summary.json").write_text(json.dumps(tuning_rows, indent=2, sort_keys=True), encoding="utf-8")
     write_capability_matrix(out)
-    latex_rows = _latex_rows(summary_main)
+    latex_rows = _latex_rows(summary_rows)
     _write_csv(out / "latex_table.csv", latex_rows)
     if args.latex_tex:
         (out / "latex_table.tex").write_text(_latex_tex(latex_rows), encoding="utf-8")
@@ -97,8 +94,6 @@ def main(argv: list[str] | None = None) -> None:
             {
                 "inputs": [str(p) for p in paths],
                 "groups": len(summary_rows),
-                "main_groups": len(summary_main),
-                "supplement_groups": len(summary_supplement),
                 "skipped": len(skipped_rows),
                 "tuning_groups": len(tuning_rows),
                 "output_dir": str(out),
@@ -106,6 +101,18 @@ def main(argv: list[str] | None = None) -> None:
             indent=2,
         )
     )
+
+
+def _remove_legacy_tier_outputs(output_dir: Path) -> None:
+    for name in (
+        "summary_main.csv",
+        "summary_main.json",
+        "summary_supplement.csv",
+        "summary_supplement.json",
+    ):
+        path = output_dir / name
+        if path.is_file():
+            path.unlink()
 
 
 def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -150,22 +157,6 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def partition_rows_for_tables(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    main: list[dict[str, Any]] = []
-    supplement: list[dict[str, Any]] = []
-    for row in rows:
-        issue = _main_eligibility_issue(row)
-        if not issue:
-            main.append(row)
-            continue
-        downgraded = dict(row)
-        if _truthy(row.get("paper_table_eligible", False)):
-            downgraded["paper_table_eligible"] = False
-            downgraded["aggregation_warning"] = f"downgraded_to_supplement: {issue}"
-        supplement.append(downgraded)
-    return main, supplement
-
-
 def tuning_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = [row for row in rows if _has_finite(row.get("best_val_loss"))]
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
@@ -204,65 +195,6 @@ def tuning_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return out
-
-
-def _main_eligibility_issue(row: dict[str, Any]) -> str:
-    if not _truthy(row.get("paper_table_eligible", False)):
-        return "paper_table_eligible=false"
-    if _truthy(row.get("fallback_used", False)):
-        return "fallback_used=true"
-    status = str(row.get("capability_status", row.get("support_status", ""))).lower()
-    if status not in {"native", "official_adapter"}:
-        return f"capability_status={status or 'missing'}"
-    adapter_status = str(row.get("adapter_status", "") or "").lower()
-    if any(token in adapter_status for token in ("fallback", "local", "surrogate", "style", "adapted", "toy", "debug", "target_change")):
-        return f"adapter_status={adapter_status}"
-    mode = str(row.get("implementation_mode_effective", "") or "").lower()
-    allowed = _eligible_modes_from_row(row)
-    if mode not in allowed:
-        return f"implementation_mode_effective={mode or 'missing'} not in {sorted(allowed)}"
-    required = str(row.get("implementation_required", "") or "").lower()
-    if required == "official" and mode == "official" and not _truthy(row.get("official_import_success", False)):
-        return "official_import_success=false"
-    if required == "official" and mode in {"official_architecture", "official_aligned"} and not _truthy(
-        row.get("official_reimplementation_success", False)
-    ):
-        return "official_reimplementation_success=false"
-    if required == "canonical_math" and mode != "canonical_math":
-        return f"canonical_math required, got {mode or 'missing'}"
-    if required == "adapted_allowed":
-        return "adapted_allowed is supplement-only"
-    return ""
-
-
-def _eligible_modes_from_row(row: dict[str, Any]) -> set[str]:
-    raw = row.get("eligible_implementation_modes", "")
-    if isinstance(raw, (list, tuple, set)):
-        modes = {str(x).lower() for x in raw}
-        if modes:
-            return modes
-    if isinstance(raw, str) and raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                modes = {str(x).lower() for x in parsed}
-                if modes:
-                    return modes
-        except Exception:
-            modes = {part.strip().lower() for part in raw.replace(";", ",").split(",") if part.strip()}
-            if modes:
-                return modes
-    required = str(row.get("implementation_required", "") or "").lower()
-    if required == "canonical_math":
-        return {"canonical_math"}
-    if required == "official":
-        modes = {"official"}
-        if _truthy(row.get("official_architecture_allowed", False)):
-            modes.add("official_architecture")
-        if _truthy(row.get("official_aligned_allowed", False)):
-            modes.add("official_aligned")
-        return modes
-    return set()
 
 
 def _group_keys_for_item(row: dict[str, Any]) -> list[str]:
@@ -456,24 +388,21 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def _latex_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for row in rows:
-        out.append(
-            {
-                "pde": row.get("pde", ""),
-                "task": row.get("task", ""),
-                "baseline": row.get("baseline", ""),
-                "train_size": row.get("train_size", ""),
-                "method_budget_label": row.get("method_budget_label", ""),
-                "scalar_param_mode": row.get("scalar_param_mode", ""),
-                "relative_l2_solution": _pm(row, "relative_l2_solution"),
-                "mse": _pm(row, "mse"),
-                "pde_residual": _pm(row, "pde_residual"),
-                "physics_loss": _pm(row, "physics_loss"),
-                "n": row.get("relative_l2_solution_n", 0),
-                "nan_count": row.get("relative_l2_solution_nan_count", 0),
-                "residual_mode_counts": row.get("residual_mode_counts", "{}"),
-                "assimilation_mode_counts": row.get("assimilation_mode_counts", "{}"),
-            }
-        )
+        latex_row = {
+            "pde": row.get("pde", ""),
+            "task": row.get("task", ""),
+            "baseline": row.get("baseline", ""),
+            "train_size": row.get("train_size", ""),
+            "method_budget_label": row.get("method_budget_label", ""),
+            "scalar_param_mode": row.get("scalar_param_mode", ""),
+        }
+        for metric in METRICS:
+            latex_row[metric] = _pm(row, metric)
+            latex_row[f"{metric}_n"] = row.get(f"{metric}_n", 0)
+            latex_row[f"{metric}_nan_count"] = row.get(f"{metric}_nan_count", 0)
+        latex_row["residual_mode_counts"] = row.get("residual_mode_counts", "{}")
+        latex_row["assimilation_mode_counts"] = row.get("assimilation_mode_counts", "{}")
+        out.append(latex_row)
     return out
 
 

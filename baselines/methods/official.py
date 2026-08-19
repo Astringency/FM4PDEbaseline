@@ -258,7 +258,7 @@ def get_vivid_official_status() -> None:
     The vendored VIVID snapshot is organized as executable Keras scripts and the
     invobs repository needs a dataset-specific training/config pipeline. Until a
     stable importable inverse-observation adapter is added, the local refinement
-    path must remain VIVID-style supplement or be skipped in paper official mode.
+    path must remain explicitly labeled VIVID-style adaptation or be skipped in official mode.
     """
 
     vivid = OFFICIAL_ROOT / "VIVID"

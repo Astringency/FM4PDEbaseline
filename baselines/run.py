@@ -1090,7 +1090,19 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
     steps = int(method_cfg.get("steps", 0) or 0)
     refine_steps = int(method_cfg.get("refine_steps", 0) or 0)
     particles = int(method_cfg.get("particles", 0) or 0)
+    ifno_pretrain_epochs = int(method_cfg.get("ifno_pretrain_epochs", 0) or 0) if baseline == "ifno" else 0
+    vae_pretrain_epochs = int(method_cfg.get("vae_pretrain_epochs", 0) or 0) if baseline == "ifno" else 0
+    joint_epochs = int(method_cfg.get("joint_epochs", 0) or 0) if baseline == "ifno" else 0
     labels = []
+    if baseline == "ifno":
+        labels.extend(
+            [
+                f"ifno_pretrain_epochs={ifno_pretrain_epochs}",
+                f"vae_pretrain_epochs={vae_pretrain_epochs}",
+                f"joint_epochs={joint_epochs}",
+                f"total_epochs={ifno_pretrain_epochs + vae_pretrain_epochs + joint_epochs}",
+            ]
+        )
     if refine_steps > 0 and baseline == "vivid":
         labels.append(f"refine_steps={refine_steps}")
     if steps > 0:
@@ -1105,6 +1117,10 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
         "steps": steps,
         "refine_steps": refine_steps,
         "particles": particles,
+        "ifno_pretrain_epochs": ifno_pretrain_epochs,
+        "vae_pretrain_epochs": vae_pretrain_epochs,
+        "joint_epochs": joint_epochs,
+        "total_training_epochs": ifno_pretrain_epochs + vae_pretrain_epochs + joint_epochs if baseline == "ifno" else 0,
         "method_budget_label": ",".join(labels),
     }
 

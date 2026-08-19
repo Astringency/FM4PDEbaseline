@@ -80,6 +80,8 @@ class PCBNNBaseline(BaselineModel):
         if self.particles <= 0:
             raise ValueError("PC-BNN requires at least one posterior particle")
         self.coord_dim = len(tuple(data_spec["target_shape"])[2:])
+        self.task = str(data_spec.get("task", ""))
+        self.input_channels = int(data_spec["input_channels"])
         self.target_channels = int(data_spec["target_channels"])
         self.hidden = int(self.config.get("hidden", 64))
         # The official network has three Swish hidden layers.  Task adaptation
@@ -111,7 +113,10 @@ class PCBNNBaseline(BaselineModel):
         return self
 
     def parameter_count(self) -> int:
-        proto = self._new_particle(self.coord_dim, self.target_channels)
+        out_channels = self.target_channels
+        if self.task in {"sparse_forward", "sparse_inverse"}:
+            out_channels += self.input_channels
+        proto = self._new_particle(self.coord_dim, out_channels)
         return int(self.particles * sum(p.numel() for p in proto.parameters() if p.requires_grad))
 
     def fit(self, train_loader, val_loader=None):
@@ -141,44 +146,32 @@ class PCBNNBaseline(BaselineModel):
             ]
             _initialize_particles(particles, self.config)
             optimizers = _particle_optimizers(particles, lr=lr, lr_noise=lr_noise)
-            stopper = LossPlateauStopper(self.config)
-            for _ in range(max(steps, 0)):
-                losses = []
-                grads = []
-                thetas = []
-                for particle in particles:
-                    pred = particle(coords).T.reshape_as(target)
-                    obs = observation_loss_from_batch(pred, batch, item=item)
-                    meta = _single_meta(batch, item)
-                    meta.update(_physics_weight_metadata(self.config))
-                    physics_losses = physics_loss_metric(pred, batch.pde_name, meta, strict=True)
-                    boundary_count = _boundary_observation_count(batch.pde_name, pred)
-                    loss = _negative_log_posterior(
-                        particle,
-                        lam_obs * obs,
-                        _observation_count(batch, item),
-                        float(self.config.get("lambda_bc", 1.0)) * physics_losses["bc"],
-                        boundary_count,
-                        float(self.config.get("lambda_int", self.config.get("lambda_pde", 1.0)))
-                        * physics_losses["interior"],
-                        _physics_residual_count(physics_losses, target),
-                        self.config,
-                    )
-                    grad = torch.autograd.grad(loss, tuple(particle.parameters()), retain_graph=False, create_graph=False)
-                    losses.append(loss.detach())
-                    grads.append(torch.cat([g.detach().reshape(-1) for g in grad]))
-                    thetas.append(_flatten_params(particle))
-                theta = torch.stack(thetas)
-                grad_loss = torch.stack(grads)
-                updates = _svgd_descent_direction(theta, grad_loss)
-                _apply_svgd_adam(particles, optimizers, updates)
-                if stopper.update(torch.stack(losses).mean()):
-                    break
+
+            def particle_objective(particle):
+                pred = particle(coords).T.reshape_as(target)
+                obs = observation_loss_from_batch(pred, batch, item=item)
+                meta = _single_meta(batch, item)
+                meta.update(_physics_weight_metadata(self.config))
+                physics_losses = physics_loss_metric(pred, batch.pde_name, meta, strict=True)
+                boundary_count = _boundary_observation_count(batch.pde_name, pred)
+                return _negative_log_posterior(
+                    particle,
+                    lam_obs * obs,
+                    _observation_count(batch, item),
+                    float(self.config.get("lambda_bc", 1.0)) * physics_losses["bc"],
+                    boundary_count,
+                    float(self.config.get("lambda_int", self.config.get("lambda_pde", 1.0)))
+                    * physics_losses["interior"],
+                    _physics_residual_count(physics_losses, target),
+                    self.config,
+                )
+
+            status = _run_svgd_optimizer(particles, optimizers, steps, self.config, particle_objective)
             preds = []
             with torch.no_grad():
                 for particle in particles:
                     preds.append(particle(coords).T.reshape_as(target))
-            result = _posterior_result(preds, particles, stopper.status())
+            result = _posterior_result(preds, particles, status)
             statuses.append(result.status)
             all_means.append(result.mean)
             all_stds.append(result.std)
@@ -230,38 +223,27 @@ class PCBNNBaseline(BaselineModel):
             ]
             _initialize_particles(particles, self.config)
             optimizers = _particle_optimizers(particles, lr=lr, lr_noise=lr_noise)
-            stopper = LossPlateauStopper(self.config)
-            for _ in range(max(steps, 0)):
-                grads: list[torch.Tensor] = []
-                thetas: list[torch.Tensor] = []
-                losses: list[torch.Tensor] = []
-                for particle in particles:
-                    joint = particle(coords).T.reshape(1, unknown_channels + solution_channels, *unknown_shape[2:])
-                    unknown = _transform_unknown(joint[:, :unknown_channels], batch.pde_name, self.config)
-                    solution = joint[:, unknown_channels:]
-                    obs = adapter.observation_loss(unknown, solution, batch, item)
-                    physics_losses = adapter.physics_losses(unknown, solution, batch, item, self.config)
-                    boundary_count = _boundary_observation_count(batch.pde_name, solution)
-                    loss = _negative_log_posterior(
-                        particle,
-                        lam_obs * obs,
-                        _observation_count(batch, item),
-                        float(self.config.get("lambda_bc", 1.0)) * physics_losses["bc"],
-                        boundary_count,
-                        float(self.config.get("lambda_int", self.config.get("lambda_pde", 1.0)))
-                        * physics_losses["interior"],
-                        _physics_residual_count(physics_losses, solution),
-                        self.config,
-                    )
-                    losses.append(loss.detach())
-                    grad = torch.autograd.grad(loss, tuple(particle.parameters()), retain_graph=False, create_graph=False)
-                    grads.append(torch.cat([value.detach().reshape(-1) for value in grad]))
-                    thetas.append(_flatten_params(particle))
-                theta = torch.stack(thetas)
-                updates = _svgd_descent_direction(theta, torch.stack(grads))
-                _apply_svgd_adam(particles, optimizers, updates)
-                if stopper.update(torch.stack(losses).mean()):
-                    break
+
+            def particle_objective(particle):
+                joint = particle(coords).T.reshape(1, unknown_channels + solution_channels, *unknown_shape[2:])
+                unknown = _transform_unknown(joint[:, :unknown_channels], batch.pde_name, self.config)
+                solution = joint[:, unknown_channels:]
+                obs = adapter.observation_loss(unknown, solution, batch, item)
+                physics_losses = adapter.physics_losses(unknown, solution, batch, item, self.config)
+                boundary_count = _boundary_observation_count(batch.pde_name, solution)
+                return _negative_log_posterior(
+                    particle,
+                    lam_obs * obs,
+                    _observation_count(batch, item),
+                    float(self.config.get("lambda_bc", 1.0)) * physics_losses["bc"],
+                    boundary_count,
+                    float(self.config.get("lambda_int", self.config.get("lambda_pde", 1.0)))
+                    * physics_losses["interior"],
+                    _physics_residual_count(physics_losses, solution),
+                    self.config,
+                )
+
+            status = _run_svgd_optimizer(particles, optimizers, steps, self.config, particle_objective)
             predictions: list[torch.Tensor] = []
             with torch.no_grad():
                 for particle in particles:
@@ -269,7 +251,7 @@ class PCBNNBaseline(BaselineModel):
                     unknown = _transform_unknown(joint[:, :unknown_channels], batch.pde_name, self.config)
                     solution = joint[:, unknown_channels:]
                     predictions.append(adapter.result(unknown, solution))
-            result = _posterior_result(predictions, particles, stopper.status())
+            result = _posterior_result(predictions, particles, status)
             statuses.append(result.status)
             means.append(result.mean)
             stds.append(result.std)
@@ -413,12 +395,13 @@ def _posterior_result(
     status: dict,
 ) -> PCBNNPosteriorResult:
     stack = torch.stack(predictions, dim=0)
-    precision = float(
-        torch.stack([particle.log_beta.exp() for particle in particles]).mean().detach().cpu()
-    )
+    precisions = torch.stack([particle.log_beta.exp() for particle in particles])
+    precision = float(precisions.mean().detach().cpu())
+    aleatoric_variance = precisions.reciprocal().mean().to(stack.device, stack.dtype)
+    predictive_variance = stack.var(dim=0, unbiased=False) + aleatoric_variance
     return PCBNNPosteriorResult(
         mean=stack.mean(dim=0),
-        std=stack.std(dim=0, unbiased=False),
+        std=predictive_variance.clamp_min(0.0).sqrt(),
         samples=stack.squeeze(1),
         noise_precision=precision,
         status=status,
@@ -494,6 +477,55 @@ def _apply_svgd_adam(
         optimizer.step()
         with torch.no_grad():
             particle.clamp_noise_precision()
+
+
+def _run_svgd_optimizer(
+    particles: list[PCBNNParticle],
+    optimizers: list[torch.optim.Optimizer],
+    steps: int,
+    config: dict,
+    objective,
+) -> dict:
+    """Apply SVGD updates using current gradients and restore the best ensemble."""
+    stopper = LossPlateauStopper(config)
+
+    def evaluate():
+        losses: list[torch.Tensor] = []
+        gradients: list[torch.Tensor] = []
+        theta: list[torch.Tensor] = []
+        for particle in particles:
+            loss = objective(particle)
+            grad = torch.autograd.grad(
+                loss,
+                tuple(particle.parameters()),
+                retain_graph=False,
+                create_graph=False,
+            )
+            losses.append(loss.detach())
+            gradients.append(torch.cat([value.detach().reshape(-1) for value in grad]))
+            theta.append(_flatten_params(particle))
+        return torch.stack(losses).mean(), torch.stack(theta), torch.stack(gradients)
+
+    current_loss, theta, gradients = evaluate()
+    stopper.update(current_loss, completed_step=False)
+    best_theta = theta.detach().clone()
+    for _ in range(max(int(steps), 0)):
+        updates = _svgd_descent_direction(theta, gradients)
+        _apply_svgd_adam(particles, optimizers, updates)
+        current_loss, theta, gradients = evaluate()
+        should_stop = stopper.update(current_loss)
+        if stopper.last_improved:
+            best_theta = theta.detach().clone()
+        if should_stop:
+            break
+    restored_best = bool(config.get("restore_best", True))
+    if restored_best:
+        with torch.no_grad():
+            for particle, vector in zip(particles, best_theta):
+                _assign_flat_params(particle, vector)
+    status = stopper.status()
+    status["restored_best"] = restored_best
+    return status
 
 
 def _record_training_protocol(batch: PDEBatch, *, lr: float, lr_noise: float, config: dict) -> None:

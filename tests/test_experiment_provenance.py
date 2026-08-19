@@ -32,7 +32,6 @@ def _config(method_config: Path) -> dict:
     return {
         "name": "provenance_test",
         "experiment_kind": "main",
-        "main_table_only": True,
         # These generic provenance unit tests intentionally use a non-paper
         # protocol. Formal v2 manifest enforcement has dedicated coverage in
         # test_data_manifest_provenance.py.
@@ -736,7 +735,6 @@ def test_comparison_tracks_separate_unified_adapted_from_official_native(tmp_pat
     base = {
         "name": "track_test",
         "experiment_kind": "main",
-        "main_table_only": False,
         "config": str(method_config),
         "pdes": ["darcy"],
         "seeds": [1],

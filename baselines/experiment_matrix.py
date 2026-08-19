@@ -36,7 +36,6 @@ def compatibility_reason(
     load_full_trajectory: bool | None = None,
     train_inverse_operator: bool | None = None,
     uses_official_inverse_observation_operator: bool | None = None,
-    main_table_only: bool = False,
 ) -> str:
     capability = resolve_capability(
         baseline,
@@ -50,8 +49,6 @@ def compatibility_reason(
     )
     if capability.support_status == "unsupported":
         return capability.reason
-    if main_table_only and not capability.paper_table_eligible:
-        return main_table_skip_reason(capability)
     return ""
 
 
@@ -85,27 +82,14 @@ def capability_skip_row(
     return row
 
 
-def main_table_skip_reason(capability: Capability) -> str:
-    if capability.support_status == "unsupported":
-        return capability.reason
-    if not capability.paper_table_eligible:
-        return (
-            f"{capability.baseline}/{capability.task_family} is {capability.support_status} "
-            f"({capability.implementation_required}) and is supplement-only for paper main-table mode: {capability.reason}"
-        )
-    return ""
-
-
 def is_supported(
     baseline: str,
     pde: str,
     task: str,
     sensor_mode: str = "",
     task_group: str = "",
-    *,
-    main_table_only: bool = False,
 ) -> bool:
-    return compatibility_reason(baseline, pde, task, sensor_mode, task_group, main_table_only=main_table_only) == ""
+    return compatibility_reason(baseline, pde, task, sensor_mode, task_group) == ""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -121,8 +105,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--load-full-trajectory", action="store_true")
     parser.add_argument("--train-inverse-operator", action="store_true")
     parser.add_argument("--uses-official-inverse-observation-operator", action="store_true")
-    parser.add_argument("--main-table-only", action="store_true", help="Treat adapted/supplement-only capabilities as skipped.")
-    parser.add_argument("--paper-mode", action="store_true", help="Alias for --main-table-only.")
     return parser.parse_args(argv)
 
 
@@ -151,18 +133,6 @@ def main(argv: list[str] | None = None) -> None:
     )
     if capability.support_status == "unsupported":
         row = capability_skip_row(capability, task_group=args.task_group)
-        if args.skipped_path:
-            path = Path(args.skipped_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row, sort_keys=True) + "\n")
-        raise SystemExit(1)
-    if (args.main_table_only or args.paper_mode) and not capability.paper_table_eligible:
-        row = capability_skip_row(
-            capability,
-            task_group=args.task_group,
-            extra={"reason": main_table_skip_reason(capability), "unsupported_reason": main_table_skip_reason(capability)},
-        )
         if args.skipped_path:
             path = Path(args.skipped_path)
             path.parent.mkdir(parents=True, exist_ok=True)

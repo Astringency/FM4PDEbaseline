@@ -53,17 +53,16 @@ class RecFNOBaseline(BaselineModel):
                     "recfno",
                     fallback_used=False,
                     implementation_mode_effective="adapted",
-                    implementation_source="vendored_recfno_voronoifno2d_component_with_unified_training",
+                    implementation_source="vendored_recfno_voronoifno2d_l1_adam_exponential_training_adapter",
                     official_import_success=True,
                     official_reimplementation_success=False,
-                    official_alignment_level="component",
+                    official_alignment_level="algorithm_training",
                     official_alignment_notes=(
                         "Directly imports the vendored RecFNO VoronoiFNO2d component and uses its "
-                        "Voronoi+mask+coordinates representation (with FM4PDE normalized grid coordinates); "
-                        "optimization and data loading use the FM4PDE unified training protocol, not the "
-                        "upstream end-to-end script."
+                        "Voronoi+mask+coordinates representation, L1 objective, Adam optimizer, and "
+                        "ExponentialLR schedule; only dataset/checkpoint plumbing is adapted to FM4PDE."
                     ),
-                    adapter_status="official_component_unified_training_adapter",
+                    adapter_status="official_training_flow_adapter",
                     **official_source_info("recfno"),
                 )
                 return self

@@ -4,4 +4,10 @@ method:
   normalize: true
   epochs: 200
   lr: 0.001
-  width: 64
+  width: 48
+  optimizer: adam
+  training_loss: mse
+  lr_scheduler: none
+  early_stopping: true
+  early_stopping_patience: 100
+  restore_best: true

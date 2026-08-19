@@ -38,9 +38,14 @@ class VoronoiCNNBaseline(BaselineModel):
                 "voronoicnn",
                 fallback_used=False,
                 implementation_mode_effective="official_architecture",
-                implementation_source="voronoicnn_official_architecture_reimplementation",
+                implementation_source="voronoicnn_official_architecture_adam_mse_training_adapter",
                 official_import_success=False,
-                adapter_status="official_architecture_reimplementation",
+                official_alignment_level="algorithm_training",
+                official_alignment_notes=(
+                    "Reimplements the non-importable Keras Conv2D stack and preserves Adam, MSE, validation-loss "
+                    "checkpointing, and patience=100 while adapting tensor layout and data loading to PyTorch."
+                ),
+                adapter_status="official_training_flow_adapter",
                 **official_source_info("voronoi_cnn"),
             )
             return self

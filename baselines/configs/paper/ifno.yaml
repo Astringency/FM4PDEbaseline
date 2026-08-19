@@ -2,7 +2,7 @@ method:
   implementation_mode: official_aligned
   official_backend: ifno
   normalize: true
-  epochs: 200
+  epochs: 500
   lr: 0.00025
   width: 64
   modes1: 16
@@ -21,5 +21,8 @@ method:
   kl_weight: 0.01
   reconstruction_weight: 1.0
   vae_resolution: 64
-  grad_clip_norm: 10.0
+  vae_grad_clip_norm: 2.0
+  ifno_grad_clip_norm: 10.0
+  joint_grad_clip_norm: 10.0
+  vae_geometric_augmentation: true
   cycle_weight: 0.0

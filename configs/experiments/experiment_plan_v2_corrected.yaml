@@ -1,7 +1,6 @@
 name: experiment_plan_v2_corrected
 experiment_kind: main
 comparison_track: unified_adapted
-main_table_only: true
 config: baselines/configs/paper.yaml
 task_protocol_version: fm4pde-task-contract-v3
 sensor_protocol_version: fm4pde-sensor-contract-v3
@@ -27,6 +26,7 @@ device: cuda
 task_groups:
   - full_forward_main
   - full_inverse_main
+  - sparse_inverse_main_amortized
   - sparse_inverse_main
   - sparse_solution_main_amortized
   - sparse_solution_burger_time_slices
@@ -47,12 +47,19 @@ task_group_overrides:
     num_sensors: 0
     sensor_mode: none
     noise_level: 0.0
-  sparse_inverse_main:
+  sparse_inverse_main_amortized:
     task: sparse_inverse
     # Burger sparse inverse is intentionally absent. Burger full inverse is
     # the explicit u(T) -> u(0) contract above.
     pdes: [poisson, helmholtz, darcy, nsnonbounded]
-    baselines: [pinn_sparse, pde_opt, pc_bnn, recfno, senseiver, voronoicnn]
+    baselines: [recfno, senseiver, voronoicnn]
+    num_sensors: 500
+    sensor_mode: random_per_sample
+    noise_level: 0.0
+  sparse_inverse_main:
+    task: sparse_inverse
+    pdes: [poisson, helmholtz, darcy]
+    baselines: [pinn_sparse, pde_opt, pc_bnn]
     num_sensors: 500
     sensor_mode: random_per_sample
     noise_level: 0.0
@@ -87,7 +94,7 @@ task_group_overrides:
     noise_level: 0.0
   sparse_forward_main_physics:
     task: sparse_forward
-    pdes: [poisson, helmholtz, darcy, nsnonbounded]
+    pdes: [poisson, helmholtz, darcy]
     baselines: [pinn_sparse, pde_opt, pc_bnn]
     num_sensors: 500
     sensor_mode: random_per_sample

@@ -260,20 +260,34 @@ class LossPlateauStopper:
         self.enabled = bool(config.get("early_stopping", False))
         self.patience = max(1, int(config.get("early_stopping_patience", 20)))
         self.min_delta = float(config.get("early_stopping_min_delta", 1e-4))
-        self.min_steps = max(1, int(config.get("min_optimization_steps", 1)))
+        self.min_steps = max(
+            1,
+            int(
+                config.get(
+                    "min_optimization_steps",
+                    config.get("min_steps", config.get("min_epochs", 1)),
+                )
+            ),
+        )
         self.best: float | None = None
         self.no_improve = 0
         self.completed_steps = 0
         self.early_stopped = False
+        self.last_improved = False
+        self.best_step: int | None = None
 
-    def update(self, loss: torch.Tensor | float) -> bool:
+    def update(self, loss: torch.Tensor | float, *, completed_step: bool = True) -> bool:
         value = float(loss.detach().cpu()) if isinstance(loss, torch.Tensor) else float(loss)
-        self.completed_steps += 1
+        if completed_step:
+            self.completed_steps += 1
         if self.best is None or value < self.best - self.min_delta:
             self.best = value
             self.no_improve = 0
+            self.last_improved = True
+            self.best_step = self.completed_steps
         else:
             self.no_improve += 1
+            self.last_improved = False
         self.early_stopped = (
             self.enabled
             and self.completed_steps >= self.min_steps
@@ -286,23 +300,74 @@ class LossPlateauStopper:
             "completed_steps": int(self.completed_steps),
             "early_stopped": bool(self.early_stopped),
             "best_loss": self.best,
+            "best_step": self.best_step,
             "min_delta": self.min_delta,
             "patience": self.patience,
         }
 
 
 def run_per_instance_optimizer(optimizer, closure, steps: int, config: dict[str, Any]) -> dict[str, Any]:
+    """Optimize one test instance and restore the best evaluated parameter state.
+
+    Losses are observed after each optimizer update.  This matters for Adam and
+    especially for PyTorch LBFGS, whose ``step`` return value is the first
+    closure loss rather than the loss at the final parameters.
+    """
     stopper = LossPlateauStopper(config)
-    if isinstance(optimizer, torch.optim.LBFGS):
-        loss = optimizer.step(closure)
-        stopper.update(loss)
-        return stopper.status()
+    params = _optimizer_parameters(optimizer)
+    current_loss = closure()
+    stopper.update(current_loss, completed_step=False)
+    best_params = _snapshot_parameters(params)
+    is_lbfgs = isinstance(optimizer, torch.optim.LBFGS)
+    if is_lbfgs:
+        # One outer iteration must correspond to one recorded budget step.
+        # Leaving max_iter=steps here would hide all internal iterations behind
+        # one stale return value and make patience impossible to apply.
+        for group in optimizer.param_groups:
+            group["max_iter"] = 1
+            group["max_eval"] = max(int(group.get("max_eval", 1)), 1)
     for _ in range(max(int(steps), 0)):
-        loss = closure()
-        optimizer.step()
-        if stopper.update(loss):
+        if is_lbfgs:
+            optimizer.step(closure)
+        else:
+            # ``current_loss`` was produced by closure and its gradients match
+            # the current parameters.
+            optimizer.step()
+        current_loss = closure()
+        if stopper.update(current_loss):
+            if stopper.last_improved:
+                best_params = _snapshot_parameters(params)
             break
-    return stopper.status()
+        if stopper.last_improved:
+            best_params = _snapshot_parameters(params)
+    restored_best = bool(config.get("restore_best", True))
+    if restored_best:
+        _restore_parameters(params, best_params)
+    optimizer.zero_grad(set_to_none=True)
+    status = stopper.status()
+    status["restored_best"] = restored_best
+    return status
+
+
+def _optimizer_parameters(optimizer) -> list[torch.nn.Parameter]:
+    params: list[torch.nn.Parameter] = []
+    seen: set[int] = set()
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            if id(parameter) not in seen:
+                seen.add(id(parameter))
+                params.append(parameter)
+    return params
+
+
+def _snapshot_parameters(params: list[torch.nn.Parameter]) -> list[torch.Tensor]:
+    return [parameter.detach().clone() for parameter in params]
+
+
+def _restore_parameters(params: list[torch.nn.Parameter], snapshot: list[torch.Tensor]) -> None:
+    with torch.no_grad():
+        for parameter, value in zip(params, snapshot):
+            parameter.copy_(value)
 
 
 def record_optimization_status(batch: PDEBatch, statuses: list[dict[str, Any]]) -> None:
@@ -404,7 +469,7 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
     grad_clip_norm = model.config.get("grad_clip_norm")
     if grad_clip_norm is not None:
         grad_clip_norm = float(grad_clip_norm)
-    loss_fn = nn.MSELoss()
+    loss_name = str(model.config.get("training_loss", "mse")).lower()
     history = {
         "train_loss": [],
         "val_loss": [],
@@ -418,6 +483,9 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         "lr_history": [],
         "normalize": model.uses_normalization,
         "normalization_stats": model.normalization_stats.json_summary() if model.normalization_stats is not None else None,
+        "training_loss": loss_name,
+        "optimizer": str(model.config.get("optimizer", "adam")).lower(),
+        "lr_scheduler": str(model.config.get("lr_scheduler", "none")).lower(),
     }
     best_state = None
     best_val = None
@@ -433,6 +501,7 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         model.train()
         total = 0.0
         count = 0
+        train_batches = 0
         train_samples = 0
         for step, batch in enumerate(train_loader):
             if max_steps is not None and step >= int(max_steps):
@@ -445,20 +514,22 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
             opt.zero_grad(set_to_none=True)
             pred = model.predict(batch)
             _require_exact_shape(pred, target, model.name, "train")
-            loss = loss_fn(pred, target)
-            _raise_if_nonfinite_loss(loss, model, epoch + 1, step + 1, "train_loss")
-            loss.backward()
+            optimization_loss, reported_loss = _supervised_losses(model, pred, target)
+            _raise_if_nonfinite_loss(optimization_loss, model, epoch + 1, step + 1, "train_loss")
+            optimization_loss.backward()
             if grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             opt.step()
-            total += float(loss.detach().cpu())
-            count += 1
+            batch_samples = int(target.shape[0])
+            total += float(reported_loss.detach().cpu()) * batch_samples
+            count += batch_samples
+            train_batches += 1
             if log_interval > 0 and (step + 1) % log_interval == 0:
                 running = total / max(count, 1)
                 print(
                     f"[fit step] baseline={model.name} pde={model.data_spec.get('pde', '')} "
                     f"task={model.data_spec.get('task', '')} epoch={epoch + 1}/{epochs} "
-                    f"step={step + 1}/{_safe_len(train_loader)} batch_loss={float(loss.detach().cpu()):.6g} "
+                    f"step={step + 1}/{_safe_len(train_loader)} batch_loss={float(reported_loss.detach().cpu()):.6g} "
                     f"running_train_loss={running:.6g} device={device}{_cuda_mem_text(device)}",
                     file=sys.stderr,
                     flush=True,
@@ -468,10 +539,9 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         history["train_loss"].append(train_loss)
         if val_loader is None and (best_train is None or train_loss < best_train):
             best_train = train_loss
-            history["best_epoch"] = epoch + 1
-            best_state = snapshot_state_dict(model)
         val_loss = None
         val_count = 0
+        val_batches = 0
         if val_loader is not None:
             model.eval()
             val_total = 0.0
@@ -484,10 +554,12 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
                         batch = normalize_batch_input_target(batch, model.normalization_stats)
                     pred = model.predict(batch)
                     _require_exact_shape(pred, batch.target_fields, model.name, "validation")
-                    loss = F.mse_loss(pred, batch.target_fields)
-                    _raise_if_nonfinite_loss(loss, model, epoch + 1, step + 1, "val_loss")
-                    val_total += float(loss.detach().cpu())
-                    val_count += 1
+                    _optimization_loss, reported_loss = _supervised_losses(model, pred, batch.target_fields)
+                    _raise_if_nonfinite_loss(reported_loss, model, epoch + 1, step + 1, "val_loss")
+                    batch_samples = int(batch.target_fields.shape[0])
+                    val_total += float(reported_loss.detach().cpu()) * batch_samples
+                    val_count += batch_samples
+                    val_batches += 1
             val_loss = val_total / max(val_count, 1)
             _raise_if_nonfinite_scalar(val_loss, model, epoch + 1, val_count, "val_loss")
             history["val_loss"].append(val_loss)
@@ -495,7 +567,6 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
                 best_val = val_loss
                 history["best_epoch"] = epoch + 1
                 history["best_val_loss"] = val_loss
-                best_state = snapshot_state_dict(model)
         monitor_loss = train_loss if monitor_name == "train_loss" else val_loss
         if monitor_loss is None:
             monitor_name = "train_loss"
@@ -505,6 +576,8 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         if improved:
             best_monitor = float(monitor_loss)
             history["best_monitor_loss"] = best_monitor
+            history["best_epoch"] = epoch + 1
+            best_state = snapshot_state_dict(model)
             no_improve_epochs = 0
         else:
             no_improve_epochs += 1
@@ -540,7 +613,7 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
             f"monitor={monitor_name} monitor_loss={float(monitor_loss):.6g} "
             f"no_improve_epochs={no_improve_epochs} early_stopping_patience={early_stopping_patience} "
             f"epoch_time_sec={epoch_time:.3f} cumulative_train_time_sec={cumulative_train_time:.3f} "
-            f"train_steps={count} val_steps={val_count} samples_per_sec={samples_per_sec:.3f} "
+            f"train_steps={train_batches} val_steps={val_batches} samples_per_sec={samples_per_sec:.3f} "
             f"lr={opt.param_groups[0]['lr']:.3e} device={device}{_cuda_mem_text(device)}",
             file=sys.stderr,
             flush=True,
@@ -570,9 +643,12 @@ def _require_exact_shape(pred: torch.Tensor, target: torch.Tensor, baseline: str
 
 def _build_optimizer(model: nn.Module, config: dict[str, Any], lr: float) -> torch.optim.Optimizer:
     optimizer_name = str(config.get("optimizer", "adam")).lower()
-    if optimizer_name != "adam":
-        raise ValueError(f"Unsupported optimizer={optimizer_name!r}; supported values: adam")
-    return torch.optim.Adam(model.parameters(), lr=lr)
+    weight_decay = float(config.get("weight_decay", 0.0))
+    if optimizer_name == "adam":
+        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    if optimizer_name == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    raise ValueError(f"Unsupported optimizer={optimizer_name!r}; supported values: adam, adamw")
 
 
 def _build_lr_scheduler(opt: torch.optim.Optimizer, config: dict[str, Any], epochs: int):
@@ -594,7 +670,61 @@ def _build_lr_scheduler(opt: torch.optim.Optimizer, config: dict[str, Any], epoc
             T_max=max(int(config.get("cosine_t_max", epochs) or epochs), 1),
             eta_min=float(config.get("cosine_min_lr", 1e-5)),
         )
-    raise ValueError(f"Unsupported lr_scheduler={scheduler_name!r}; supported values: none, reduce_on_plateau, cosine")
+    if scheduler_name == "step":
+        return torch.optim.lr_scheduler.StepLR(
+            opt,
+            step_size=max(int(config.get("scheduler_step_size", 100)), 1),
+            gamma=float(config.get("scheduler_gamma", 0.5)),
+        )
+    if scheduler_name == "exponential":
+        return torch.optim.lr_scheduler.ExponentialLR(
+            opt,
+            gamma=float(config.get("scheduler_gamma", 0.98)),
+        )
+    raise ValueError(
+        f"Unsupported lr_scheduler={scheduler_name!r}; supported values: "
+        "none, reduce_on_plateau, cosine, step, exponential"
+    )
+
+
+def _supervised_losses(
+    model: BaselineModel,
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the official/adapted optimization loss and a sample-mean report loss."""
+    official_loss = getattr(model, "official_training_loss", None)
+    if official_loss is not None:
+        loss = official_loss(prediction, target)
+        return loss, loss
+    loss_name = str(model.config.get("training_loss", "mse")).lower()
+    if loss_name == "mse":
+        loss = F.mse_loss(prediction, target)
+        return loss, loss
+    if loss_name in {"l1", "mae"}:
+        loss = F.l1_loss(prediction, target)
+        return loss, loss
+    if loss_name == "sum_mse":
+        # Senseiver optimizes the upstream reduction='sum' objective but logs
+        # the element mean.  Its dataloader also selects random output pixels;
+        # preserve that stochastic objective while retaining PDEBatch loading.
+        if model.name == "senseiver" and model.training:
+            spatial_points = int(math.prod(prediction.shape[2:]))
+            requested_points = int(model.config.get("batch_pixels", spatial_points))
+            if 0 < requested_points < spatial_points:
+                indices = torch.randperm(spatial_points, device=prediction.device)[:requested_points]
+                prediction = prediction.reshape(prediction.shape[0], prediction.shape[1], -1)[..., indices]
+                target = target.reshape(target.shape[0], target.shape[1], -1)[..., indices]
+        return F.mse_loss(prediction, target, reduction="sum"), F.mse_loss(prediction, target)
+    if loss_name in {"relative_l2", "l2"}:
+        per_sample = torch.linalg.vector_norm(
+            (prediction - target).reshape(prediction.shape[0], -1), dim=1
+        ) / torch.linalg.vector_norm(target.reshape(target.shape[0], -1), dim=1).clamp_min(1e-12)
+        loss = per_sample.mean()
+        return loss, loss
+    raise ValueError(
+        f"Unsupported training_loss={loss_name!r}; supported values: mse, sum_mse, l1, relative_l2"
+    )
 
 
 def _scheduler_monitor_name(config: dict[str, Any], val_loader=None) -> str:

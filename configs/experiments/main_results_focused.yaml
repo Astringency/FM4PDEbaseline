@@ -1,6 +1,5 @@
 name: main_results_focused
 experiment_kind: main
-main_table_only: true
 config: baselines/configs/paper.yaml
 pdes:
   - poisson
@@ -23,7 +22,6 @@ task_groups:
   - full_forward_main
   - full_inverse_main
   - sparse_solution_main_amortized
-  - sparse_solution_main_physics
   - sparse_inverse_main
 task_group_overrides:
   full_forward_main:
@@ -44,14 +42,9 @@ task_group_overrides:
     num_sensors: 500
     sensor_mode: random_per_sample
     noise_level: 0.0
-  sparse_solution_main_physics:
-    task: sparse_solution
-    baselines: [pinn_sparse, pc_bnn, pde_opt]
-    num_sensors: 500
-    sensor_mode: random_per_sample
-    noise_level: 0.0
   sparse_inverse_main:
     task: sparse_inverse
+    pdes: [poisson, helmholtz, darcy]
     baselines: [pinn_sparse, pde_opt]
     num_sensors: 500
     sensor_mode: random_per_sample

@@ -97,7 +97,7 @@ def test_official_architecture_must_be_explicitly_allowed():
     ) is False
 
 
-def test_vivid_style_without_official_import_is_supplement_only():
+def test_vivid_style_without_official_import_is_not_official_native():
     vivid_style = resolve_capability(
         "vivid",
         "reaction_diffusion",

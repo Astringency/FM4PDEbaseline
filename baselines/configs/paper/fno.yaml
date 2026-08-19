@@ -8,3 +8,9 @@ method:
   modes1: 20
   modes2: 20
   layers: 4
+  optimizer: adamw
+  weight_decay: 0.0001
+  training_loss: h1
+  lr_scheduler: step
+  scheduler_step_size: 100
+  scheduler_gamma: 0.5

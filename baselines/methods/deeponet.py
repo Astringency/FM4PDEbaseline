@@ -46,14 +46,14 @@ class DeepONetBaseline(BaselineModel):
                     "deepxde",
                     fallback_used=False,
                     implementation_mode_effective="adapted",
-                    implementation_source="deepxde_cartesianprod_component_unified_training",
+                    implementation_source="deepxde_cartesianprod_adam_mse_training_adapter",
                     official_import_success=True,
-                    official_alignment_level="component",
+                    official_alignment_level="algorithm_training",
                     official_alignment_notes=(
-                        "Uses DeepXDE's DeepONetCartesianProd network component with FM4PDE's unified "
-                        "normalization, fit loop, optimizer, scheduler, and data protocol."
+                        "Uses DeepXDE's DeepONetCartesianProd component and its Adam/MSE training recipe; "
+                        "the loop is adapted to PDEBatch because the upstream operator datasets are task-specific."
                     ),
-                    adapter_status="official_component_unified_training_adapter",
+                    adapter_status="official_training_flow_adapter",
                     **official_source_info("deepxde"),
                 )
             except Exception as exc:

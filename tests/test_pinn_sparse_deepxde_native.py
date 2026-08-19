@@ -63,3 +63,40 @@ def test_deepxde_poisson_residual_respects_dataset_operator_sign():
     y = torch.cat((torch.zeros(3, 1), torch.full((3, 1), 0.5)), dim=1)
 
     assert torch.allclose(residual(x, y), torch.full((3, 1), -2.5))
+
+
+def test_deepxde_early_stopping_refreshes_loss_every_adam_iteration(monkeypatch):
+    registry = build_default_registry()
+    raw = registry.synthetic_raw("poisson", n=1, resolution=4, seed=4)
+    batch = registry.make_task(raw, "poisson", "sparse_forward", num_sensors=3, sensor_mode="fixed", seed=2)
+    model = PINNSparseBaseline().build(
+        {
+            "implementation_mode": "official_aligned",
+            "official_backend": "deepxde",
+            "hidden": 8,
+            "depth": 1,
+            "adam_iterations": 4,
+            "lbfgs_steps": 0,
+            "num_domain": 4,
+            "num_boundary": 4,
+            "early_stopping": True,
+            "early_stopping_patience": 2,
+            "min_epochs": 1,
+            "lr": 0.0,
+        },
+        build_data_spec(batch),
+    )
+    train_calls = []
+    original_train = model.deepxde.Model.train
+
+    def recording_train(instance, *args, **kwargs):
+        train_calls.append(dict(kwargs))
+        return original_train(instance, *args, **kwargs)
+
+    monkeypatch.setattr(model.deepxde.Model, "train", recording_train)
+    model.predict(batch)
+
+    assert train_calls[0]["display_every"] == 1
+    protocol = batch.metadata["pinn_sparse_training_protocol"]
+    assert protocol["early_stopping_loss_refresh_interval"] == 1
+    assert protocol["early_stopping_start_iteration"] == 1

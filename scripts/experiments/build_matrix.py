@@ -27,7 +27,6 @@ from baselines.experiment_matrix import (
     PER_INSTANCE_BASELINES,
     TIME_VARYING_SENSOR_BASELINES,
     capability_skip_row,
-    main_table_skip_reason,
     resolve_capability,
 )
 from scripts.experiments.provenance import (
@@ -62,6 +61,7 @@ GROUP_TO_TASK = {
     "sparse_solution_main_physics": "sparse_solution",
     "sparse_forward_main_amortized": "sparse_forward",
     "sparse_forward_main_physics": "sparse_forward",
+    "sparse_inverse_main_amortized": "sparse_inverse",
     "sparse_inverse_main": "sparse_inverse",
     "time_varying_da_main": "sparse_solution",
     "sensor_count_ablation": "sparse_solution",
@@ -83,6 +83,7 @@ DEFAULT_BASELINES_BY_GROUP = {
     "sparse_solution_main_physics": ["pinn_sparse", "pc_bnn", "pde_opt"],
     "sparse_forward_main_amortized": ["recfno", "senseiver", "voronoicnn"],
     "sparse_forward_main_physics": ["pinn_sparse", "pde_opt"],
+    "sparse_inverse_main_amortized": ["recfno", "senseiver", "voronoicnn"],
     "sparse_inverse_main": ["pinn_sparse", "pde_opt"],
     "time_varying_da_main": ["senseiver", "var4d", "vivid"],
     "sensor_count_ablation": ["recfno", "senseiver", "voronoicnn", "pinn_sparse", "pde_opt"],
@@ -231,12 +232,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-root", default=os.environ.get("OUT_ROOT", "outputs/baselines_large"))
     parser.add_argument("--matrix-name", default="")
     parser.add_argument("--include-skipped", action="store_true", help="Also include unsupported rows in the matrix with skip_reason set.")
-    parser.add_argument(
-        "--main-table-only",
-        action="store_true",
-        help="Legacy table-layout flag; use --comparison-track official_native for strict official verification.",
-    )
-    parser.add_argument("--paper-mode", action="store_true", help="Legacy alias for --main-table-only.")
     parser.add_argument("--comparison-track", choices=sorted(VALID_COMPARISON_TRACKS), default="")
     parser.add_argument(
         "--data-manifest",
@@ -278,7 +273,6 @@ def build_matrix(
     output_root: str | Path,
     matrix_name: str,
     include_skipped: bool = False,
-    main_table_only: bool | None = None,
     emit_progress: bool = False,
     data_manifest: str | Path | None = None,
     experiment_config_path: str | Path | None = None,
@@ -289,8 +283,6 @@ def build_matrix(
     experiment_kind = _experiment_kind(cfg)
     ablation_factor = _ablation_factor(cfg, experiment_kind)
     comparison_track = _comparison_track(cfg)
-    if main_table_only is None:
-        main_table_only = bool(cfg.get("main_table_only", False))
     allow_multi = _as_bool(cfg.get("allow_multi_factor_grid", False))
     task_groups = list(cfg.get("task_groups", []))
     if not task_groups:
@@ -405,7 +397,7 @@ def build_matrix(
                     reason = capability.reason if capability.support_status == "unsupported" else ""
                     if not reason and comparison_track == "unified_adapted" and not capability.unified_comparison_eligible:
                         reason = (
-                            f"{capability.reason}; this debug/supplement adaptation is not eligible for the unified "
+                            f"{capability.reason}; this debug adaptation is not eligible for the unified "
                             "comparison track"
                         )
                     if not reason and comparison_track == "official_native" and not capability.official_native_eligible:
@@ -413,17 +405,6 @@ def build_matrix(
                             f"{capability.baseline}/{capability.task_family} is not eligible for the strict "
                             "official-native verification track"
                         )
-                    # ``main_table_only`` is retained as a legacy layout flag,
-                    # not as a synonym for official reproduction.  Unified
-                    # comparison explicitly permits supported adaptations;
-                    # the official-native track has its own strict predicate.
-                    if (
-                        not reason
-                        and comparison_track == "official_native"
-                        and main_table_only
-                        and not capability.paper_table_eligible
-                    ):
-                        reason = main_table_skip_reason(capability)
                     if reason:
                         skipped_row = capability_skip_row(
                             capability,
@@ -1401,11 +1382,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.comparison_track:
         cfg["comparison_track"] = args.comparison_track
     matrix_name = args.matrix_name or str(cfg.get("name") or Path(args.config).stem)
-    main_table_only = bool(args.main_table_only or args.paper_mode or cfg.get("main_table_only", False))
     task_groups = list(cfg.get("task_groups", []))
     progress(
         f"[matrix start] config={args.config} matrix_name={matrix_name} output_root={args.output_root} "
-        f"experiment_kind={cfg.get('experiment_kind', '')} main_table_only={main_table_only} "
+        f"experiment_kind={cfg.get('experiment_kind', '')} "
         f"comparison_track={cfg.get('comparison_track', 'unified_adapted')} "
         f"task_groups={_short_list(task_groups)}"
     )
@@ -1414,7 +1394,6 @@ def main(argv: list[str] | None = None) -> None:
         args.output_root,
         matrix_name,
         include_skipped=args.include_skipped,
-        main_table_only=main_table_only,
         emit_progress=True,
         data_manifest=args.data_manifest or None,
         experiment_config_path=args.config,

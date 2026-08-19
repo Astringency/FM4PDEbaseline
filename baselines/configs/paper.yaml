@@ -48,6 +48,7 @@ method:
   early_stopping_patience: 10
   early_stopping_min_delta: 1.0e-4
   min_epochs: 5
+  min_optimization_steps: 5
   restore_best: true
   grad_clip_norm: null
   width: 48
@@ -72,9 +73,18 @@ method_by_baseline:
     layers: 4
     modes1: 20
     modes2: 20
+    optimizer: adamw
+    weight_decay: 0.0001
+    training_loss: h1
+    lr_scheduler: step
+    scheduler_step_size: 100
+    scheduler_gamma: 0.5
   deeponet:
     hidden: 256
     basis: 128
+    optimizer: adam
+    training_loss: mse
+    lr_scheduler: none
   ifno:
     implementation_mode: official_aligned
     official_backend: ifno
@@ -97,12 +107,22 @@ method_by_baseline:
     vae_resolution: 64
     cycle_weight: 0.0
     lr: 0.0005
-    grad_clip_norm: 10.0
+    vae_grad_clip_norm: 2.0
+    ifno_grad_clip_norm: 10.0
+    joint_grad_clip_norm: 10.0
+    vae_geometric_augmentation: true
     early_stopping_patience: 12
   recfno:
-    width: 64
+    width: 32
+    modes1: 18
+    modes2: 18
     input_representation: voronoi_mask_coords
+    optimizer: adam
+    training_loss: l1
+    lr_scheduler: exponential
+    scheduler_gamma: 0.98
   senseiver:
+    batch_pixels: 2048
     space_bands: 32
     enc_preproc_ch: 64
     num_latents: 4
@@ -114,10 +134,20 @@ method_by_baseline:
     dec_preproc_ch: null
     dec_num_latent_channels: 16
     dec_num_cross_attention_heads: 1
+    lr: 0.0001
+    optimizer: adam
+    training_loss: sum_mse
+    lr_scheduler: none
+    scheduler_monitor: train_loss
+    early_stopping_patience: 100
   voronoicnn:
     implementation_mode: official_architecture
     official_backend: voronoicnn
-    width: 64
+    width: 48
+    optimizer: adam
+    training_loss: mse
+    lr_scheduler: none
+    early_stopping_patience: 100
   pinn_sparse:
     normalize: false
     implementation_mode: official_aligned
@@ -186,4 +216,8 @@ method_by_pde:
   steady_heat_conduction:
     lambda_int: 0.01
 
-method_by_baseline_and_pde: {}
+method_by_baseline_and_pde:
+  ifno:
+    nsnonbounded:
+      ifno_grad_clip_norm: 2.0
+      joint_grad_clip_norm: 2.0

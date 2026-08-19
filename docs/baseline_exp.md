@@ -10,10 +10,13 @@
 4. 实验需要有早停逻辑，早停主要以损失下降平缓为判定依据，判定阈值为 1e-4
 5. 稀疏任务的观测点个数默认取 500 个，Burgers 有特殊情况，见下面的具体设置
 6. 需要确保各个任务不出现数据泄露，测试数据不可包含在训练数据当中
-7. 各个 Baseline 方法应当在 Offical 实现的基础上进行任务适配，关键的网络架构、训练环节等核心的、涉及方法论的部分不应当有修改，即务必确保方法实现的准确性，尽量保持官方的流程，但比较时要使用统一的架构
+7. 各个 Baseline 方法应当在 Official 实现的基础上进行任务适配，保留官方网络架构、损失、优化器、学习率调度和分阶段训练等核心流程；统一的是 FM4PDE 的任务输入、数据划分、预算记录、checkpoint 与评估接口，不以“统一训练器”为由改写方法核心
 8. 采样评估结果报告相对误差和 PDE 指标。主 PDE 指标统一指内部方程残差均方 `pde_residual`：静态 Forward 使用 $R(a_{true},u_{pred})$，静态 Inverse 使用 $R(a_{pred},u_{true})$，联合重建使用 $R(a_{pred},u_{pred})$。`bc_residual`、`ic_residual` 以及二者与内部残差的加权和 `physics_loss` 作为分项诊断，不代替主 PDE 指标。仅输出初末端点的 Navier-Stokes 任务报告 `endpoint_secant` 近似，并通过 `residual_mode` 与完整轨迹残差区分。
 9. 每个实验只跑一次即可，不需要像现在这样有三个 seed
 10. 评估得到的采样结果需要存储为可再次读入的文件，并绘制 pdf 图片
+11. 所有已完成实验进入同一份 `summary` 与 LaTeX 表；不再按 main/supplement 等展示层级过滤结果。实现来源、是否适配及 official-native 资格仍作为审计字段保留，不参与结果丢弃
+
+监督方法的训练适配保留以下官方设置：FNO 使用 NeuralOperator 的 H1 loss、AdamW、weight decay 与 StepLR；DeepONet 使用 DeepXDE 网络及 Adam/MSE；RecFNO 使用 L1、Adam 与 ExponentialLR；Senseiver 使用 sum-MSE、Adam、train-loss 早停（patience 100）；VoronoiCNN 使用七层 7x7 卷积栈、Adam/MSE、validation-loss 最佳 checkpoint 与 patience 100。iFNO 明确记录 iFNO 预训练、VAE 预训练、联合训练三个预算，Darcy 顺序为 iFNO→VAE→joint，Navier-Stokes 顺序为 VAE→iFNO→joint，并保留 VAE 四倍几何增强。
 
 ---
 

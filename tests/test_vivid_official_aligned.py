@@ -65,7 +65,7 @@ def test_vivid_official_aligned_time_varying_da_trains_and_predicts():
     assert paper_table_eligible(cap, backend_info=backend) is True
 
 
-def test_vivid_style_adapted_path_is_supplement_only():
+def test_vivid_style_adapted_path_is_not_official_native():
     batch = _time_varying_batch("shallow_water")
     cfg = {"implementation_mode": "adapted", "official_backend": "local", "train_inverse_operator": True, "epochs": 1}
     model = VIVIDBaseline().build(cfg, build_data_spec(batch))

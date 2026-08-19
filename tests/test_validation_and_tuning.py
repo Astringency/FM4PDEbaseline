@@ -89,7 +89,21 @@ def test_aggregator_writes_tuning_summary(tmp_path: Path):
     ]
     raw.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     out = tmp_path / "agg"
+    out.mkdir()
+    for name in (
+        "summary_main.csv",
+        "summary_main.json",
+        "summary_supplement.csv",
+        "summary_supplement.json",
+    ):
+        (out / name).write_text("stale", encoding="utf-8")
     aggregate_main([str(raw), "--output-dir", str(out)])
     tuning = json.loads((out / "tuning_summary.json").read_text(encoding="utf-8"))
     assert tuning[0]["config_hash"] == "b"
     assert tuning[0]["selected_config_path"] == "b.json"
+    assert not (out / "summary_main.csv").exists()
+    assert not (out / "summary_main.json").exists()
+    assert not (out / "summary_supplement.csv").exists()
+    assert not (out / "summary_supplement.json").exists()
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary[0]["run_count"] == 2

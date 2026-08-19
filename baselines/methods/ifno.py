@@ -231,6 +231,7 @@ class IFNOBaseline(BaselineModel):
             epoch_start = time.perf_counter()
             total = 0.0
             count = 0
+            train_batches = 0
             train_samples = 0
             self.train()
             for step, batch in enumerate(train_loader):
@@ -247,8 +248,10 @@ class IFNOBaseline(BaselineModel):
                 if grad_clip_norm is not None:
                     torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip_norm)
                 opt.step()
-                total += float(loss.detach().cpu())
-                count += 1
+                batch_samples = int(batch.input_fields.shape[0])
+                total += float(loss.detach().cpu()) * batch_samples
+                count += batch_samples
+                train_batches += 1
                 if log_interval > 0 and (step + 1) % log_interval == 0:
                     running = total / max(count, 1)
                     print(
@@ -264,10 +267,9 @@ class IFNOBaseline(BaselineModel):
             history["train_loss"].append(train_loss)
             if val_loader is None and (best_train is None or train_loss < best_train):
                 best_train = train_loss
-                history["best_epoch"] = epoch + 1
-                best_state = snapshot_state_dict(self)
             val_loss = None
             val_count = 0
+            val_batches = 0
             if val_loader is not None:
                 self.eval()
                 val_total = 0.0
@@ -280,8 +282,10 @@ class IFNOBaseline(BaselineModel):
                             batch = normalize_batch_input_target(batch, self.normalization_stats)
                         loss = _ifno_training_loss(self, batch, cycle_weight)
                         _raise_if_nonfinite_loss(loss, self, epoch + 1, step + 1, "val_loss")
-                        val_total += float(loss.detach().cpu())
-                        val_count += 1
+                        batch_samples = int(batch.input_fields.shape[0])
+                        val_total += float(loss.detach().cpu()) * batch_samples
+                        val_count += batch_samples
+                        val_batches += 1
                 val_loss = val_total / max(val_count, 1)
                 _raise_if_nonfinite_scalar(val_loss, self, epoch + 1, val_count, "val_loss")
                 history["val_loss"].append(val_loss)
@@ -289,7 +293,6 @@ class IFNOBaseline(BaselineModel):
                     best_val = val_loss
                     history["best_epoch"] = epoch + 1
                     history["best_val_loss"] = val_loss
-                    best_state = snapshot_state_dict(self)
             monitor_loss = train_loss if monitor_name == "train_loss" else val_loss
             if monitor_loss is None:
                 monitor_name = "train_loss"
@@ -299,6 +302,8 @@ class IFNOBaseline(BaselineModel):
             if improved:
                 best_monitor = float(monitor_loss)
                 history["best_monitor_loss"] = best_monitor
+                history["best_epoch"] = epoch + 1
+                best_state = snapshot_state_dict(self)
                 no_improve_epochs = 0
             else:
                 no_improve_epochs += 1
@@ -332,7 +337,7 @@ class IFNOBaseline(BaselineModel):
                 f"best_val_loss={_fmt_optional(history['best_val_loss'])} best_epoch={history['best_epoch']} "
                 f"monitor={monitor_name} monitor_loss={float(monitor_loss):.6g} "
                 f"no_improve_epochs={no_improve_epochs} early_stopping_patience={early_stopping_patience} "
-                f"epoch_time_sec={epoch_time:.3f} train_steps={count} val_steps={val_count} "
+                f"epoch_time_sec={epoch_time:.3f} train_steps={train_batches} val_steps={val_batches} "
                 f"samples_per_sec={samples_per_sec:.3f} lr={opt.param_groups[0]['lr']:.3e} "
                 f"device={device}{_cuda_mem_text(device)}",
                 file=sys.stderr,
@@ -362,8 +367,15 @@ class IFNOBaseline(BaselineModel):
             "vae_pretrain": max(int(self.config.get("vae_pretrain_epochs", self.config.get("epochs_vae", 1))), 0),
             "joint_train": max(int(self.config.get("joint_epochs", self.config.get("epochs", 1))), 0),
         }
+        pde_name = str(self.data_spec.get("pde", "")).lower()
+        # The vendored NS script runs VAE -> iFNO -> joint in one pretrain()
+        # function.  The two Darcy scripts explicitly call iFNO -> VAE -> joint.
+        stage_order = _ifno_official_stage_order(pde_name)
         max_steps = self.config.get("max_steps")
-        grad_clip = float(self.config.get("grad_clip_norm", 10.0) or 10.0)
+        max_val_steps = self.config.get("max_val_steps")
+        ifno_grad_clip = float(self.config.get("ifno_grad_clip_norm", 2.0 if pde_name == "nsnonbounded" else 10.0))
+        vae_grad_clip = float(self.config.get("vae_grad_clip_norm", 2.0))
+        joint_grad_clip = float(self.config.get("joint_grad_clip_norm", 2.0 if pde_name == "nsnonbounded" else 10.0))
         reconstruction_weight = float(self.config.get("reconstruction_weight", 1.0))
         kl_weight = float(self.config.get("kl_weight", self.config.get("kl", 0.01)))
         pretrain_optimizer = torch.optim.AdamW(
@@ -371,6 +383,11 @@ class IFNOBaseline(BaselineModel):
         )
         vae_optimizer = torch.optim.AdamW(
             self.parameters(), lr=float(self.config.get("lr_vae", 1e-3))
+        )
+        vae_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            vae_optimizer,
+            factor=float(self.config.get("vae_scheduler_factor", 0.9)),
+            patience=int(self.config.get("vae_scheduler_patience", 10)),
         )
         forward_optimizer = torch.optim.AdamW(
             self.parameters(), lr=float(self.config.get("lr_forward", 5e-6))
@@ -381,6 +398,7 @@ class IFNOBaseline(BaselineModel):
         history = {
             "training_protocol": "official_three_stage",
             "stage_epochs": stage_epochs,
+            "stage_order": stage_order,
             "stage_losses": {name: [] for name in stage_epochs},
             "train_loss": [],
             "val_loss": [],
@@ -394,126 +412,125 @@ class IFNOBaseline(BaselineModel):
             "normalization_stats": self.normalization_stats.json_summary() if self.normalization_stats is not None else None,
         }
         completed_epochs = 0
-
-        for epoch in range(stage_epochs["ifno_pretrain"]):
-            self.train()
-            total = count = 0
-            for step, raw_batch in enumerate(train_loader):
-                if max_steps is not None and step >= int(max_steps):
-                    break
-                batch = self._prepare_ifno_batch(raw_batch, device)
-                x, y = _physical_pair(batch)
-                pretrain_optimizer.zero_grad(set_to_none=True)
-                y_pred, recon_x = self.operator.forward_map(x)
-                forward_loss = _relative_l2_loss(
-                    _ifno_physical_scale(self, batch, y_pred, "y"),
-                    _ifno_physical_scale(self, batch, y, "y"),
-                ) + reconstruction_weight * recon_x
-                forward_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
-                pretrain_optimizer.step()
-                pretrain_optimizer.zero_grad(set_to_none=True)
-                x_pred, recon_y = self.operator.inverse_map(y)
-                backward_loss = _relative_l2_loss(
-                    _ifno_physical_scale(self, batch, x_pred, "x"),
-                    _ifno_physical_scale(self, batch, x, "x"),
-                ) + reconstruction_weight * recon_y
-                backward_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
-                pretrain_optimizer.step()
-                total += float((forward_loss + backward_loss).detach().cpu())
-                count += 1
-            history["stage_losses"]["ifno_pretrain"].append(total / max(count, 1))
-            completed_epochs += 1
-            history["completed_stage"] = "ifno_pretrain"
-            _write_incremental_history(self.config, history, completed_epochs)
-
-        for epoch in range(stage_epochs["vae_pretrain"]):
-            self.train()
-            total = count = 0
-            for step, raw_batch in enumerate(train_loader):
-                if max_steps is not None and step >= int(max_steps):
-                    break
-                batch = self._prepare_ifno_batch(raw_batch, device)
-                x, _ = _physical_pair(batch)
-                vae_optimizer.zero_grad(set_to_none=True)
-                reconstructed, mu, log_var = self.operator.vae_reconstruct(x, sample=True)
-                loss = _relative_l2_loss(
-                    _ifno_physical_scale(self, batch, reconstructed, "x"),
-                    _ifno_physical_scale(self, batch, x, "x"),
-                ) + kl_weight * _vae_kl(mu, log_var)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
-                vae_optimizer.step()
-                total += float(loss.detach().cpu())
-                count += 1
-            history["stage_losses"]["vae_pretrain"].append(total / max(count, 1))
-            completed_epochs += 1
-            history["completed_stage"] = "vae_pretrain"
-            _write_incremental_history(self.config, history, completed_epochs)
-
         best_monitor = None
         best_state = None
         no_improve = 0
         patience = max(int(self.config.get("early_stopping_patience", 20)), 1)
         min_delta = float(self.config.get("early_stopping_min_delta", 1e-4))
         min_epochs = max(int(self.config.get("min_epochs", 1)), 1)
-        for epoch in range(stage_epochs["joint_train"]):
-            self.train()
-            total = count = 0
-            for step, raw_batch in enumerate(train_loader):
-                if max_steps is not None and step >= int(max_steps):
-                    break
-                batch = self._prepare_ifno_batch(raw_batch, device)
-                x, y = _physical_pair(batch)
-                forward_optimizer.zero_grad(set_to_none=True)
-                y_pred, _ = self.operator.forward_map(x)
-                forward_loss = _relative_l2_loss(
-                    _ifno_physical_scale(self, batch, y_pred, "y"),
-                    _ifno_physical_scale(self, batch, y, "y"),
+
+        for stage in stage_order:
+            for epoch in range(stage_epochs[stage]):
+                self.train()
+                total = 0.0
+                sample_count = 0
+                for step, raw_batch in enumerate(train_loader):
+                    if max_steps is not None and step >= int(max_steps):
+                        break
+                    batch = self._prepare_ifno_batch(raw_batch, device)
+                    x, y = _physical_pair(batch)
+                    batch_size = int(x.shape[0])
+                    if stage == "ifno_pretrain":
+                        pretrain_optimizer.zero_grad(set_to_none=True)
+                        y_pred, recon_x = self.operator.forward_map(x)
+                        forward_loss = _relative_l2_loss(
+                            _ifno_physical_scale(self, batch, y_pred, "y"),
+                            _ifno_physical_scale(self, batch, y, "y"),
+                        ) + reconstruction_weight * recon_x
+                        forward_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), ifno_grad_clip)
+                        pretrain_optimizer.step()
+                        pretrain_optimizer.zero_grad(set_to_none=True)
+                        x_pred, recon_y = self.operator.inverse_map(y)
+                        backward_loss = _relative_l2_loss(
+                            _ifno_physical_scale(self, batch, x_pred, "x"),
+                            _ifno_physical_scale(self, batch, x, "x"),
+                        ) + reconstruction_weight * recon_y
+                        backward_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), ifno_grad_clip)
+                        pretrain_optimizer.step()
+                        loss = forward_loss + backward_loss
+                    elif stage == "vae_pretrain":
+                        x = _ifno_vae_augmentation(
+                            x,
+                            enabled=bool(self.config.get("vae_geometric_augmentation", True)),
+                        )
+                        batch_size = int(x.shape[0])
+                        vae_optimizer.zero_grad(set_to_none=True)
+                        reconstructed, mu, log_var = self.operator.vae_reconstruct(x, sample=True)
+                        loss = _relative_l2_loss(reconstructed, x) + kl_weight * _vae_kl(mu, log_var)
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), vae_grad_clip)
+                        vae_optimizer.step()
+                    else:
+                        forward_optimizer.zero_grad(set_to_none=True)
+                        y_pred, _ = self.operator.forward_map(x)
+                        forward_loss = _relative_l2_loss(
+                            _ifno_physical_scale(self, batch, y_pred, "y"),
+                            _ifno_physical_scale(self, batch, y, "y"),
+                        )
+                        forward_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), joint_grad_clip)
+                        forward_optimizer.step()
+                        backward_optimizer.zero_grad(set_to_none=True)
+                        raw_inverse, _ = self.operator.inverse_map(y)
+                        filtered_inverse, mu, log_var = self.operator.vae_reconstruct(raw_inverse, sample=True)
+                        backward_loss = _relative_l2_loss(
+                            _ifno_physical_scale(self, batch, filtered_inverse, "x"),
+                            _ifno_physical_scale(self, batch, x, "x"),
+                        ) + kl_weight * _vae_kl(mu, log_var)
+                        backward_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), joint_grad_clip)
+                        backward_optimizer.step()
+                        loss = forward_loss + backward_loss
+                    total += float(loss.detach().cpu())
+                    sample_count += batch_size
+                train_loss = total / max(sample_count, 1)
+                history["stage_losses"][stage].append(train_loss)
+                completed_epochs += 1
+                history["completed_stage"] = stage
+                if stage == "vae_pretrain":
+                    vae_scheduler.step(train_loss)
+                if stage != "joint_train":
+                    _write_incremental_history(self.config, history, completed_epochs)
+                    continue
+
+                val_loss = (
+                    self._official_ifno_eval_loss(val_loader, device, max_val_steps)
+                    if val_loader is not None
+                    else None
                 )
-                forward_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
-                forward_optimizer.step()
-                backward_optimizer.zero_grad(set_to_none=True)
-                raw_inverse, _ = self.operator.inverse_map(y)
-                filtered_inverse, mu, log_var = self.operator.vae_reconstruct(raw_inverse, sample=True)
-                backward_loss = _relative_l2_loss(
-                    _ifno_physical_scale(self, batch, filtered_inverse, "x"),
-                    _ifno_physical_scale(self, batch, x, "x"),
-                ) + kl_weight * _vae_kl(mu, log_var)
-                backward_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
-                backward_optimizer.step()
-                total += float((forward_loss + backward_loss).detach().cpu())
-                count += 1
-            train_loss = total / max(count, 1)
-            val_loss = self._official_ifno_eval_loss(val_loader, device, max_steps) if val_loader is not None else None
-            monitor = train_loss if val_loss is None else val_loss
-            history["stage_losses"]["joint_train"].append(train_loss)
-            history["train_loss"].append(train_loss)
-            if val_loss is not None:
-                history["val_loss"].append(val_loss)
-            history["lr_history"].append(float(forward_optimizer.param_groups[0]["lr"]))
-            completed_epochs += 1
-            history["completed_stage"] = "joint_train"
-            if best_monitor is None or monitor < best_monitor - min_delta:
-                best_monitor = monitor
-                best_state = snapshot_state_dict(self)
-                history["best_epoch"] = epoch + 1
-                history["best_val_loss"] = val_loss
-                no_improve = 0
-            else:
-                no_improve += 1
-            if bool(self.config.get("early_stopping", False)) and epoch + 1 >= min_epochs and no_improve >= patience:
-                history["early_stopped"] = True
-                history["stop_epoch"] = epoch + 1
-                history["stop_reason"] = f"joint loss plateau for {no_improve} epochs"
+                monitor = train_loss if val_loss is None else val_loss
+                history["train_loss"].append(train_loss)
+                if val_loss is not None:
+                    history["val_loss"].append(val_loss)
+                history["lr_history"].append(float(forward_optimizer.param_groups[0]["lr"]))
+                if best_monitor is None or monitor < best_monitor - min_delta:
+                    best_monitor = monitor
+                    best_state = snapshot_state_dict(self)
+                    history["best_epoch"] = epoch + 1
+                    history["best_val_loss"] = val_loss
+                    no_improve = 0
+                else:
+                    no_improve += 1
+                should_stop = (
+                    bool(self.config.get("early_stopping", False))
+                    and epoch + 1 >= min_epochs
+                    and no_improve >= patience
+                )
+                if should_stop:
+                    history["early_stopped"] = True
+                    history["stop_epoch"] = epoch + 1
+                    history["stop_reason"] = f"joint loss plateau for {no_improve} epochs"
                 _write_incremental_history(self.config, history, completed_epochs)
-                break
-            _write_incremental_history(self.config, history, completed_epochs)
+                if should_stop:
+                    break
         if history["stop_epoch"] is None:
             history["stop_epoch"] = len(history["train_loss"])
+        history["completed_epochs"] = completed_epochs
+        history["completed_stage_epochs"] = {
+            stage: len(history["stage_losses"][stage]) for stage in stage_order
+        }
         if best_state is not None and bool(self.config.get("restore_best", True)):
             restore_state_dict(self, best_state)
         return history
@@ -548,7 +565,7 @@ class IFNOBaseline(BaselineModel):
                         )
                     ).cpu()
                 )
-                count += 1
+                count += int(x.shape[0])
         return total / max(count, 1)
 
     def predict(self, batch: PDEBatch):
@@ -615,6 +632,28 @@ def _relative_l2_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.T
     difference = torch.linalg.vector_norm((prediction - target).reshape(prediction.shape[0], -1), dim=1)
     denominator = torch.linalg.vector_norm(target.reshape(target.shape[0], -1), dim=1).clamp_min(1e-12)
     return (difference / denominator).sum()
+
+
+def _ifno_official_stage_order(pde_name: str) -> list[str]:
+    if str(pde_name).lower() == "nsnonbounded":
+        return ["vae_pretrain", "ifno_pretrain", "joint_train"]
+    return ["ifno_pretrain", "vae_pretrain", "joint_train"]
+
+
+def _ifno_vae_augmentation(field: torch.Tensor, *, enabled: bool) -> torch.Tensor:
+    """Port the four-way square-field augmentation used by official iFNO."""
+    if not enabled:
+        return field
+    if field.ndim != 4 or field.shape[-2] != field.shape[-1]:
+        raise ValueError(
+            "official iFNO VAE augmentation requires square BCHW fields, "
+            f"got {tuple(field.shape)}"
+        )
+    transposed = field.transpose(-2, -1)
+    return torch.cat(
+        [field, transposed, field.flip(-1), transposed.flip(-1)],
+        dim=0,
+    )
 
 
 def _ifno_physical_scale(

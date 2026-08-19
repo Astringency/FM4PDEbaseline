@@ -135,7 +135,7 @@ OFFICIAL_CLASSIFICATIONS = {
         "exact_end_to_end_official": False,
         "finding": (
             "仅 shallow-water 三通道 sparse reconstruction 与论文假设匹配；标量 PDE 的通用 "
-            "SVGD 版本只允许 debug/supplement，且 v2 表未运行该方法。"
+            "SVGD 版本只允许作为独立 debug 方法，且 v2 表未运行该方法。"
         ),
     },
     "var4d": {

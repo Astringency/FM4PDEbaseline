@@ -21,7 +21,8 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
     assert summary["by_task_group"] == {
         "full_forward_main": 12,
         "full_inverse_main": 4,
-        "sparse_inverse_main": 21,
+        "sparse_inverse_main_amortized": 12,
+        "sparse_inverse_main": 9,
         "sparse_solution_main_amortized": 15,
         "sparse_solution_burger_time_slices": 3,
         "sparse_forward_main_amortized": 12,
@@ -35,26 +36,24 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
     assert {row["pin_memory"] for row in rows} == {True}
     assert {row["persistent_workers"] for row in rows} == {True}
     assert {row["prefetch_factor"] for row in rows} == {2}
+    assert {row["epochs"] for row in rows if row["baseline"] == "ifno"} == {500}
     assert set(summary["by_task_group"]) == {
         "full_forward_main",
         "full_inverse_main",
+        "sparse_inverse_main_amortized",
         "sparse_solution_main_amortized",
         "sparse_solution_burger_time_slices",
         "sparse_forward_main_amortized",
         "sparse_forward_main_physics",
         "sparse_inverse_main",
     }
-    assert len(skipped) == 6
+    assert skipped == []
     inverse_rows = [row for row in rows if row["task_group"] == "full_inverse_main"]
     assert {row["baseline"] for row in inverse_rows} == {"ifno"}
     assert {row["capability_status"] for row in inverse_rows} == {"adapted"}
-    unsupported_skips = [row for row in skipped if row["task_group"] == "sparse_inverse_main"]
-    assert all(row["baseline"] in {"pinn_sparse", "pde_opt", "pc_bnn"} for row in unsupported_skips)
-    assert all(
-        "time-dependent sparse inverse" in row["reason"] or "Burger sparse_inverse is excluded" in row["reason"]
-        or "enabled only for static PDEs" in row["reason"]
-        or "not eligible for the unified comparison track" in row["reason"]
-        for row in unsupported_skips
+    assert not any(
+        row["pde"] == "nsnonbounded" and row["baseline"] in {"pinn_sparse", "pde_opt", "pc_bnn"}
+        for row in rows
     )
 
 
@@ -63,11 +62,14 @@ def test_main_results_sparse_inverse_uses_all_requested_baselines(tmp_path: Path
         monkeypatch.delenv(key, raising=False)
     cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
     rows, _skipped, _summary = build_matrix(cfg, tmp_path / "main_results", "main_results")
-    sparse_inverse = [row for row in rows if row["task_group"] == "sparse_inverse_main"]
+    sparse_inverse = [row for row in rows if row["task"] == "sparse_inverse"]
     assert {row["baseline"] for row in sparse_inverse} == {
         "recfno", "senseiver", "voronoicnn", "pinn_sparse", "pde_opt", "pc_bnn"
     }
     assert {row["pde"] for row in sparse_inverse} == {"poisson", "helmholtz", "darcy", "nsnonbounded"}
+    assert {
+        row["baseline"] for row in sparse_inverse if row["pde"] == "nsnonbounded"
+    } == {"recfno", "senseiver", "voronoicnn"}
 
 
 def test_main_results_includes_burger_complete_time_slice_mode(tmp_path: Path, monkeypatch):
@@ -91,8 +93,7 @@ def test_main_results_includes_disclosed_scalar_pcbnn_adaptation(tmp_path: Path,
     cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
     rows, skipped, _summary = build_matrix(cfg, tmp_path / "main_results", "main_results")
     pcbnn_rows = [row for row in rows if row["baseline"] == "pc_bnn"]
-    pcbnn_skips = [row for row in skipped if row["baseline"] == "pc_bnn"]
     assert {row["pde"] for row in pcbnn_rows} == {"darcy", "poisson", "helmholtz"}
     assert {row["task"] for row in pcbnn_rows} == {"sparse_forward", "sparse_inverse"}
     assert all(row["implementation_required"] == "adapted_allowed" for row in pcbnn_rows)
-    assert {row["pde"] for row in pcbnn_skips} == {"nsnonbounded"}
+    assert not [row for row in skipped if row["baseline"] == "pc_bnn"]

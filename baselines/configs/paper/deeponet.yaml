@@ -6,3 +6,6 @@ method:
   lr: 0.001
   hidden: 256
   basis: 128
+  optimizer: adam
+  training_loss: mse
+  lr_scheduler: none

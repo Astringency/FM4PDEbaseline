@@ -43,19 +43,22 @@ class FNOBaseline(BaselineModel):
                     n_layers=layers,
                     positional_embedding="grid",
                 )
+                from neuralop.losses import H1Loss
+
+                self.official_training_loss = H1Loss(d=2, reduction="mean")
                 self.set_backend(
                     "neuraloperator",
                     "neuraloperator",
                     fallback_used=False,
                     implementation_mode_effective="adapted",
-                    implementation_source="neuraloperator_2_component_unified_training",
+                    implementation_source="neuraloperator_fno_h1_adamw_step_training_adapter",
                     official_import_success=True,
-                    official_alignment_level="component",
+                    official_alignment_level="algorithm_training",
                     official_alignment_notes=(
-                        "Uses the vendored NeuralOperator 2.0 FNO network component with FM4PDE's unified "
-                        "normalization, pointwise MSE, optimizer, scheduler, early stopping, and data protocol."
+                        "Uses the vendored NeuralOperator FNO and H1Loss directly, with its AdamW, weight decay, "
+                        "and StepLR training recipe adapted only to consume PDEBatch loaders and checkpoints."
                     ),
-                    adapter_status="official_component_unified_training_adapter",
+                    adapter_status="official_training_flow_adapter",
                     **official_source_info("neuraloperator"),
                 )
                 return self
@@ -81,7 +84,7 @@ class FNOBaseline(BaselineModel):
                     "recfno_component",
                     "recfno_component",
                     fallback_used=True,
-                    warning="RecFNO VoronoiFNO2d is an adapted component for FNO and is supplement-only",
+                    warning="RecFNO VoronoiFNO2d is an adapted component and is not vanilla FNO",
                     implementation_mode_effective="adapted",
                     implementation_source="recfno_voronoifno_component_adapted_for_fno",
                     official_import_success=True,
@@ -91,7 +94,7 @@ class FNOBaseline(BaselineModel):
                         "Uses the RecFNO VoronoiFNO2d component as an adapted FNO-style network; "
                         "this is not vanilla FNO official code and is not paper main-table eligible."
                     ),
-                    adapter_status="adapted_recfno_component_supplement_only",
+                    adapter_status="adapted_recfno_component",
                     **official_source_info("recfno"),
                 )
                 return self
