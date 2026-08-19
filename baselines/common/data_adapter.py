@@ -1647,7 +1647,16 @@ def _load_static_mat(
     if metadata:
         meta.update(metadata)
     if pde in {"poisson", "helmholtz"}:
-        meta.update(_infer_elliptic_operator_convention(full_tensor, pde, float(meta.get("k", 1.0))))
+        # FM4PDE defines L(u)=f for both static elliptic datasets.  The
+        # equation convention is fixed protocol metadata and must never be
+        # estimated from source/solution labels in an evaluation split.
+        meta.update(
+            {
+                "elliptic_operator_sign": 1.0,
+                "elliptic_operator_convention": "L(u)=f",
+                "elliptic_operator_convention_source": "fm4pde_generator_contract",
+            }
+        )
     meta.update({"split": split})
     raw = {
         "full_tensor": full_tensor,
@@ -1661,37 +1670,6 @@ def _load_static_mat(
         "global_sample_ids": global_ids,
     }
     return _finalize_loaded_raw(raw, max_samples, strict_size)
-
-
-def _infer_elliptic_operator_convention(full: torch.Tensor, pde: str, k: float) -> dict[str, Any]:
-    """Infer whether a stored elliptic dataset uses L(u)=f or -L(u)=f.
-
-    Both conventions exist in historical FM4PDE-compatible files.  The
-    inference uses exact source/solution pairs while loading the dataset and
-    records the result so predictions never determine the equation sign.
-    """
-    sample = full[: min(int(full.shape[0]), 8)].double()
-    source, solution = sample[:, :1], sample[:, 1:2]
-    h = 1.0 / max(int(solution.shape[-1]) - 1, 1)
-    lap = (
-        solution[..., 1:-1, :-2]
-        + solution[..., 1:-1, 2:]
-        + solution[..., :-2, 1:-1]
-        + solution[..., 2:, 1:-1]
-        - 4.0 * solution[..., 1:-1, 1:-1]
-    ) / (h**2)
-    operator = lap
-    if pde == "helmholtz":
-        operator = operator + (k**2) * solution[..., 1:-1, 1:-1]
-    source_i = source[..., 1:-1, 1:-1]
-    positive_mse = float((operator - source_i).square().mean())
-    negative_mse = float((-operator - source_i).square().mean())
-    sign = 1.0 if positive_mse <= negative_mse else -1.0
-    return {
-        "elliptic_operator_sign": sign,
-        "elliptic_operator_convention": "L(u)=f" if sign > 0 else "-L(u)=f",
-        "elliptic_operator_inference_mse": {"positive": positive_mse, "negative": negative_mse},
-    }
 
 
 def _static_patterns(pde: str, split: str) -> list[str]:

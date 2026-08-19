@@ -6,7 +6,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import torch
 import torch.nn.functional as F
@@ -86,11 +86,19 @@ def ic_residual_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None 
         return _nan(pred)
 
 
-def physics_loss_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None = None) -> dict[str, torch.Tensor | str]:
+def physics_loss_metric(
+    pred: torch.Tensor,
+    pde_name: str,
+    metadata: dict | None = None,
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
     metadata = metadata or {}
     try:
         losses = physics_losses(pred, pde_name, metadata)
     except NotImplementedError:
+        if strict:
+            raise
         warnings.warn(f"No structured physics loss implemented for '{pde_name}'. Returning nan.", NotImplementedWarning, stacklevel=2)
         nan = _nan(pred)
         return {
@@ -100,23 +108,50 @@ def physics_loss_metric(pred: torch.Tensor, pde_name: str, metadata: dict | None
             "total": nan,
             "mode": "not_implemented",
             "bc_status": "not_implemented",
+            "residual": None,
+            "resolved_residual_mode": "not_implemented",
         }
     except Exception as exc:
+        if strict:
+            raise
         warnings.warn(f"Could not compute {pde_name} structured physics loss: {exc}", RuntimeWarning, stacklevel=2)
         nan = _nan(pred)
-        return {"interior": nan, "bc": nan, "ic": nan, "total": nan, "mode": "error", "bc_status": "error"}
-    return {
+        return {
+            "interior": nan,
+            "bc": nan,
+            "ic": nan,
+            "total": nan,
+            "mode": "error",
+            "bc_status": "error",
+            "residual": None,
+            "resolved_residual_mode": "error",
+        }
+    result = {
         "interior": losses["interior"],
         "bc": losses["bc"],
         "ic": losses["ic"],
         "total": losses["total"],
         "mode": losses["mode"],
         "bc_status": losses["bc_status"],
+        "residual": losses.get("residual"),
+        "resolved_residual_mode": losses.get("resolved_residual_mode", losses["mode"]),
     }
+    if strict:
+        for name in ("interior", "bc", "ic", "total", "residual"):
+            value = result.get(name)
+            if isinstance(value, torch.Tensor) and not torch.isfinite(value).all().item():
+                raise FloatingPointError(f"Non-finite {pde_name} physics value: {name}")
+    return result
 
 
-def physics_residual_metrics(pred: torch.Tensor, pde_name: str, metadata: dict | None = None) -> dict[str, torch.Tensor | str]:
-    return physics_loss_metric(pred, pde_name, metadata)
+def physics_residual_metrics(
+    pred: torch.Tensor,
+    pde_name: str,
+    metadata: dict | None = None,
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
+    return physics_loss_metric(pred, pde_name, metadata, strict=strict)
 
 
 @contextmanager

@@ -52,7 +52,7 @@ class _SparseTaskAdapter:
         meta["task"] = "sparse_inverse"
         meta["solution_fields"] = solution
         meta["input_fields"] = solution
-        return physics_loss_metric(unknown, batch.pde_name, meta)
+        return physics_loss_metric(unknown, batch.pde_name, meta, strict=True)
 
 
 class _SparseForwardAdapter(_SparseTaskAdapter):
@@ -151,7 +151,7 @@ class PCBNNBaseline(BaselineModel):
                     obs = observation_loss_from_batch(pred, batch, item=item)
                     meta = _single_meta(batch, item)
                     meta.update(_physics_weight_metadata(self.config))
-                    physics_losses = physics_loss_metric(pred, batch.pde_name, meta)
+                    physics_losses = physics_loss_metric(pred, batch.pde_name, meta, strict=True)
                     boundary_count = _boundary_observation_count(batch.pde_name, pred)
                     loss = _negative_log_posterior(
                         particle,
@@ -367,7 +367,11 @@ def _negative_log_posterior(
     data_count = observation_count + boundary_count
     log_beta = particle.log_beta
     beta = log_beta.exp()
-    boundary = boundary_mse if torch.isfinite(boundary_mse) else torch.zeros_like(observation_mse)
+    if not torch.isfinite(boundary_mse).all().item():
+        raise FloatingPointError("PC-BNN received a non-finite boundary physics loss")
+    if not torch.isfinite(physics_loss).all().item():
+        raise FloatingPointError("PC-BNN received a non-finite interior physics loss")
+    boundary = boundary_mse
     data_squared_error = float(observation_count) * observation_mse + float(boundary_count) * boundary
     observation_nll = 0.5 * beta * data_squared_error - 0.5 * float(data_count) * log_beta
 
@@ -381,7 +385,7 @@ def _negative_log_posterior(
     beta_shape = float(config.get("beta_prior_shape", 2.0))
     beta_rate = float(config.get("beta_prior_rate", 1e-6))
     beta_prior = beta_rate * beta - (beta_shape - 1.0) * log_beta
-    physics = physics_loss if torch.isfinite(physics_loss) else torch.zeros_like(observation_nll)
+    physics = physics_loss
     equation_variance = max(float(config.get("equation_variance", 1e-4)), 1e-12)
     physics_nll = 0.5 * float(max(int(physics_count), 1)) / equation_variance * physics
     return observation_nll + physics_nll + weight_prior + beta_prior

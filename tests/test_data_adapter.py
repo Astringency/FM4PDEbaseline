@@ -25,8 +25,15 @@ CURRENT_PDES = [
 ]
 
 
-@pytest.mark.parametrize("operator_sign", [1.0, -1.0])
-def test_poisson_loader_infers_equation_sign_from_exact_dataset_pairs(tmp_path, operator_sign):
+@pytest.mark.parametrize("stored_operator_sign", [1.0, -1.0])
+@pytest.mark.parametrize(
+    ("split", "filename"),
+    [
+        ("train", "poisson_10000-128-128_1.mat"),
+        ("test", "poisson_test_10000-128-128.mat"),
+    ],
+)
+def test_poisson_loader_uses_fixed_fm4pde_equation_convention(tmp_path, stored_operator_sign, split, filename):
     pde_dir = tmp_path / "poisson"
     pde_dir.mkdir()
     n = 16
@@ -42,13 +49,15 @@ def test_poisson_loader_infers_equation_sign_from_exact_dataset_pairs(tmp_path, 
         + solution[2:, 1:-1]
         - 4.0 * solution[1:-1, 1:-1]
     ) / h**2
-    source = operator_sign * lap
+    source = stored_operator_sign * lap
     scipy.io.savemat(
-        pde_dir / "poisson_10000-128-128_1.mat",
+        pde_dir / filename,
         {"f_data": source[None].astype("float32"), "phi_data": solution[None].astype("float32")},
     )
-    raw = build_default_registry().load_raw("poisson", tmp_path, split="train", max_samples=1)
-    assert raw["metadata"]["elliptic_operator_sign"] == operator_sign
+    raw = build_default_registry().load_raw("poisson", tmp_path, split=split, max_samples=1)
+    assert raw["metadata"]["elliptic_operator_sign"] == 1.0
+    assert raw["metadata"]["elliptic_operator_convention_source"] == "fm4pde_generator_contract"
+    assert "elliptic_operator_inference_mse" not in raw["metadata"]
 
 
 @pytest.mark.parametrize("pde", CURRENT_PDES)

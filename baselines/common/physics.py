@@ -456,13 +456,15 @@ def interior_slice_2d(x: torch.Tensor) -> torch.Tensor:
     return x[..., 1:-1, 1:-1]
 
 
-def boundary_values_2d(field: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    return field[..., 0, :], field[..., -1, :], field[..., :, 0], field[..., :, -1]
-
-
 def dirichlet_zero_bc_loss(field: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
-    top, bottom, left, right = boundary_values_2d(field)
-    return _mean_square(torch.cat([v.reshape(-1) for v in (top, bottom, left, right)]), reduction)
+    if field.shape[-2] == 0 or field.shape[-1] == 0:
+        return _zero_scalar(field)
+    boundary_mask = torch.zeros(field.shape[-2:], dtype=torch.bool, device=field.device)
+    boundary_mask[0, :] = True
+    boundary_mask[-1, :] = True
+    boundary_mask[:, 0] = True
+    boundary_mask[:, -1] = True
+    return _mean_square(field[..., boundary_mask], reduction)
 
 
 def _cell_centered_dirichlet_zero_bc_loss(field: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
@@ -644,8 +646,15 @@ def _navier_stokes_losses(pred: torch.Tensor, metadata: dict, reduction: str) ->
     trajectory, mode = _apply_requested_temporal_mode(trajectory, metadata)
     residual = navier_stokes_vorticity_residual(trajectory, metadata)
     bc = periodic_bc_loss(trajectory, dims=(-2, -1), reduction=reduction)
-    initial = _initial_from_metadata(metadata, trajectory, channels=1)
-    ic = _mean_square(trajectory[:, :, 0] - initial[:, :1], reduction)
+    task = str(metadata.get("task", "")).lower()
+    if task in {"inverse", "sparse_inverse"}:
+        # The initial state is the inverse target, not a prescribed condition.
+        # Its label error is reported separately and must not be folded into a
+        # physics-consistency diagnostic.
+        ic = _zero_scalar(trajectory)
+    else:
+        initial = _initial_from_metadata(metadata, trajectory, channels=1)
+        ic = _mean_square(trajectory[:, :, 0] - initial[:, :1], reduction)
     losses = _loss_dict(pred, residual, bc, ic, mode, reduction)
     losses["bc_status"] = "encoded_in_periodic_operator_not_separately_observable"
     return losses
@@ -837,12 +846,30 @@ def _as_ns_trajectory(pred: torch.Tensor, metadata: dict) -> tuple[torch.Tensor,
         return pred[:, :1], "full_trajectory" if pred.shape[2] > 2 else "two_level_midpoint_approx"
     if pred.ndim != 4:
         raise ValueError(f"NS residual expects [B,T,H,W], [B,1,H,W], or [B,1,T,H,W], got {tuple(pred.shape)}")
+    task = str(metadata.get("task", "")).lower()
+    if task in {"inverse", "sparse_inverse"}:
+        terminal = _ns_terminal_from_metadata(metadata, pred)
+        return torch.stack([pred[:, :1], terminal[:, :1]], dim=2), "two_level_midpoint_approx"
     if pred.shape[1] > 1:
         traj = pred.unsqueeze(1)
         initial = _initial_from_metadata(metadata, pred, channels=1)[:, :1, None]
         return torch.cat([initial, traj], dim=2), "full_trajectory"
     initial = _initial_from_metadata(metadata, pred, channels=1)[:, :1]
     return torch.stack([initial, pred[:, :1]], dim=2), "two_level_midpoint_approx"
+
+
+def _ns_terminal_from_metadata(metadata: dict, pred: torch.Tensor) -> torch.Tensor:
+    # Sparse inverse batches keep the complete, task-given terminal state in
+    # original_input_fields while input_fields contains only sensor values.
+    for key in ("original_input_fields", "solution_fields", "input_fields"):
+        value = metadata.get(key)
+        if isinstance(value, torch.Tensor):
+            value = value.to(pred.device, pred.dtype)
+            if value.ndim == 5:
+                return value[:, :1, -1]
+            if value.ndim == 4 and value.shape[1] >= 1:
+                return value[:, :1]
+    raise ValueError("Missing given terminal state for Navier-Stokes inverse residual")
 
 
 def _as_rd_trajectory(pred: torch.Tensor, metadata: dict) -> tuple[torch.Tensor, str]:

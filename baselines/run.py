@@ -1559,14 +1559,22 @@ def _batch_metric_payload(
     force_per_sample: bool = False,
 ) -> dict[str, Any]:
     if args.physics_metric_mode == "per_batch" and not force_per_sample:
-        physics_pred, physics_input = _joint_physics_views(pred, target, batch.metadata, batch.input_fields)
+        physics_pred, physics_input = _joint_physics_views(
+            pred,
+            batch.metadata,
+            batch.input_fields,
+            pde_name=args.pde,
+        )
+        physics_full_tensor = None if batch.metadata.get("joint_reconstruction") else batch.full_tensor
         metric_meta = {
-            "input_fields": physics_input,
-            "full_tensor": batch.full_tensor,
-            "task": batch.task,
             **batch.metadata,
+            "input_fields": physics_input,
+            "full_tensor": physics_full_tensor,
+            "task": batch.task,
         }
-        physics_metrics = physics_loss_metric(physics_pred, args.pde, dict(metric_meta))
+        if batch.metadata.get("joint_reconstruction"):
+            metric_meta["coeff_fields"] = physics_input
+        physics_metrics = physics_loss_metric(physics_pred, args.pde, dict(metric_meta), strict=True)
         mode = str(physics_metrics["mode"])
         bc_status = str(physics_metrics["bc_status"])
         clean = _obs_mse_clean(pred, target, batch)
@@ -1601,15 +1609,21 @@ def _batch_metric_payload(
         pred_i = pred[item : item + 1]
         target_i = target[item : item + 1]
         physics_pred_i, physics_input_i = _joint_physics_views(
-            pred_i, target_i, item_batch.metadata, item_batch.input_fields
+            pred_i,
+            item_batch.metadata,
+            item_batch.input_fields,
+            pde_name=args.pde,
         )
+        physics_full_tensor_i = None if item_batch.metadata.get("joint_reconstruction") else item_batch.full_tensor
         meta_i = {
-            "input_fields": physics_input_i,
-            "full_tensor": item_batch.full_tensor,
-            "task": item_batch.task,
             **item_batch.metadata,
+            "input_fields": physics_input_i,
+            "full_tensor": physics_full_tensor_i,
+            "task": item_batch.task,
         }
-        physics_metrics = physics_loss_metric(physics_pred_i, args.pde, dict(meta_i))
+        if item_batch.metadata.get("joint_reconstruction"):
+            meta_i["coeff_fields"] = physics_input_i
+        physics_metrics = physics_loss_metric(physics_pred_i, args.pde, dict(meta_i), strict=True)
         clean = _obs_mse_clean(pred_i, target_i, item_batch)
         noisy = _obs_mse_noisy(pred_i, item_batch)
         values["obs_mse"].append(clean)
@@ -2003,14 +2017,20 @@ def _joint_reconstruction_relative_l2_values(
 
 def _joint_physics_views(
     pred: torch.Tensor,
-    target: torch.Tensor,
     metadata: dict[str, Any],
     fallback_input: torch.Tensor,
+    *,
+    pde_name: str = "",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     input_channels = int(metadata.get("joint_input_channels", 0) or 0)
     if not metadata.get("joint_reconstruction") or input_channels <= 0 or pred.shape[1] <= input_channels:
         return pred, fallback_input
-    return pred[:, input_channels:], target[:, :input_channels]
+    if str(pde_name).lower() in {"nsnonbounded", "navier_stokes", "ns"}:
+        # NS joint reconstruction stores [predicted initial, predicted
+        # terminal] along the channel axis.  Present both endpoints to the
+        # temporal residual and do not replace the initial state with a label.
+        return pred.unsqueeze(1), fallback_input
+    return pred[:, input_channels:], pred[:, :input_channels]
 
 
 def _obs_mse_clean(pred: torch.Tensor, target: torch.Tensor, batch: PDEBatch) -> float:

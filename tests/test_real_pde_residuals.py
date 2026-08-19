@@ -76,7 +76,6 @@ def test_exact_real_dataset_pairs_produce_finite_physics_diagnostics(pde):
     )
 
     if pde in {"poisson", "helmholtz"}:
-        sign = float(batch.metadata["elliptic_operator_sign"])
-        alternatives = batch.metadata["elliptic_operator_inference_mse"]
-        selected_key = "positive" if sign > 0 else "negative"
-        assert float(alternatives[selected_key]) == pytest.approx(min(float(value) for value in alternatives.values()))
+        assert float(batch.metadata["elliptic_operator_sign"]) == 1.0
+        assert batch.metadata["elliptic_operator_convention_source"] == "fm4pde_generator_contract"
+        assert "elliptic_operator_inference_mse" not in batch.metadata

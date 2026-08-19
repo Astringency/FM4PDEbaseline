@@ -173,9 +173,10 @@ class PINNSparseBaseline(BaselineModel):
                 loss = lam_obs * observation_loss_from_batch(pred, batch, item=item)
                 meta = _single_meta(batch, item)
                 meta.update(_physics_weight_metadata(self.config))
-                physics_value = _select_physics_loss(physics_loss_metric(pred, batch.pde_name, meta), self.config, pred)
-                if torch.isfinite(physics_value):
-                    loss = loss + physics_value
+                physics_value = _select_physics_loss(
+                    physics_loss_metric(pred, batch.pde_name, meta, strict=True), self.config, pred
+                )
+                loss = loss + physics_value
                 loss.backward()
                 return loss
 
@@ -353,8 +354,7 @@ class PINNSparseBaseline(BaselineModel):
                 solution_grid = solution(coords).T.reshape(batch.input_fields[item : item + 1].shape)
                 loss = lam_obs * sparse_inverse_observation_loss(solution_grid, batch, item=item)
                 physics_value = sparse_inverse_physics_loss(unknown_grid, solution_grid, batch, item, self.config)
-                if torch.isfinite(physics_value):
-                    loss = loss + physics_value
+                loss = loss + physics_value
                 loss = loss + lam_reg * (_smoothness_reg(unknown_grid) + _smoothness_reg(solution_grid))
                 loss.backward()
                 return loss
@@ -393,8 +393,7 @@ class PINNSparseBaseline(BaselineModel):
                 solution_grid = solution(coords).T.reshape(solution_target_shape)
                 loss = lam_obs * sparse_forward_observation_loss(unknown_grid, batch, item=item)
                 physics_value = sparse_inverse_physics_loss(unknown_grid, solution_grid, batch, item, self.config)
-                if torch.isfinite(physics_value):
-                    loss = loss + physics_value
+                loss = loss + physics_value
                 loss = loss + lam_reg * (_smoothness_reg(unknown_grid) + _smoothness_reg(solution_grid))
                 loss.backward()
                 return loss
@@ -460,7 +459,7 @@ def sparse_inverse_physics_loss(
     meta["task"] = "sparse_inverse"
     meta["solution_fields"] = solution
     meta["input_fields"] = solution
-    losses = physics_loss_metric(unknown, batch.pde_name, meta)
+    losses = physics_loss_metric(unknown, batch.pde_name, meta, strict=True)
     return _select_physics_loss(losses, config, unknown)
 
 

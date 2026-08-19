@@ -136,21 +136,23 @@ class PDEOptBaseline(BaselineModel):
         obs = observation_loss_from_batch(pred, batch)
         meta = {"input_fields": batch.input_fields, "full_tensor": batch.full_tensor, "task": batch.task, **batch.metadata}
         meta.update(_physics_weight_metadata(self.config))
-        physics_value = _select_physics_loss(physics_loss_metric(pred, batch.pde_name, meta), self.config, pred)
-        pde = physics_value if torch.isfinite(physics_value) else torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        physics_value = _select_physics_loss(
+            physics_loss_metric(pred, batch.pde_name, meta, strict=True), self.config, pred
+        )
+        pde = physics_value
         reg = (pred[..., 1:, :] - pred[..., :-1, :]).pow(2).mean() + (pred[..., :, 1:] - pred[..., :, :-1]).pow(2).mean()
         return lam_obs * obs + pde + lam_reg * reg
 
     def _sparse_inverse_objective(self, unknown, solution, batch, lam_obs, lam_reg):
         obs = sparse_inverse_observation_loss(solution, batch)
         physics_value = sparse_inverse_physics_loss(unknown, solution, batch, item=None, config=self.config)
-        pde = physics_value if torch.isfinite(physics_value) else torch.tensor(0.0, device=unknown.device, dtype=unknown.dtype)
+        pde = physics_value
         reg = _smoothness_reg(unknown) + _smoothness_reg(solution)
         return lam_obs * obs + pde + lam_reg * reg
 
     def _sparse_forward_objective(self, unknown, solution, batch, lam_obs, lam_reg):
         obs = sparse_forward_observation_loss(unknown, batch)
         physics_value = sparse_inverse_physics_loss(unknown, solution, batch, item=None, config=self.config)
-        pde = physics_value if torch.isfinite(physics_value) else torch.tensor(0.0, device=unknown.device, dtype=unknown.dtype)
+        pde = physics_value
         reg = _smoothness_reg(unknown) + _smoothness_reg(solution)
         return lam_obs * obs + pde + lam_reg * reg
