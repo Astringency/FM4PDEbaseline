@@ -94,7 +94,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--baseline", required=True, choices=sorted(BASELINES))
     parser.add_argument("--pde", required=True)
     parser.add_argument("--task", default="forward")
-    parser.add_argument("--data-root", default="/home/tat512/C01Python/PDEdata")
+    parser.add_argument("--data-root", default="~/share/PDEdata")
     parser.add_argument("--config", default=None)
     parser.add_argument("--experiment-mode", choices=["smoke", "debug", "paper"], default="debug")
     parser.add_argument("--num-sensors", type=int, default=500)

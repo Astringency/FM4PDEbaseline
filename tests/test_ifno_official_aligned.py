@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 from baselines.capabilities import paper_table_eligible, resolve_capability
-from baselines.common.data_adapter import build_default_registry
+from baselines.common.data_adapter import PDEBatchDataset, build_default_registry, pde_collate
 from baselines.methods.ifno import IFNOBaseline
 from baselines.methods.official import OfficialImportError
 from baselines.run import _backend_info, build_data_spec
@@ -22,7 +23,7 @@ def _cfg(**extra):
     return cfg
 
 
-def test_ifno_adapted_reimplementation_forward_and_inverse_shapes_and_metadata():
+def test_ifno_official_training_adapter_forward_and_inverse_shapes_and_metadata():
     for task in ("forward", "inverse"):
         batch = _batch(task)
         model = IFNOBaseline().build(_cfg(), build_data_spec(batch))
@@ -30,9 +31,9 @@ def test_ifno_adapted_reimplementation_forward_and_inverse_shapes_and_metadata()
         assert tuple(pred.shape) == tuple(batch.target_fields.shape)
         backend = _backend_info(model, model.config)
         cap = resolve_capability("ifno", "darcy", task)
-        assert backend["implementation_mode_effective"] == "adapted"
-        assert backend["official_reimplementation_success"] is False
-        assert backend["official_alignment_level"] == "concept"
+        assert backend["implementation_mode_effective"] == "official_aligned"
+        assert backend["official_reimplementation_success"] is True
+        assert backend["official_alignment_level"] == "algorithm_training"
         assert paper_table_eligible(cap, backend_info=backend) is False
 
 
@@ -59,3 +60,34 @@ def test_ifno_strict_official_does_not_fallback_to_aligned():
     batch = _batch("forward")
     with pytest.raises(OfficialImportError):
         IFNOBaseline().build(_cfg(implementation_mode="official", official_backend="ifno"), build_data_spec(batch))
+
+
+def test_ifno_official_aligned_runs_vae_three_stage_training_and_uses_posterior_mean_for_inverse():
+    batch = _batch("forward")
+    loader = DataLoader(PDEBatchDataset(batch), batch_size=2, collate_fn=pde_collate)
+    model = IFNOBaseline().build(
+        _cfg(
+            device="cpu",
+            normalize=False,
+            ifno_pretrain_epochs=1,
+            vae_pretrain_epochs=1,
+            joint_epochs=1,
+            max_steps=1,
+            rank=2,
+            vae_hidden_dims=[2, 4, 8, 16, 32],
+        ),
+        build_data_spec(batch),
+    )
+
+    history = model.fit(loader)
+    prediction = model.predict(_batch("inverse"))
+
+    assert history["training_protocol"] == "official_three_stage"
+    assert history["stage_epochs"] == {"ifno_pretrain": 1, "vae_pretrain": 1, "joint_train": 1}
+    assert len(history["stage_losses"]["ifno_pretrain"]) == 1
+    assert len(history["stage_losses"]["vae_pretrain"]) == 1
+    assert len(history["stage_losses"]["joint_train"]) == 1
+    assert prediction.shape == batch.input_fields.shape
+    backend = _backend_info(model, model.config)
+    assert backend["adapter_status"] == "official_training_ifno_task_adapter"
+    assert backend["official_alignment_level"] == "algorithm_training"

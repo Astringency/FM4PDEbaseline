@@ -304,8 +304,8 @@ def resolve_capability(
                 "adapted",
                 "adapted_allowed",
                 family,
-                "The local iFNO path is an adapted reimplementation with different normalization, objective, optimizer, and no VAE",
-                "Report only as an iFNO-inspired adapted reimplementation; it is not direct official code.",
+                "The iFNO adapter preserves bidirectional coupling, the official VAE topology, posterior-mean inverse inference, and three-stage training on FM4PDE fields",
+                "Report as an official-training-aligned iFNO task adaptation; it is not a native official dataset run.",
                 eligible=False,
             )
         return _cap(
@@ -456,8 +456,8 @@ def resolve_capability(
                     "official_adapter",
                     "canonical_math",
                     family,
-                    "PINN is native for per-instance PDE fitting from sparse observations",
-                    "DeepXDE FNN may provide the architecture; the PDE objective is local and must be disclosed.",
+                    "PINN is native for per-instance PDE fitting from sparse observations and uses DeepXDE PDE/PointSetBC/autodiff training",
+                    "Report as a DeepXDE-native training API with an FM4PDE joint-field task adapter.",
                 )
             return _cap(
                 baseline,
@@ -479,8 +479,8 @@ def resolve_capability(
                     "official_adapter",
                     "canonical_math",
                     family,
-                    "static PDE inverse has explicit solution/source or coefficient residual and sparse solution observations",
-                    "PINN-style official architecture plus local PDE objective.",
+                    "static PDE inverse uses a DeepXDE joint (solution, unknown) network, PointSetBC observations, and autodiff residual",
+                    "Report as a DeepXDE-native training API with an FM4PDE joint-field task adapter.",
                 )
             return _cap(
                 baseline,
@@ -542,8 +542,8 @@ def resolve_capability(
                     "adapted",
                     "adapted_allowed",
                     family,
-                    "PC-BNN-adapted preserves the official Swish particle architecture, hierarchical priors, SVGD, observation likelihood, and physics likelihood behind a static-PDE task adapter",
-                    "Report explicitly as PC-BNN-adapted; it is eligible for the unified adapted comparison but not an official-native reproduction.",
+                    "PC-BNN-adapted preserves the official Swish particles, hierarchical priors, Gamma initialization, SVGD-transformed per-particle Adam, and likelihood structure behind a static-PDE adapter",
+                    "Report explicitly as PC-BNN official-training-aligned adaptation; it is eligible for the unified comparison but not an official-native dataset run.",
                     eligible=False,
                     unified_comparison_eligible=True,
                 )

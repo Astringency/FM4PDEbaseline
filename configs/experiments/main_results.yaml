@@ -92,8 +92,8 @@ resources:
     steps: 1000
   pc_bnn:
     batch_size: 1
-    particles: 8
-    steps: 500
+    particles: 5
+    steps: 2000
   pde_opt:
     batch_size: 1
     steps: 500

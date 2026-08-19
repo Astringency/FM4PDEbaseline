@@ -1,12 +1,13 @@
 method:
-  implementation_mode: adapted
-  official_backend: local
+  implementation_mode: official_aligned
+  official_backend: pc_bnn
   normalize: false
-  steps: 500
+  steps: 2000
   lr: 0.001
-  hidden: 128
+  hidden: 20
   depth: 3
-  particles: 8
+  particles: 5
+  lr_noise: 0.00001
   lambda_obs: 1.0
   lambda_int: 0.01
   lambda_bc: 0.01
@@ -15,4 +16,4 @@ method:
   beta_prior_rate: 1.0e-6
   weight_prior_shape: 1.0
   weight_prior_rate: 0.05
-  initial_noise_precision: 100.0
+  equation_variance: 0.0001

@@ -42,7 +42,8 @@ def test_main_results_config_covers_expected_pdes_and_resources():
     assert resources["amortized_default"]["epochs"] == 200
     assert resources["per_instance_default"]["batch_size"] == 1
     assert resources["pinn_sparse"]["steps"] == 1000
-    assert resources["pc_bnn"]["particles"] == 8
+    assert resources["pc_bnn"]["particles"] == 5
+    assert resources["pc_bnn"]["steps"] == 2000
     assert resources["pde_opt"]["steps"] == 500
 
 

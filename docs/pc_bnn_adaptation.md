@@ -14,6 +14,13 @@ The posterior engine preserves the method-defining PC-BNN mechanisms:
 - PDE-residual likelihood;
 - SVGD particle updates and posterior mean/standard deviation.
 
+Training follows the official optimizer structure: particles are independently
+Kaiming-initialized, noise precisions are sampled from the Gamma prior, the
+SVGD direction is written back as each particle's gradient, and independent
+Adam optimizers update network weights and noise precision with separate
+learning rates. The default official-aligned configuration uses five particles,
+2000 steps, `lr=1e-3`, `lr_noise=1e-5`, and equation variance `1e-4`.
+
 The task seam is implemented by sparse-forward and sparse-inverse Adapters.
 They select the observed field, returned field, and PDE residual semantics.
 Darcy coefficients use a positive `softplus(a) + epsilon` parameterization.

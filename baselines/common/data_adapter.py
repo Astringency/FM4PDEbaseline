@@ -1668,8 +1668,17 @@ def _infer_elliptic_operator_convention(full: torch.Tensor, pde: str, k: float) 
 def _static_patterns(pde: str, split: str) -> list[str]:
     if split == "test":
         if pde == "helmholtz":
-            return ["helmholtz_test_10000-128-128.mat"]
-        return [f"{pde}_test_10000-128-128.mat", f"{pde}_test_10000-*.mat"]
+            return [
+                "helmholtz_1000-128-128_test.mat",
+                "helmholtz_test_1000-128-128*.mat",
+                "helmholtz_test_10000-128-128.mat",
+            ]
+        return [
+            f"{pde}_1000-128-128_test.mat",
+            f"{pde}_test_1000-128-128*.mat",
+            f"{pde}_test_10000-128-128.mat",
+            f"{pde}_test_10000-*.mat",
+        ]
     if split == "val":
         return [f"{pde}_val_*-128-128*.mat", f"{pde}_*-128-128_val.mat"]
     return [f"{pde}_10000-128-128_*.mat"]

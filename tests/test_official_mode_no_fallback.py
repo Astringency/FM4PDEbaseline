@@ -156,9 +156,10 @@ def test_paper_official_or_skip_runs_official_aligned_when_allowed(tiny_data_roo
     )
     row = yaml.safe_load((out / "results_summary.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert row["implementation_mode_requested"] == "official_or_skip"
-    assert row["implementation_mode_effective"] == "adapted"
+    assert row["implementation_mode_effective"] == "official_aligned"
     assert row["paper_table_eligible"] is False
-    assert row["adapter_status"] == "adapted_ifno_reimplementation"
+    assert row["adapter_status"] == "official_training_ifno_task_adapter"
+    assert row["official_alignment_level"] == "algorithm_training"
     assert not (out / "skipped_combinations.jsonl").exists()
 
 

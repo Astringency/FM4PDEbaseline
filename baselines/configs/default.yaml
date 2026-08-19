@@ -1,4 +1,4 @@
-data_root: /home/tat512/C01Python/PDEdata
+data_root: ~/share/PDEdata
 output_dir: outputs/baselines
 
 pdes:

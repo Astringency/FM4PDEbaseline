@@ -109,22 +109,25 @@ class IFNOBaseline(BaselineModel):
                 layers=layers,
                 beta=beta,
                 padding=padding,
+                rank=int(self.config.get("rank", 24)),
+                vae_hidden_dims=self.config.get("vae_hidden_dims"),
+                vae_resolution=int(self.config.get("vae_resolution", 64)),
             )
             self.set_backend(
                 "ifno_official_aligned",
                 "ifno",
                 fallback_used=False,
                 warning=direct_import_warning,
-                implementation_mode_effective="adapted",
-                implementation_source="ifno_concept_adapted_reimplementation",
+                implementation_mode_effective="official_aligned",
+                implementation_source="official_ifno_architecture_and_training_with_fm4pde_task_adapter",
                 official_import_success=False,
-                official_reimplementation_success=False,
-                official_alignment_level="concept",
+                official_reimplementation_success=True,
+                official_alignment_level="algorithm_training",
                 official_alignment_notes=(
-                    "Retains invertible-coupling ideas but omits the official VAE and changes padding, normalization, "
-                    "loss, optimizer, update schedule, and training protocol."
+                    "Retains the bidirectional invertible coupling, official VanillaVAE topology, posterior-mean inverse "
+                    "inference, and iFNO/VAE/joint three-stage AdamW training behind the FM4PDE data adapter."
                 ),
-                adapter_status="adapted_ifno_reimplementation",
+                adapter_status="official_training_ifno_task_adapter",
                 **official_source_info("ifno"),
             )
             return self
@@ -150,6 +153,10 @@ class IFNOBaseline(BaselineModel):
         return self
 
     def fit(self, train_loader, val_loader=None):
+        if getattr(self, "official_aligned", False) and str(
+            self.config.get("training_protocol", "official_three_stage")
+        ).lower() == "official_three_stage":
+            return self._fit_official_three_stage(train_loader, val_loader)
         device = torch.device(self.config.get("device", "cpu"))
         epochs = int(self.config.get("epochs", 1))
         lr = float(self.config.get("lr", 1e-3))
@@ -336,6 +343,185 @@ class IFNOBaseline(BaselineModel):
             restore_state_dict(self, best_state)
         return history
 
+    def _fit_official_three_stage(self, train_loader, val_loader=None):
+        device = torch.device(self.config.get("device", "cpu"))
+        normalize = bool(self.config.get("normalize", False))
+        if normalize and self.normalization_stats is None:
+            self.normalization_stats = estimate_normalization_stats(
+                train_loader,
+                max_batches=self.config.get("normalization_max_batches"),
+                eps=float(self.config.get("normalization_eps", 1e-6)),
+            )
+        self.uses_normalization = bool(normalize and self.normalization_stats is not None)
+        self.to(device)
+        stage_epochs = {
+            "ifno_pretrain": max(int(self.config.get("ifno_pretrain_epochs", self.config.get("epochs_ifno", 1))), 0),
+            "vae_pretrain": max(int(self.config.get("vae_pretrain_epochs", self.config.get("epochs_vae", 1))), 0),
+            "joint_train": max(int(self.config.get("joint_epochs", self.config.get("epochs", 1))), 0),
+        }
+        max_steps = self.config.get("max_steps")
+        grad_clip = float(self.config.get("grad_clip_norm", 10.0) or 10.0)
+        reconstruction_weight = float(self.config.get("reconstruction_weight", 1.0))
+        kl_weight = float(self.config.get("kl_weight", self.config.get("kl", 0.01)))
+        pretrain_optimizer = torch.optim.AdamW(
+            self.parameters(), lr=float(self.config.get("lr_ifno", self.config.get("lr", 2.5e-4)))
+        )
+        vae_optimizer = torch.optim.AdamW(
+            self.parameters(), lr=float(self.config.get("lr_vae", 1e-3))
+        )
+        forward_optimizer = torch.optim.AdamW(
+            self.parameters(), lr=float(self.config.get("lr_forward", 5e-6))
+        )
+        backward_optimizer = torch.optim.AdamW(
+            self.parameters(), lr=float(self.config.get("lr_backward", 5e-6))
+        )
+        history = {
+            "training_protocol": "official_three_stage",
+            "stage_epochs": stage_epochs,
+            "stage_losses": {name: [] for name in stage_epochs},
+            "train_loss": [],
+            "val_loss": [],
+            "best_epoch": None,
+            "best_val_loss": None,
+            "early_stopped": False,
+            "stop_epoch": None,
+            "stop_reason": "",
+            "lr_history": [],
+            "normalize": self.uses_normalization,
+            "normalization_stats": self.normalization_stats.json_summary() if self.normalization_stats is not None else None,
+        }
+        completed_epochs = 0
+
+        for epoch in range(stage_epochs["ifno_pretrain"]):
+            self.train()
+            total = count = 0
+            for step, raw_batch in enumerate(train_loader):
+                if max_steps is not None and step >= int(max_steps):
+                    break
+                batch = self._prepare_ifno_batch(raw_batch, device)
+                x, y = _physical_pair(batch)
+                pretrain_optimizer.zero_grad(set_to_none=True)
+                y_pred, recon_x = self.operator.forward_map(x)
+                forward_loss = _relative_l2_loss(y_pred, y) + reconstruction_weight * recon_x
+                forward_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+                pretrain_optimizer.step()
+                pretrain_optimizer.zero_grad(set_to_none=True)
+                x_pred, recon_y = self.operator.inverse_map(y)
+                backward_loss = _relative_l2_loss(x_pred, x) + reconstruction_weight * recon_y
+                backward_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+                pretrain_optimizer.step()
+                total += float((forward_loss + backward_loss).detach().cpu())
+                count += 1
+            history["stage_losses"]["ifno_pretrain"].append(total / max(count, 1))
+            completed_epochs += 1
+            history["completed_stage"] = "ifno_pretrain"
+            _write_incremental_history(self.config, history, completed_epochs)
+
+        for epoch in range(stage_epochs["vae_pretrain"]):
+            self.train()
+            total = count = 0
+            for step, raw_batch in enumerate(train_loader):
+                if max_steps is not None and step >= int(max_steps):
+                    break
+                batch = self._prepare_ifno_batch(raw_batch, device)
+                x, _ = _physical_pair(batch)
+                vae_optimizer.zero_grad(set_to_none=True)
+                reconstructed, mu, log_var = self.operator.vae_reconstruct(x, sample=True)
+                loss = _relative_l2_loss(reconstructed, x) + kl_weight * _vae_kl(mu, log_var)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+                vae_optimizer.step()
+                total += float(loss.detach().cpu())
+                count += 1
+            history["stage_losses"]["vae_pretrain"].append(total / max(count, 1))
+            completed_epochs += 1
+            history["completed_stage"] = "vae_pretrain"
+            _write_incremental_history(self.config, history, completed_epochs)
+
+        best_monitor = None
+        best_state = None
+        no_improve = 0
+        patience = max(int(self.config.get("early_stopping_patience", 20)), 1)
+        min_delta = float(self.config.get("early_stopping_min_delta", 1e-4))
+        min_epochs = max(int(self.config.get("min_epochs", 1)), 1)
+        for epoch in range(stage_epochs["joint_train"]):
+            self.train()
+            total = count = 0
+            for step, raw_batch in enumerate(train_loader):
+                if max_steps is not None and step >= int(max_steps):
+                    break
+                batch = self._prepare_ifno_batch(raw_batch, device)
+                x, y = _physical_pair(batch)
+                forward_optimizer.zero_grad(set_to_none=True)
+                y_pred, _ = self.operator.forward_map(x)
+                forward_loss = _relative_l2_loss(y_pred, y)
+                forward_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+                forward_optimizer.step()
+                backward_optimizer.zero_grad(set_to_none=True)
+                raw_inverse, _ = self.operator.inverse_map(y)
+                filtered_inverse, mu, log_var = self.operator.vae_reconstruct(raw_inverse, sample=True)
+                backward_loss = _relative_l2_loss(filtered_inverse, x) + kl_weight * _vae_kl(mu, log_var)
+                backward_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+                backward_optimizer.step()
+                total += float((forward_loss + backward_loss).detach().cpu())
+                count += 1
+            train_loss = total / max(count, 1)
+            val_loss = self._official_ifno_eval_loss(val_loader, device, max_steps) if val_loader is not None else None
+            monitor = train_loss if val_loss is None else val_loss
+            history["stage_losses"]["joint_train"].append(train_loss)
+            history["train_loss"].append(train_loss)
+            if val_loss is not None:
+                history["val_loss"].append(val_loss)
+            history["lr_history"].append(float(forward_optimizer.param_groups[0]["lr"]))
+            completed_epochs += 1
+            history["completed_stage"] = "joint_train"
+            if best_monitor is None or monitor < best_monitor - min_delta:
+                best_monitor = monitor
+                best_state = snapshot_state_dict(self)
+                history["best_epoch"] = epoch + 1
+                history["best_val_loss"] = val_loss
+                no_improve = 0
+            else:
+                no_improve += 1
+            if bool(self.config.get("early_stopping", False)) and epoch + 1 >= min_epochs and no_improve >= patience:
+                history["early_stopped"] = True
+                history["stop_epoch"] = epoch + 1
+                history["stop_reason"] = f"joint loss plateau for {no_improve} epochs"
+                _write_incremental_history(self.config, history, completed_epochs)
+                break
+            _write_incremental_history(self.config, history, completed_epochs)
+        if history["stop_epoch"] is None:
+            history["stop_epoch"] = len(history["train_loss"])
+        if best_state is not None and bool(self.config.get("restore_best", True)):
+            restore_state_dict(self, best_state)
+        return history
+
+    def _prepare_ifno_batch(self, batch: PDEBatch, device: torch.device) -> PDEBatch:
+        prepared = _to_device_batch(batch, device)
+        if self.uses_normalization and self.normalization_stats is not None:
+            prepared = normalize_batch_input_target(prepared, self.normalization_stats)
+        return prepared
+
+    def _official_ifno_eval_loss(self, loader, device: torch.device, max_steps) -> float:
+        self.eval()
+        total = count = 0
+        with torch.no_grad():
+            for step, raw_batch in enumerate(loader):
+                if max_steps is not None and step >= int(max_steps):
+                    break
+                batch = self._prepare_ifno_batch(raw_batch, device)
+                x, y = _physical_pair(batch)
+                forward, _ = self.operator.forward_map(x)
+                inverse, _ = self.operator.inverse_map(y)
+                inverse, _, _ = self.operator.vae_reconstruct(inverse, sample=False)
+                total += float((_relative_l2_loss(forward, y) + _relative_l2_loss(inverse, x)).cpu())
+                count += 1
+        return total / max(count, 1)
+
     def predict(self, batch: PDEBatch):
         if batch.task.startswith("sparse"):
             raise NotImplementedError("iFNO sparse reconstruction/inverse is unsupported without an official sparse inference adapter")
@@ -356,6 +542,7 @@ class IFNOBaseline(BaselineModel):
     def _inverse_map(self, y: torch.Tensor) -> torch.Tensor:
         if getattr(self, "official_aligned", False):
             pred, _ = self.operator.inverse_map(y)
+            pred, _, _ = self.operator.vae_reconstruct(pred, sample=False)
             return pred
         z = self.lift_y(torch.cat([y, grid_channels(y)], dim=1))
         for block in reversed(self.blocks):
@@ -393,3 +580,13 @@ def _ifno_training_loss(model: IFNOBaseline, batch: PDEBatch, cycle_weight: floa
         _require_exact_shape(cycle_y, y, model.name, "cycle-target")
         loss = loss + cycle_weight * (F.mse_loss(cycle_x, x) + F.mse_loss(cycle_y, y))
     return loss + float(model.config.get("reconstruction_weight", 0.1)) * (recon_x + recon_y)
+
+
+def _relative_l2_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    difference = torch.linalg.vector_norm((prediction - target).reshape(prediction.shape[0], -1), dim=1)
+    denominator = torch.linalg.vector_norm(target.reshape(target.shape[0], -1), dim=1).clamp_min(1e-12)
+    return (difference / denominator).sum()
+
+
+def _vae_kl(mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+    return torch.mean(-0.5 * torch.sum(1.0 + log_var - mu.square() - log_var.exp(), dim=1))

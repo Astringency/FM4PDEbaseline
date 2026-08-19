@@ -1,12 +1,19 @@
 method:
-  implementation_mode: official_or_skip
-  official_backend: auto
+  implementation_mode: official_aligned
+  official_backend: deepxde
+  deepxde_native: true
   normalize: false
   steps: 1000
+  adam_iterations: 1000
+  lbfgs_steps: 500
+  num_domain: 4096
+  num_boundary: 512
   lr: 0.001
   hidden: 128
   depth: 5
   lambda_obs: 1.0
-  lambda_int: 0.01
-  lambda_bc: 0.01
-  lambda_ic: 0.01
+  activation: tanh
+  kernel_initializer: Glorot normal
+  lambda_int: 1.0
+  lambda_bc: 1.0
+  lambda_ic: 1.0

@@ -22,6 +22,74 @@ class IFNOMLP2d(nn.Module):
         return self.net(x)
 
 
+class OfficialVanillaVAE(nn.Module):
+    """Official iFNO VAE made resolution-adaptive at the data seam.
+
+    The official network is defined for 64x64 fields. FM4PDE fields are resized
+    to that resolution before the unchanged five-stage encoder/decoder and
+    resized back afterwards.
+    """
+
+    def __init__(self, latent_dim: int, hidden_dims: list[int] | None = None, resolution: int = 64) -> None:
+        super().__init__()
+        dims = list(hidden_dims or [32, 64, 128, 256, 512])
+        if len(dims) != 5:
+            raise ValueError("Official iFNO VAE requires five hidden dimensions")
+        self.resolution = int(resolution)
+        if self.resolution != 64:
+            raise ValueError("Official iFNO VAE topology requires vae_resolution=64")
+        modules: list[nn.Module] = []
+        in_channels = 1
+        for channels in dims:
+            modules.append(nn.Sequential(nn.Conv2d(in_channels, channels, 3, stride=2, padding=1), nn.GELU()))
+            in_channels = channels
+        self.encoder = nn.Sequential(*modules)
+        bottleneck = dims[-1] * 4
+        self.fc_mu = nn.Linear(bottleneck, int(latent_dim))
+        self.fc_var = nn.Linear(bottleneck, int(latent_dim))
+        self.decoder_input = nn.Linear(int(latent_dim), bottleneck)
+        reversed_dims = list(reversed(dims))
+        decoder: list[nn.Module] = []
+        for index in range(len(reversed_dims) - 1):
+            decoder.append(
+                nn.Sequential(
+                    nn.ConvTranspose2d(reversed_dims[index], reversed_dims[index + 1], 3, stride=2, padding=1, output_padding=1),
+                    nn.GELU(),
+                )
+            )
+        self.decoder = nn.Sequential(*decoder)
+        self.final_layer = nn.Sequential(
+            nn.ConvTranspose2d(reversed_dims[-1], reversed_dims[-1], 3, stride=2, padding=1, output_padding=1),
+            nn.GELU(),
+            nn.Conv2d(reversed_dims[-1], 1, 3, padding=1),
+        )
+        self.bottleneck_channels = dims[-1]
+
+    def encode(self, field: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        encoded = self.encoder(self._to_official_resolution(field))
+        flat = torch.flatten(encoded, start_dim=1)
+        return self.fc_mu(flat), self.fc_var(flat)
+
+    def decode(self, latent: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+        decoded = self.decoder_input(latent).reshape(-1, self.bottleneck_channels, 2, 2)
+        decoded = self.final_layer(self.decoder(decoded))
+        return F.interpolate(decoded, size=output_size, mode="bilinear", align_corners=False)
+
+    def forward(self, field: torch.Tensor, *, sample: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        output_size = tuple(int(value) for value in field.shape[-2:])
+        mu, log_var = self.encode(field)
+        if sample:
+            latent = mu + torch.randn_like(mu) * torch.exp(0.5 * log_var)
+        else:
+            latent = mu
+        return self.decode(latent, output_size), mu, log_var
+
+    def _to_official_resolution(self, field: torch.Tensor) -> torch.Tensor:
+        if tuple(field.shape[-2:]) == (self.resolution, self.resolution):
+            return field
+        return F.interpolate(field, size=(self.resolution, self.resolution), mode="bilinear", align_corners=False)
+
+
 class IFNOCouplingLayer2d(nn.Module):
     """Multiplicative invertible FNO coupling layer matching the iFNO scripts."""
 
@@ -86,6 +154,9 @@ class OfficialAlignedIFNO2d(nn.Module):
         layers: int = 4,
         beta: float = 2.0,
         padding: int = 0,
+        rank: int = 24,
+        vae_hidden_dims: list[int] | None = None,
+        vae_resolution: int = 64,
     ) -> None:
         super().__init__()
         if width % 2:
@@ -101,6 +172,7 @@ class OfficialAlignedIFNO2d(nn.Module):
         self.layers = nn.ModuleList(
             [IFNOCouplingLayer2d(half, modes1, modes2, beta=beta, padding=padding) for _ in range(max(int(layers), 1))]
         )
+        self.vae_net = OfficialVanillaVAE(rank, hidden_dims=vae_hidden_dims, resolution=vae_resolution)
 
     def forward_map(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x_aug = self._augment(x)
@@ -131,6 +203,12 @@ class OfficialAlignedIFNO2d(nn.Module):
         x, _ = self.inverse_map(y)
         y_rec, _ = self.forward_map(x)
         return y_rec
+
+    def vae_reconstruct(self, x: torch.Tensor, *, sample: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        first, mu, log_var = self.vae_net(x[:, :1], sample=sample)
+        if x.shape[1] == 1:
+            return first, mu, log_var
+        return torch.cat([first, x[:, 1:]], dim=1), mu, log_var
 
     def _augment(self, x: torch.Tensor) -> torch.Tensor:
         return torch.cat([x, grid_channels(x)], dim=1)

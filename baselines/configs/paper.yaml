@@ -1,4 +1,4 @@
-data_root: /home/tat512/C01Python/PDEdata
+data_root: ~/share/PDEdata
 output_dir: outputs/baselines/paper
 experiment_mode: paper
 
@@ -20,7 +20,7 @@ epochs: 200
 learning_rate: 0.001
 train_size: 50000
 val_size: 1000
-test_size: 10000
+test_size: 1000
 train_shards: 5
 scalar_param_mode: metadata
 sensor_budget_mode: per_time
@@ -29,8 +29,8 @@ num_workers: 4
 pin_memory: true
 persistent_workers: true
 prefetch_factor: 2
-seeds: [1, 2, 3]
-sensor_counts: [50, 100, 250, 500, 1000]
+seeds: [1]
+sensor_counts: [500]
 sensor_modes: [random_per_sample, grid, fixed]
 noise_levels: [0.0, 0.01, 0.05, 0.10]
 
@@ -80,6 +80,18 @@ method_by_baseline:
     official_backend: ifno
     width: 64
     layers: 4
+    rank: 24
+    training_protocol: official_three_stage
+    ifno_pretrain_epochs: 200
+    vae_pretrain_epochs: 100
+    joint_epochs: 200
+    lr_ifno: 0.00025
+    lr_vae: 0.001
+    lr_forward: 0.00005
+    lr_backward: 0.00005
+    kl_weight: 0.01
+    reconstruction_weight: 1.0
+    vae_resolution: 64
     cycle_weight: 0.0
     lr: 0.0005
     grad_clip_norm: 1.0
@@ -105,25 +117,37 @@ method_by_baseline:
     width: 64
   pinn_sparse:
     normalize: false
+    implementation_mode: official_aligned
+    official_backend: deepxde
+    deepxde_native: true
     hidden: 128
     depth: 5
     steps: 1000
+    adam_iterations: 1000
+    lbfgs_steps: 500
+    num_domain: 4096
+    num_boundary: 512
+    activation: tanh
+    kernel_initializer: Glorot normal
     lr: 0.001
-    optimizer: adam
+    lambda_int: 1.0
+    lambda_bc: 1.0
+    lambda_obs: 1.0
   pc_bnn:
     normalize: false
-    implementation_mode: adapted
-    official_backend: local
-    hidden: 128
+    implementation_mode: official_aligned
+    official_backend: pc_bnn
+    hidden: 20
     depth: 3
-    particles: 8
-    steps: 500
+    particles: 5
+    steps: 2000
     lr: 0.001
+    lr_noise: 0.00001
     beta_prior_shape: 2.0
     beta_prior_rate: 1.0e-6
     weight_prior_shape: 1.0
     weight_prior_rate: 0.05
-    initial_noise_precision: 100.0
+    equation_variance: 0.0001
   pde_opt:
     normalize: false
     steps: 500

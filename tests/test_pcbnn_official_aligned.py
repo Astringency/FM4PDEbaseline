@@ -62,6 +62,15 @@ def test_pcbnn_adapted_static_tasks_return_calibratable_particle_artifacts(task)
     assert batch.metadata["predictive_std"].shape == batch.target_fields.shape
     assert torch.isfinite(batch.metadata["predictive_std"]).all()
     assert all(value > 0 for value in batch.metadata["posterior_noise_precision"])
+    assert batch.metadata["pc_bnn_training_protocol"] == {
+        "particle_optimizer": "adam",
+        "weight_lr": cfg.get("lr", 1e-2),
+        "noise_lr": cfg.get("lr_noise", 1e-5),
+        "initialization": "independent_kaiming_normal",
+        "noise_precision_initialization": "gamma_prior",
+        "svgd_kernel": "official_rbf_median",
+        "equation_precision": 1.0e4,
+    }
 
     backend = _backend_info(model, model.config)
     cap = resolve_capability("pc_bnn", "poisson", task, "fixed")

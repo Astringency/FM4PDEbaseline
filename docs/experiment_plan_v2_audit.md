@@ -60,13 +60,13 @@ vendored source metadata 中的 upstream revision 和 local modifications 仍为
 |---|---|---:|---|
 | fno | `official_component_reuse` | 否 | 复用了 NeuralOperator FNO 组件，但训练器、优化器、归一化、早停和评估均为本地协议。 |
 | deeponet | `official_component_reuse` | 否 | 复用了 DeepXDE Cartesian-product 网络组件，但未使用官方 Model.compile/Model.train 实验协议。 |
-| ifno | `adapted_reimplementation` | 否 | 本地 official-aligned 架构实现，不是固定 revision 的直接官方运行。 |
+| ifno | `official_training_aligned_adaptation` | 否 | 保留可逆耦合、官方 VAE 拓扑、posterior-mean 逆推理和三阶段训练；数据与任务由 FM4PDE adapter 提供。 |
 | recfno | `adapted_reimplementation_major_input_divergence` | 否 | 审计适配器使用 zero-filled field + mask + coordinates，width/modes/loss/训练设置均不同于 vendored recipe。 |
 | senseiver | `adapted_reimplementation_major_encoding_divergence` | 否 | 审计适配器使用 raw coordinates 和不同 latent/layer 设置，没有采用 vendored Fourier positional encoding recipe。 |
 | voronoicnn | `architecture_reimplementation` | 否 | 复现了核心层类型，但 width、batch size、epochs 和统一任务协议不同于 vendored 实验。 |
-| pinn_sparse | `project_canonical_custom_baseline` | 否 | 项目定义的 sparse PINN 协议；未固定可对应的上游完整实验。 |
+| pinn_sparse | `deepxde_native_task_adapter` | 否 | 使用 DeepXDE PDE、PointSetBC、自动微分、FNN 与 Adam→L-BFGS；联合场输出适配 FM4PDE 稀疏任务。 |
 | pde_opt | `project_custom_baseline` | 否 | 项目定义的 per-instance PDE optimization baseline。 |
-| pc_bnn | `official_component_or_aligned_reimplementation` | 否 | 仅 shallow-water 三通道 sparse reconstruction 与论文假设匹配；标量 PDE 的通用 SVGD 版本只允许 debug/supplement，且 v2 表未运行该方法。 |
+| pc_bnn | `official_training_aligned_adaptation` | 否 | 保留三层 Swish、层次先验、Gamma 初始化、SVGD 修正梯度和逐粒子 Adam；PDE likelihood 与输出场适配静态 FM4PDE 任务。 |
 | var4d | `project_canonical_math_baseline` | 否 | 项目本地 4D-Var/两层动力学实现；只有显式 time-varying trajectory 协议可进入统一比较，v2 表未运行。 |
 | vivid | `official_component_or_aligned_adapter` | 否 | 需要显式 inverse-observation operator 与完整时变轨迹；统一训练/评估仍为本地适配，v2 表未运行。 |
 
@@ -74,7 +74,7 @@ vendored source metadata 中的 upstream revision 和 local modifications 仍为
 
 当前代码已实现上述协议修复：`random_per_sample` 为 batch-aware mask，训练按 epoch 换布局；sparse-forward 改用 input-side normalization；loss/metric 禁止广播与裁剪；Burger full inverse 改为 `u(T)->u(0)` 并禁用 sparse-inverse；模型评估视图不再包含 target/full truth。
 
-RecFNO 当前使用 Voronoi-filled field + mask + coordinates，Senseiver 当前恢复 Fourier positional encoding；FNO/DeepONet/RecFNO/Senseiver 均明确标成 official component + unified adapted training，iFNO 标成 adapted reimplementation。旧 checkpoint 因输入/架构或 provenance 不兼容必须隔离重训，这些修复不会追溯性地使历史 87 行有效。
+RecFNO 当前使用 Voronoi-filled field + mask + coordinates，Senseiver 当前恢复 Fourier positional encoding；FNO/DeepONet/RecFNO/Senseiver 均明确标成 official component + unified adapted training，iFNO/PINN-Sparse/PC-BNN 标成 official-training-aligned task adaptation。旧 checkpoint 因输入/架构、训练协议或 provenance 不兼容必须隔离重训，这些修复不会追溯性地使历史结果有效。
 
 runner/checkpoint/export pipeline 现记录并校验 schema、execution mode、run/config fingerprint、protocol versions、checkpoint SHA-256 与 comparison track；legacy/mismatch summary 会进入 quarantine。
 

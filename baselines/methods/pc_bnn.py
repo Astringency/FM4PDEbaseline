@@ -92,14 +92,14 @@ class PCBNNBaseline(BaselineModel):
             "pc_bnn_adapted",
             "pc_bnn",
             fallback_used=False,
-            implementation_mode_effective="adapted",
-            implementation_source="official_pcbnn_posterior_with_fm4pde_task_adapter",
+            implementation_mode_effective="official_aligned",
+            implementation_source="official_pcbnn_training_with_fm4pde_task_adapter",
             official_import_success=False,
-            official_reimplementation_success=False,
-            official_alignment_level="algorithm",
+            official_reimplementation_success=True,
+            official_alignment_level="algorithm_training",
             official_alignment_notes=(
                 "Preserves the official three-layer Swish particle architecture, Student-t weight prior, "
-                "Gamma noise-precision prior, SVGD update, observation likelihood, and physics likelihood; "
+                "Gamma noise-precision prior, SVGD-transformed per-particle Adam updates, observation likelihood, and physics likelihood; "
                 "the output fields and PDE residual are adapted to FM4PDE static tasks."
             ),
             adapter_status=adapter_status,
@@ -125,6 +125,7 @@ class PCBNNBaseline(BaselineModel):
         statuses = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
+        lr_noise = float(self.config.get("lr_noise", min(lr, 1e-5)))
         hidden = self.hidden
         depth = self.depth
         lam_obs = float(self.config.get("lambda_obs", 1.0))
@@ -135,10 +136,8 @@ class PCBNNBaseline(BaselineModel):
                 self._new_particle(coords.shape[-1], target.shape[1]).to(target.device)
                 for _ in range(self.particles)
             ]
-            for particle_id, particle in enumerate(particles):
-                torch.manual_seed(int(self.config.get("seed", 0)) + particle_id)
-                for param in particle.parameters():
-                    param.data.add_(torch.randn_like(param) * float(self.config.get("init_std", 1e-2)))
+            _initialize_particles(particles, self.config)
+            optimizers = _particle_optimizers(particles, lr=lr, lr_noise=lr_noise)
             stopper = LossPlateauStopper(self.config)
             for _ in range(max(steps, 0)):
                 losses = []
@@ -164,10 +163,7 @@ class PCBNNBaseline(BaselineModel):
                 theta = torch.stack(thetas)
                 grad_loss = torch.stack(grads)
                 updates = _svgd_descent_direction(theta, grad_loss)
-                with torch.no_grad():
-                    for particle, update in zip(particles, updates):
-                        _assign_flat_params(particle, _flatten_params(particle) - lr * update)
-                        particle.clamp_noise_precision()
+                _apply_svgd_adam(particles, optimizers, updates)
                 if stopper.update(torch.stack(losses).mean()):
                     break
             preds = []
@@ -187,6 +183,7 @@ class PCBNNBaseline(BaselineModel):
         batch.metadata["posterior_noise_precision"] = noise_precisions
         batch.metadata["pc_bnn_posterior_objective"] = _POSTERIOR_OBJECTIVE
         batch.metadata["posterior_particles"] = int(self.particles)
+        _record_training_protocol(batch, lr=lr, lr_noise=lr_noise, config=self.config)
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         record_optimization_status(batch, statuses)
         return mean
@@ -207,6 +204,7 @@ class PCBNNBaseline(BaselineModel):
         statuses: list[dict] = []
         steps = int(self.config.get("steps", 2))
         lr = float(self.config.get("lr", 1e-2))
+        lr_noise = float(self.config.get("lr_noise", min(lr, 1e-5)))
         lam_obs = float(self.config.get("lambda_obs", 1.0))
         for item in range(batch.target_fields.shape[0]):
             coords = batch.coords[item].to(batch.target_fields.device, batch.target_fields.dtype)
@@ -222,10 +220,8 @@ class PCBNNBaseline(BaselineModel):
                 self._new_particle(coords.shape[-1], unknown_channels + solution_channels).to(batch.target_fields.device)
                 for _ in range(self.particles)
             ]
-            for particle_id, particle in enumerate(particles):
-                torch.manual_seed(int(self.config.get("seed", 0)) + particle_id)
-                for param in particle.parameters():
-                    param.data.add_(torch.randn_like(param) * float(self.config.get("init_std", 1e-2)))
+            _initialize_particles(particles, self.config)
+            optimizers = _particle_optimizers(particles, lr=lr, lr_noise=lr_noise)
             stopper = LossPlateauStopper(self.config)
             for _ in range(max(steps, 0)):
                 grads: list[torch.Tensor] = []
@@ -250,10 +246,7 @@ class PCBNNBaseline(BaselineModel):
                     thetas.append(_flatten_params(particle))
                 theta = torch.stack(thetas)
                 updates = _svgd_descent_direction(theta, torch.stack(grads))
-                with torch.no_grad():
-                    for particle, update in zip(particles, updates):
-                        _assign_flat_params(particle, _flatten_params(particle) - lr * update)
-                        particle.clamp_noise_precision()
+                _apply_svgd_adam(particles, optimizers, updates)
                 if stopper.update(torch.stack(losses).mean()):
                     break
             predictions: list[torch.Tensor] = []
@@ -277,6 +270,7 @@ class PCBNNBaseline(BaselineModel):
         batch.metadata["pc_bnn_joint_field_posterior"] = True
         batch.metadata["pc_bnn_posterior_objective"] = _POSTERIOR_OBJECTIVE
         batch.metadata["pc_bnn_task_adapter"] = type(adapter).__name__
+        _record_training_protocol(batch, lr=lr, lr_noise=lr_noise, config=self.config)
         batch.metadata["inference_optimization_time"] = time.perf_counter() - start
         record_optimization_status(batch, statuses)
         return mean
@@ -353,7 +347,9 @@ def _negative_log_posterior(
     beta_rate = float(config.get("beta_prior_rate", 1e-6))
     beta_prior = beta_rate * beta - (beta_shape - 1.0) * log_beta
     physics = physics_loss if torch.isfinite(physics_loss) else torch.zeros_like(observation_nll)
-    return observation_nll + physics + weight_prior + beta_prior
+    equation_variance = max(float(config.get("equation_variance", 1e-4)), 1e-12)
+    physics_nll = 0.5 / equation_variance * physics
+    return observation_nll + physics_nll + weight_prior + beta_prior
 
 
 def _observation_count(batch: PDEBatch, item: int) -> int:
@@ -402,6 +398,78 @@ def _assign_flat_params(model: torch.nn.Module, vector: torch.Tensor) -> None:
         offset += numel
 
 
+def _assign_flat_grad(model: torch.nn.Module, vector: torch.Tensor) -> None:
+    offset = 0
+    for parameter in model.parameters():
+        numel = parameter.numel()
+        parameter.grad = vector[offset : offset + numel].reshape_as(parameter).clone()
+        offset += numel
+
+
+def _initialize_particles(particles: list[PCBNNParticle], config: dict) -> None:
+    seed = int(config.get("seed", 0))
+    beta_shape = max(float(config.get("beta_prior_shape", 2.0)), 1e-12)
+    beta_rate = max(float(config.get("beta_prior_rate", 1e-6)), 1e-12)
+    devices = {particle.log_beta.device for particle in particles}
+    if len(devices) != 1:
+        raise ValueError("All PC-BNN particles must be on one device")
+    for particle_id, particle in enumerate(particles):
+        with torch.random.fork_rng(devices=[particle.log_beta.device] if particle.log_beta.is_cuda else []):
+            torch.manual_seed(seed + particle_id)
+            for module in particle.features.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_normal_(module.weight)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+            precision = torch.distributions.Gamma(beta_shape, beta_rate).sample().to(
+                particle.log_beta.device, particle.log_beta.dtype
+            )
+            with torch.no_grad():
+                particle.log_beta.copy_(precision.clamp_min(1e-12).log())
+                particle.clamp_noise_precision()
+
+
+def _particle_optimizers(
+    particles: list[PCBNNParticle], *, lr: float, lr_noise: float
+) -> list[torch.optim.Optimizer]:
+    return [
+        torch.optim.Adam(
+            [
+                {"params": [particle.log_beta], "lr": lr_noise},
+                {"params": particle.features.parameters(), "lr": lr},
+            ],
+            lr=lr,
+        )
+        for particle in particles
+    ]
+
+
+def _apply_svgd_adam(
+    particles: list[PCBNNParticle],
+    optimizers: list[torch.optim.Optimizer],
+    directions: torch.Tensor,
+) -> None:
+    for particle, optimizer, direction in zip(particles, optimizers, directions):
+        optimizer.zero_grad(set_to_none=True)
+        _assign_flat_grad(particle, direction)
+        optimizer.step()
+        with torch.no_grad():
+            particle.clamp_noise_precision()
+
+
+def _record_training_protocol(batch: PDEBatch, *, lr: float, lr_noise: float, config: dict) -> None:
+    equation_variance = max(float(config.get("equation_variance", 1e-4)), 1e-12)
+    batch.metadata["pc_bnn_training_protocol"] = {
+        "particle_optimizer": "adam",
+        "weight_lr": lr,
+        "noise_lr": lr_noise,
+        "initialization": "independent_kaiming_normal",
+        "noise_precision_initialization": "gamma_prior",
+        "svgd_kernel": "official_rbf_median",
+        "equation_precision": 1.0 / equation_variance,
+    }
+
+
 def _svgd_descent_direction(theta: torch.Tensor, grad_loss: torch.Tensor) -> torch.Tensor:
     particles = theta.shape[0]
     if particles == 1:
@@ -409,7 +477,7 @@ def _svgd_descent_direction(theta: torch.Tensor, grad_loss: torch.Tensor) -> tor
     sqdist = torch.cdist(theta, theta, p=2).pow(2)
     pairwise = sqdist.detach()[torch.triu_indices(particles, particles, offset=1, device=theta.device).unbind()]
     median = torch.median(pairwise)
-    bandwidth = median / torch.log(torch.tensor(float(particles + 1), device=theta.device, dtype=theta.dtype))
+    bandwidth = median / torch.log(torch.tensor(float(particles), device=theta.device, dtype=theta.dtype))
     bandwidth = bandwidth.clamp_min(1e-6)
     kernel = torch.exp(-sqdist / bandwidth)
     attractive = kernel.T @ grad_loss / particles

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import io
+import os
 import sys
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -149,6 +150,35 @@ def get_deepxde_deeponet_class() -> type[Any]:
 
 def get_deepxde_fnn_class() -> type[Any]:
     return _deepxde_import("deepxde.nn.pytorch.fnn", "FNN")
+
+
+def get_deepxde_module() -> ModuleType:
+    """Import the vendored DeepXDE package with its PyTorch backend."""
+
+    os.environ.setdefault("DDE_BACKEND", "pytorch")
+    default_device = None
+    try:
+        import torch
+
+        default_device = torch.get_default_device()
+    except Exception:
+        torch = None  # type: ignore[assignment]
+    with _prepend_path(OFFICIAL_ROOT / "deepxde"):
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                module = importlib.import_module("deepxde")
+            if str(module.backend.backend_name).lower() != "pytorch":
+                raise OfficialImportError(
+                    f"DeepXDE must use the pytorch backend, got {module.backend.backend_name!r}"
+                )
+            return module
+        except Exception as exc:
+            if isinstance(exc, OfficialImportError):
+                raise
+            raise OfficialImportError(str(exc)) from exc
+        finally:
+            if default_device is not None and torch is not None:
+                torch.set_default_device(default_device)
 
 
 def _deepxde_import(module_name: str, attr: str) -> type[Any]:

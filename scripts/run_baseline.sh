@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # User configuration. Every value can also be overridden as an environment
 # variable, e.g. GPUS=0 JOBS_PER_GPU=1 bash scripts/run_baseline.sh.
 # ---------------------------------------------------------------------------
-DATA_ROOT="${DATA_ROOT:-/home/tat512/share/PDEdata}"
+DATA_ROOT="${DATA_ROOT:-~/share/PDEdata}"
 OUT_ROOT="${OUT_ROOT:-outputs/main_results}"
 CONFIG="${CONFIG:-configs/experiments/main_results.yaml}"
 MATRIX_NAME="${MATRIX_NAME:-main_results}"

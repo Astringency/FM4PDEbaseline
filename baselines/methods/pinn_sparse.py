@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 import warnings
 
+import numpy as np
+
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
@@ -11,7 +13,13 @@ from baselines.common.data_adapter import PDEBatch
 from baselines.common.metrics import NotImplementedWarning, physics_loss_metric
 
 from .base import BaselineModel, record_optimization_status, run_per_instance_optimizer
-from .official import OfficialImportError, get_deepxde_fnn_class, official_source_info, requested_implementation_mode
+from .official import (
+    OfficialImportError,
+    get_deepxde_fnn_class,
+    get_deepxde_module,
+    official_source_info,
+    requested_implementation_mode,
+)
 from .shared import NeuralField
 
 STATIC_SPARSE_INVERSE_PDES = {"poisson", "helmholtz", "darcy", "steady_heat_conduction"}
@@ -35,10 +43,38 @@ class PINNSparseBaseline(BaselineModel):
         self.hidden = int(self.config.get("hidden", 64))
         self.depth = int(self.config.get("depth", 4))
         self.deepxde_fnn_cls = None
+        self.deepxde = None
         backend = str(self.config.get("official_backend", "auto")).lower()
         implementation_mode = requested_implementation_mode(self.config)
         fallback_reason = ""
-        if implementation_mode != "adapted" and backend in {"auto", "deepxde", "official"}:
+        native_deepxde = bool(self.config.get("deepxde_native", False)) or (
+            implementation_mode in {"official", "official_or_skip", "official_aligned"}
+            and backend in {"deepxde", "official"}
+        )
+        if native_deepxde:
+            try:
+                self.deepxde = get_deepxde_module()
+                self.deepxde_fnn_cls = self.deepxde.nn.FNN
+                self.set_backend(
+                    "deepxde_native",
+                    "deepxde",
+                    fallback_used=False,
+                    implementation_mode_effective="official_aligned",
+                    implementation_source="deepxde_pde_model_with_fm4pde_task_adapter",
+                    official_import_success=True,
+                    official_reimplementation_success=False,
+                    official_alignment_level="training_api",
+                    official_alignment_notes=(
+                        "Uses DeepXDE geometry, PDE data, PointSetBC, automatic differentiation, FNN, "
+                        "and Adam/L-BFGS while adapting field components to FM4PDE tasks."
+                    ),
+                    adapter_status="deepxde_native_task_adapter",
+                    **official_source_info("deepxde"),
+                )
+            except OfficialImportError:
+                if backend in {"deepxde", "official"}:
+                    raise
+        elif implementation_mode != "adapted" and backend in {"auto", "deepxde", "official"}:
             try:
                 self.deepxde_fnn_cls = get_deepxde_fnn_class()
                 self.set_backend(
@@ -92,6 +128,8 @@ class PINNSparseBaseline(BaselineModel):
         return {"status": "per_instance_method_no_amortized_fit"}
 
     def predict(self, batch: PDEBatch):
+        if self.deepxde is not None and batch.task in {"sparse_forward", "sparse_inverse"}:
+            return self._predict_deepxde(batch)
         if batch.task == "sparse_inverse":
             return self._predict_sparse_inverse(batch)
         if batch.task == "sparse_forward":
@@ -138,6 +176,127 @@ class PINNSparseBaseline(BaselineModel):
         batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
         record_optimization_status(batch, statuses)
         return torch.cat(preds, dim=0).detach()
+
+    def _predict_deepxde(self, batch: PDEBatch) -> torch.Tensor:
+        pde = batch.pde_name.lower()
+        if pde not in STATIC_SPARSE_INVERSE_PDES:
+            raise NotImplementedError(f"DeepXDE PINN-Sparse supports static PDEs only, got {batch.pde_name}")
+        if batch.obs_coords is None or batch.obs_values is None:
+            raise ValueError("DeepXDE PINN-Sparse requires explicit obs_coords and obs_values")
+        dde = self.deepxde
+        start = _synchronized_perf_counter(batch)
+        predictions: list[torch.Tensor] = []
+        statuses: list[dict] = []
+        adam_iterations = max(int(self.config.get("adam_iterations", self.config.get("steps", 1000))), 0)
+        lbfgs_steps = max(int(self.config.get("lbfgs_steps", 0)), 0)
+        lr = float(self.config.get("lr", 1e-3))
+        num_domain = int(self.config.get("num_domain", min(int(batch.coords.shape[1]), 4096)))
+        height, width = (int(value) for value in batch.target_fields.shape[-2:])
+        num_boundary = int(self.config.get("num_boundary", 2 * (height + width)))
+        seed = int(self.config.get("seed", 0))
+        dde.config.set_random_seed(seed)
+        for item in range(batch.target_fields.shape[0]):
+            observation_coords = batch.obs_coords[item].detach().cpu().numpy().astype(np.float32, copy=False)
+            observation_values = batch.obs_values[item].detach().cpu().numpy().astype(np.float32, copy=False)
+            geometry = dde.geometry.Rectangle([0.0, 0.0], [1.0, 1.0])
+            pde_fn = _deepxde_static_pde(dde, pde, batch, item, self.config)
+            observed_component = 0 if batch.task == "sparse_inverse" else 1
+            conditions = [
+                dde.icbc.PointSetBC(observation_coords, observation_values, component=observed_component)
+            ]
+            use_zero_boundary = bool(self.config.get("deepxde_zero_boundary", pde != "helmholtz"))
+            if use_zero_boundary:
+                conditions.insert(
+                    0,
+                    dde.icbc.DirichletBC(
+                        geometry,
+                        lambda x: np.zeros((len(x), 1), dtype=np.float32),
+                        lambda _, on_boundary: on_boundary,
+                        component=0,
+                    ),
+                )
+            data = dde.data.PDE(
+                geometry,
+                pde_fn,
+                conditions,
+                num_domain=num_domain,
+                num_boundary=num_boundary if use_zero_boundary else 0,
+                train_distribution=str(self.config.get("train_distribution", "Hammersley")),
+                anchors=observation_coords,
+                num_test=int(self.config.get("num_test_collocation", min(num_domain, 1024))),
+            )
+            layers = [2] + [self.hidden] * max(self.depth, 1) + [2]
+            net = dde.nn.FNN(
+                layers,
+                str(self.config.get("activation", "tanh")),
+                str(self.config.get("kernel_initializer", "Glorot normal")),
+            )
+            if pde == "darcy":
+                coefficient_floor = float(self.config.get("coefficient_floor", 1e-6))
+
+                def output_transform(x, y):
+                    del x
+                    return torch.cat([y[:, :1], F.softplus(y[:, 1:2]) + coefficient_floor], dim=1)
+
+                net.apply_output_transform(output_transform)
+            model = dde.Model(data, net)
+            loss_weights = _deepxde_loss_weights(self.config, use_zero_boundary)
+            callbacks = []
+            if bool(self.config.get("early_stopping", False)) and adam_iterations > 0:
+                callbacks.append(
+                    dde.callbacks.EarlyStopping(
+                        min_delta=float(self.config.get("early_stopping_min_delta", 1e-4)),
+                        patience=int(self.config.get("early_stopping_patience", 20)),
+                        monitor="loss_train",
+                        start_from_epoch=int(self.config.get("min_steps", 0)),
+                    )
+                )
+            completed = 0
+            early_stopped = False
+            if adam_iterations > 0:
+                model.compile("adam", lr=lr, loss_weights=loss_weights)
+                model.train(iterations=adam_iterations, callbacks=callbacks, display_every=max(adam_iterations, 1), verbose=0)
+                completed += int(model.train_state.iteration)
+                early_stopped = any(getattr(callback, "stopped_epoch", 0) > 0 for callback in callbacks)
+            if lbfgs_steps > 0 and not early_stopped:
+                dde.optimizers.config.set_LBFGS_options(
+                    maxiter=lbfgs_steps,
+                    ftol=float(self.config.get("lbfgs_ftol", 0.0)),
+                    gtol=float(self.config.get("lbfgs_gtol", 1e-8)),
+                )
+                model.compile("L-BFGS", loss_weights=loss_weights)
+                before = int(model.train_state.iteration)
+                model.train(verbose=0)
+                completed += max(int(model.train_state.iteration) - before, 0)
+            grid_coords = batch.coords[item].detach().cpu().numpy().astype(np.float32, copy=False)
+            joint = torch.as_tensor(model.predict(grid_coords), device=batch.target_fields.device, dtype=batch.target_fields.dtype)
+            returned_component = 1 if batch.task == "sparse_inverse" else 0
+            returned = joint[:, returned_component].reshape(1, 1, height, width)
+            predictions.append(returned)
+            statuses.append(
+                {
+                    "completed_steps": completed,
+                    "early_stopped": early_stopped,
+                    "best_loss": None,
+                    "min_delta": float(self.config.get("early_stopping_min_delta", 1e-4)),
+                    "patience": int(self.config.get("early_stopping_patience", 20)),
+                    "stop_reason": "deepxde_early_stopping" if early_stopped else "",
+                }
+            )
+        batch.metadata["inference_optimization_time"] = _synchronized_perf_counter(batch) - start
+        batch.metadata["pinn_sparse_training_protocol"] = {
+            "data": "dde.data.PDE",
+            "observation_bc": "dde.icbc.PointSetBC",
+            "derivatives": "deepxde_autodiff",
+            "network": "dde.nn.FNN",
+            "network_outputs": ["solution", "unknown"],
+            "adam_iterations": adam_iterations,
+            "lbfgs_steps": lbfgs_steps,
+            "num_domain": num_domain,
+            "num_boundary": num_boundary if bool(self.config.get("deepxde_zero_boundary", pde != "helmholtz")) else 0,
+        }
+        record_optimization_status(batch, statuses)
+        return torch.cat(predictions, dim=0).detach()
 
     def _predict_sparse_inverse(self, batch: PDEBatch):
         pde = batch.pde_name.lower()
@@ -275,6 +434,55 @@ def sparse_inverse_physics_loss(
     meta["input_fields"] = solution
     losses = physics_loss_metric(unknown, batch.pde_name, meta)
     return _select_physics_loss(losses, config, unknown)
+
+
+def _deepxde_static_pde(dde, pde_name: str, batch: PDEBatch, item: int, config: dict):
+    """Build an autodiff residual with outputs ordered as ``(solution, unknown)``."""
+
+    del item
+    operator_sign = float(
+        config.get("elliptic_operator_sign", batch.metadata.get("elliptic_operator_sign", 1.0))
+    )
+    if pde_name == "poisson":
+
+        def poisson(x, y):
+            solution_xx = dde.grad.hessian(y, x, component=0, i=0, j=0)
+            solution_yy = dde.grad.hessian(y, x, component=0, i=1, j=1)
+            return operator_sign * (solution_xx + solution_yy) - y[:, 1:2]
+
+        return poisson
+    if pde_name == "helmholtz":
+        wave_number = float(config.get("k", batch.metadata.get("k", 1.0)))
+
+        def helmholtz(x, y):
+            solution_xx = dde.grad.hessian(y, x, component=0, i=0, j=0)
+            solution_yy = dde.grad.hessian(y, x, component=0, i=1, j=1)
+            operator = solution_xx + solution_yy + wave_number**2 * y[:, :1]
+            return operator_sign * operator - y[:, 1:2]
+
+        return helmholtz
+    if pde_name == "darcy":
+
+        def darcy(x, y):
+            pressure_x = dde.grad.jacobian(y, x, i=0, j=0)
+            pressure_y = dde.grad.jacobian(y, x, i=0, j=1)
+            pressure_xx = dde.grad.hessian(y, x, component=0, i=0, j=0)
+            pressure_yy = dde.grad.hessian(y, x, component=0, i=1, j=1)
+            coefficient_x = dde.grad.jacobian(y, x, i=1, j=0)
+            coefficient_y = dde.grad.jacobian(y, x, i=1, j=1)
+            coefficient = y[:, 1:2]
+            return -(coefficient_x * pressure_x + coefficient_y * pressure_y + coefficient * (pressure_xx + pressure_yy)) - 1.0
+
+        return darcy
+    raise NotImplementedError(f"No DeepXDE-native static residual for {pde_name}")
+
+
+def _deepxde_loss_weights(config: dict, use_zero_boundary: bool) -> list[float]:
+    weights = [float(config.get("lambda_int", config.get("lambda_pde", 1.0)))]
+    if use_zero_boundary:
+        weights.append(float(config.get("lambda_bc", 1.0)))
+    weights.append(float(config.get("lambda_obs", 1.0)))
+    return weights
 
 
 def _observation_loss(
