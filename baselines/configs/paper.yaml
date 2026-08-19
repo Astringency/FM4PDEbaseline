@@ -13,7 +13,7 @@ batch_size: 16
 epochs: 200
 learning_rate: 0.001
 train_size: 50000
-val_size: 1000
+val_size: 5000
 test_size: 1000
 train_shards: 5
 scalar_param_mode: metadata
@@ -126,7 +126,7 @@ method_by_baseline:
     training_loss: sum_mse
     lr_scheduler: none
     scheduler_monitor: train_loss
-    early_stopping_patience: 100
+    early_stopping_patience: 20
   voronoicnn:
     implementation_mode: official_architecture
     official_backend: voronoicnn
@@ -134,7 +134,7 @@ method_by_baseline:
     optimizer: adam
     training_loss: mse
     lr_scheduler: none
-    early_stopping_patience: 100
+    early_stopping_patience: 20
   pinn_sparse:
     normalize: false
     implementation_mode: official_aligned

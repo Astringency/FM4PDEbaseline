@@ -308,6 +308,8 @@ class PINNSparseBaseline(BaselineModel):
                     )
                 )
             completed = 0
+            adam_iterations_completed = 0
+            lbfgs_steps_completed = 0
             early_stopped = False
             if adam_iterations > 0:
                 model.compile("adam", lr=lr, loss_weights=loss_weights)
@@ -316,7 +318,8 @@ class PINNSparseBaseline(BaselineModel):
                 # Refresh every iteration so EarlyStopping never observes a
                 # stale loss repeatedly.
                 model.train(iterations=adam_iterations, callbacks=callbacks, display_every=1, verbose=0)
-                completed += int(model.train_state.iteration)
+                adam_iterations_completed = int(model.train_state.iteration)
+                completed += adam_iterations_completed
                 early_stopped = any(getattr(callback, "stopped_epoch", 0) > 0 for callback in callbacks)
             if lbfgs_steps > 0:
                 dde.optimizers.config.set_LBFGS_options(
@@ -331,7 +334,8 @@ class PINNSparseBaseline(BaselineModel):
                     display_every=1,
                     verbose=0,
                 )
-                completed += max(int(model.train_state.iteration) - before, 0)
+                lbfgs_steps_completed = max(int(model.train_state.iteration) - before, 0)
+                completed += lbfgs_steps_completed
             if best_callback is not None and best_callback.best_state is not None:
                 restore_state_dict(net, best_callback.best_state)
             grid_coords = batch.coords[item].detach().cpu().numpy().astype(np.float32, copy=False)
@@ -342,6 +346,11 @@ class PINNSparseBaseline(BaselineModel):
             statuses.append(
                 {
                     "completed_steps": completed,
+                    "adam_iterations_budget": adam_iterations,
+                    "adam_iterations_completed": adam_iterations_completed,
+                    "lbfgs_steps_budget": lbfgs_steps,
+                    "lbfgs_steps_completed": lbfgs_steps_completed,
+                    "total_optimization_steps_budget": adam_iterations + lbfgs_steps,
                     "early_stopped": early_stopped,
                     "best_loss": None if best_callback is None else best_callback.best_loss,
                     "min_delta": float(self.config.get("early_stopping_min_delta", 1e-4)),
@@ -358,6 +367,7 @@ class PINNSparseBaseline(BaselineModel):
             "network_outputs": ["solution", "unknown"],
             "adam_iterations": adam_iterations,
             "lbfgs_steps": lbfgs_steps,
+            "total_optimization_steps": adam_iterations + lbfgs_steps,
             "early_stopping_loss_refresh_interval": 1,
             "early_stopping_start_iteration": int(
                 self.config.get("min_steps", self.config.get("min_epochs", 0))

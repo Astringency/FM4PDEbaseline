@@ -36,6 +36,28 @@ def test_runtime_budget_steps_are_aggregation_keys():
     assert {row["budget_variation_warning"] for row in summary} == {""}
 
 
+def test_pinn_phase_budgets_survive_aggregation():
+    row = _raw_row(1000)
+    row.update(
+        {
+            "baseline": "pinn_sparse",
+            "adam_iterations": 1000,
+            "lbfgs_steps": 500,
+            "total_optimization_steps": 1500,
+            "method_budget_label": (
+                "adam_iterations=1000,lbfgs_steps=500,total_optimization_steps=1500"
+            ),
+        }
+    )
+
+    summary = aggregate_rows([row])
+
+    assert summary[0]["adam_iterations"] == 1000
+    assert summary[0]["lbfgs_steps"] == 500
+    assert summary[0]["total_optimization_steps"] == 1500
+    assert summary[0]["method_budget_label"] == row["method_budget_label"]
+
+
 def test_main_results_budget_fields_are_recorded_not_grouped():
     rows = [
         _raw_row(50, experiment_kind="main", ablation_factor="none"),

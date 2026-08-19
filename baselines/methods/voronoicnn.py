@@ -42,8 +42,9 @@ class VoronoiCNNBaseline(BaselineModel):
                 official_import_success=False,
                 official_alignment_level="algorithm_training",
                 official_alignment_notes=(
-                    "Reimplements the non-importable Keras Conv2D stack and preserves Adam, MSE, validation-loss "
-                    "checkpointing, and patience=100 while adapting tensor layout and data loading to PyTorch."
+                    "Reimplements the non-importable Keras Conv2D stack and preserves Adam, MSE, and validation-loss "
+                    "checkpointing; early-stop patience is reduced from the official 100 to 20 while adapting tensor "
+                    "layout and data loading to PyTorch."
                 ),
                 adapter_status="official_training_flow_adapter",
                 **official_source_info("voronoi_cnn"),

@@ -314,7 +314,7 @@ def test_paper_configs_disclose_recfno_input_and_senseiver_architecture():
         "training_loss": "sum_mse",
         "lr_scheduler": "none",
         "scheduler_monitor": "train_loss",
-        "early_stopping_patience": 100,
+        "early_stopping_patience": 20,
     }
 
     assert not (root / "baselines" / "configs" / "default.yaml").exists()

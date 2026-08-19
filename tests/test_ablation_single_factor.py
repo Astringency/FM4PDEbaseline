@@ -48,8 +48,8 @@ def test_sensor_mode_ablation_only_varies_sensor_mode(tmp_path: Path, monkeypatc
 
 def test_train_size_ablation_only_varies_train_size(tmp_path: Path, monkeypatch):
     rows, _skipped, _summary = _matrix("train_size_ablation", tmp_path, monkeypatch)
-    assert {row["train_size"] for row in rows} == {5000, 10000, 20000, 30000, 50000}
-    assert {row["val_size"] for row in rows} == {1000}
+    assert {row["train_size"] for row in rows} == {10000, 15000, 25000, 35000, 50000}
+    assert {row["val_size"] for row in rows} == {5000}
     assert {row["num_sensors"] for row in rows} == {500}
     assert {row["sensor_mode"] for row in rows} == {"random_per_sample"}
     assert {row["sensor_budget_mode"] for row in rows} == {"total"}

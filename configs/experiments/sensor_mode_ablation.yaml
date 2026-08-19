@@ -12,7 +12,7 @@ pdes:
 baselines: [recfno, senseiver, voronoicnn]
 seeds: [1]
 train_size: 50000
-val_size: 1000
+val_size: 5000
 test_size: 1000
 train_shards: 5
 num_sensors: 500

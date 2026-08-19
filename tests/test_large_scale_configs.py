@@ -28,7 +28,7 @@ def test_main_results_config_covers_expected_pdes_and_resources():
     assert cfg["persistent_workers"] is True
     assert cfg["prefetch_factor"] == 2
     assert cfg["train_size"] == 50000
-    assert cfg["val_size"] == 1000
+    assert cfg["val_size"] == 5000
     assert cfg["test_size"] == 1000
     assert "DiffusionPDE" not in cfg["pdes"]
     configured_baselines = {
@@ -84,7 +84,7 @@ def test_experiment_configs_do_not_disable_the_validation_split():
     config_dir = ROOT / "configs" / "experiments"
     for path in sorted(config_dir.glob("*.yaml")):
         cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert int(cfg.get("val_size", 1000)) > 0, path.name
+        assert int(cfg.get("val_size", 5000)) > 0, path.name
 
 
 def test_aggregate_script_finds_results_files(tmp_path: Path):

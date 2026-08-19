@@ -15,12 +15,14 @@
 
 正式实验的数据文件由 `configs/data_files/formal_128.yaml` 逐个列出。矩阵、数据协议校验器和运行器必须传递同一份文件清单；配置清单存在时禁止回退到 glob 自动发现，缺失文件直接报错。清单中的相对路径以 `DATA_ROOT` 为根，因此迁移到其他机器时不需要修改绝对路径。
 
-`train_size` 表示训练/验证共享数据池的总大小，而不是最终用于拟合的样本数。当没有单独的 `val` 文件时，验证集固定取该数据池尾部：训练区间为 `[0, train_size - val_size)`，验证区间为 `[train_size - val_size, train_size)`。因此当前 `train_size: 50000`、`val_size: 1000` 对应 49000+1000；若改为 45000+5000，只需保持 `train_size: 50000` 并设置 `val_size: 5000`，之后重新生成数据 manifest 和实验矩阵。
+`train_size` 表示训练/验证共享数据池的总大小，而不是最终用于拟合的样本数。当没有单独的 `val` 文件时，验证集固定取该数据池尾部：训练区间为 `[0, train_size - val_size)`，验证区间为 `[train_size - val_size, train_size)`。当前统一使用 `train_size: 50000`、`val_size: 5000`，对应 45000 train + 5000 val；修改划分后需重新生成数据 manifest 和实验矩阵。
 9. 每个实验只跑一次即可，不需要像现在这样有三个 seed
 10. 评估得到的采样结果需要存储为可再次读入的文件，并绘制 pdf 图片
 11. 所有已完成实验进入同一份 `summary` 与 LaTeX 表；不再按 main/supplement 等展示层级过滤结果。实现来源、是否适配及 official-native 资格仍作为审计字段保留，不参与结果丢弃
 
-监督方法的训练适配保留以下官方设置：FNO 使用 NeuralOperator 的 H1 loss、AdamW、weight decay 与 StepLR；DeepONet 使用 DeepXDE 网络及 Adam/MSE；RecFNO 使用 L1、Adam 与 ExponentialLR；Senseiver 使用 sum-MSE、Adam、train-loss 早停（patience 100）；VoronoiCNN 使用七层 7x7 卷积栈、Adam/MSE、validation-loss 最佳 checkpoint 与 patience 100。iFNO 明确记录 iFNO 预训练、VAE 预训练、联合训练三个预算，Darcy 顺序为 iFNO→VAE→joint，Navier-Stokes 顺序为 VAE→iFNO→joint，并保留 VAE 四倍几何增强。
+监督方法的训练适配保留以下官方核心设置：FNO 使用 NeuralOperator 的 H1 loss、AdamW、weight decay 与 StepLR；DeepONet 使用 DeepXDE 网络及 Adam/MSE；RecFNO 使用 L1、Adam 与 ExponentialLR；Senseiver 使用 sum-MSE、Adam 与 train-loss 早停；VoronoiCNN 使用七层 7x7 卷积栈、Adam/MSE 与 validation-loss 最佳 checkpoint。为减少无效训练，Senseiver 和 VoronoiCNN 的早停 patience 统一适配为 20。iFNO 明确记录 iFNO 预训练、VAE 预训练、联合训练三个预算，Darcy 顺序为 iFNO→VAE→joint，Navier-Stokes 顺序为 VAE→iFNO→joint，并保留 VAE 四倍几何增强。
+
+PINN-sparse 对每个测试样本先执行 Adam（上限 1000 iterations），再执行 L-BFGS（上限 500 steps）。结果中必须分别记录 `adam_iterations`、`lbfgs_steps` 与两阶段上限之和 `total_optimization_steps`，不得只用单一 `steps` 字段代替。
 
 ---
 

@@ -109,8 +109,9 @@ class SenseiverBaseline(BaselineModel):
                     official_alignment_notes=(
                         "Directly imports the vendored Senseiver Encoder and Decoder, ports its Fourier "
                         "positions, and preserves pre-decoder query sampling, the official query-batch "
-                        "volume, sum-MSE, Adam, train-loss monitoring, and patience=100; the Lightning "
-                        "data interface is adapted to PDEBatch."
+                        "volume, sum-MSE, Adam, and train-loss monitoring; early-stop patience is reduced "
+                        "from the official 100 to 20 to limit plateau-time compute, and the Lightning data "
+                        "interface is adapted to PDEBatch."
                     ),
                     adapter_status="official_training_flow_adapter",
                     **official_source_info("senseiver"),

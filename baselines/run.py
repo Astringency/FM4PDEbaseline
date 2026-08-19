@@ -108,7 +108,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sensor-budget-mode", choices=["per_time", "total"], default=None)
     parser.add_argument("--noise-level", type=float, default=0.0)
     parser.add_argument("--train-size", type=int, default=50000)
-    parser.add_argument("--val-size", type=int, default=1000)
+    parser.add_argument("--val-size", type=int, default=5000)
     parser.add_argument("--test-size", type=int, default=1000)
     parser.add_argument("--train-shards", type=int, default=5)
     parser.add_argument(
@@ -302,6 +302,12 @@ def build_method_config(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         merged.setdefault("lr", float(cfg.get("learning_rate", 1e-3)))
     if args.steps is not None:
         merged["steps"] = int(args.steps)
+        # Matrix rows use the generic ``steps`` field for per-instance methods.
+        # DeepXDE PINN has a named Adam phase, so keep the executable phase
+        # budget aligned with the matrix/requested budget instead of only
+        # changing the reporting alias.
+        if args.baseline == "pinn_sparse" and bool(merged.get("deepxde_native", False)):
+            merged["adam_iterations"] = int(args.steps)
     if args.refine_steps is not None:
         merged["refine_steps"] = int(args.refine_steps)
     if args.particles is not None:
@@ -324,6 +330,9 @@ def build_method_config(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         merged.setdefault("refine_steps", 1)
         merged["steps"] = min(int(merged.get("steps", 1)), 1)
         merged["refine_steps"] = min(int(merged.get("refine_steps", 1)), 1)
+        if args.baseline == "pinn_sparse" and bool(merged.get("deepxde_native", False)):
+            merged["adam_iterations"] = min(int(merged.get("adam_iterations", merged["steps"]) or 0), 1)
+            merged["lbfgs_steps"] = min(int(merged.get("lbfgs_steps", 0) or 0), 1)
         merged["epochs"] = min(int(merged.get("epochs", 1)), 1)
     return merged
 
@@ -1077,10 +1086,29 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
     steps = int(method_cfg.get("steps", 0) or 0)
     refine_steps = int(method_cfg.get("refine_steps", 0) or 0)
     particles = int(method_cfg.get("particles", 0) or 0)
+    adam_iterations = (
+        int(method_cfg.get("adam_iterations", steps) or 0)
+        if baseline == "pinn_sparse" and bool(method_cfg.get("deepxde_native", False))
+        else 0
+    )
+    lbfgs_steps = (
+        int(method_cfg.get("lbfgs_steps", 0) or 0)
+        if baseline == "pinn_sparse" and bool(method_cfg.get("deepxde_native", False))
+        else 0
+    )
+    total_optimization_steps = adam_iterations + lbfgs_steps
     ifno_pretrain_epochs = int(method_cfg.get("ifno_pretrain_epochs", 0) or 0) if baseline == "ifno" else 0
     vae_pretrain_epochs = int(method_cfg.get("vae_pretrain_epochs", 0) or 0) if baseline == "ifno" else 0
     joint_epochs = int(method_cfg.get("joint_epochs", 0) or 0) if baseline == "ifno" else 0
     labels = []
+    if baseline == "pinn_sparse" and bool(method_cfg.get("deepxde_native", False)):
+        labels.extend(
+            [
+                f"adam_iterations={adam_iterations}",
+                f"lbfgs_steps={lbfgs_steps}",
+                f"total_optimization_steps={total_optimization_steps}",
+            ]
+        )
     if baseline == "ifno":
         labels.extend(
             [
@@ -1092,7 +1120,7 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
         )
     if refine_steps > 0 and baseline == "vivid":
         labels.append(f"refine_steps={refine_steps}")
-    if steps > 0:
+    if steps > 0 and baseline != "pinn_sparse":
         labels.append(f"steps={steps}")
     if particles > 0 and baseline == "pc_bnn":
         labels.append(f"particles={particles}")
@@ -1104,6 +1132,9 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
         "steps": steps,
         "refine_steps": refine_steps,
         "particles": particles,
+        "adam_iterations": adam_iterations,
+        "lbfgs_steps": lbfgs_steps,
+        "total_optimization_steps": total_optimization_steps,
         "ifno_pretrain_epochs": ifno_pretrain_epochs,
         "vae_pretrain_epochs": vae_pretrain_epochs,
         "joint_epochs": joint_epochs,

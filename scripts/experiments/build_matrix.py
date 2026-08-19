@@ -642,7 +642,7 @@ def _global_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "seeds": _env_list("SEEDS", cfg.get("seeds", [1]), int),
         "train_size": train_size,
-        "val_size": _env_int("VAL_SIZE", int(cfg.get("val_size", 1000))),
+        "val_size": _env_int("VAL_SIZE", int(cfg.get("val_size", 5000))),
         "test_size": _env_int("TEST_SIZE", int(cfg.get("test_size", 1000))),
         "train_shards": _env_int("TRAIN_SHARDS", int(cfg.get("train_shards", 5))),
         "data_files": data_files,
