@@ -70,12 +70,28 @@ Reusable implementation modules remain under `scripts/experiments/`. There is
 no runnable v2 design; its historical output namespace remains protected from
 accidental overwrite by mutating entry points.
 
-## Quick start
+## Environment
 
-For the simplest setup, edit the configuration block at the top of
-`scripts/run_baseline.sh`, then run:
+Create the pinned environment once from the repository root:
 
 ```bash
+conda env create -f environment.yml
+conda activate fm4pdebaseline
+```
+
+## Quick start
+
+The recommended formal entry point runs all 80 rows in `main_results`, including
+data verification, matrix construction, resumable execution, aggregation, and
+plotting. Replace `DATA_ROOT` with the directory containing the files declared
+in `configs/data_files/formal_128.yaml`:
+
+```bash
+DATA_ROOT=/absolute/path/to/PDEdata \
+OUT_ROOT=outputs/main_results \
+GPUS=0,1 \
+JOBS_PER_GPU=1 \
+PLOT_LIMIT=100 \
 bash scripts/run_baseline.sh
 ```
 
@@ -84,15 +100,22 @@ collects results, renders PDFs in a separate process, and prints status when it
 finishes or is interrupted. It uses an output lock and will not restart a
 `run.running` row whose process is alive.
 
-The same values can be overridden without editing the file:
+Preview the complete workflow without launching training:
 
 ```bash
-DATA_ROOT=/path/to/PDEdata OUT_ROOT=outputs/main_results \
-GPUS=0,1 JOBS_PER_GPU=2 PLOT_LIMIT=100 bash scripts/run_baseline.sh
+DATA_ROOT=/absolute/path/to/PDEdata \
+OUT_ROOT=outputs/main_results \
+GPUS=0,1 \
+JOBS_PER_GPU=1 \
+DRY_RUN=1 \
+bash scripts/run_baseline.sh
 ```
 
 `PLOT_LIMIT` is applied per experiment. It defaults to `100`; set it to `0`
-to render every evaluated sample, or set `PLOT_SAMPLES=0` to skip plotting.
+to render every evaluated sample, or set `PLOT_SAMPLES=0` to skip plotting. Use
+`GPUS=cpu` for CPU execution. Formal Var4D and VIVID runs are computationally
+expensive because their L-BFGS-B optimization is performed separately for every
+test sample; `JOBS_PER_GPU=1` is the conservative starting point.
 
 The commands below show the equivalent manual workflow.
 
@@ -164,6 +187,83 @@ python scripts/run_experiments.py "$OUT_ROOT/matrices/main_results.jsonl" \
 Use `--rerun-running` to recover stale markers. The runner checks the recorded
 PID and process start time, leaves live work untouched, and moves invalid stale
 artifacts into the run's `quarantine/` directory before relaunch.
+
+### Run only Burgers Var4D/VIVID
+
+After data verification and matrix construction, the following code derives the
+matching row indices from the matrix instead of relying on fixed row numbers.
+With the current formal design it selects four rows: two methods times the 500
+scattered-observation and 5-time-slice protocols.
+
+```bash
+export DATA_ROOT=/absolute/path/to/PDEdata
+export OUT_ROOT=outputs/main_results
+export MATRIX="$OUT_ROOT/matrices/main_results.jsonl"
+
+VARIATIONAL_INDICES="$(
+python - "$MATRIX" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+matrix = Path(sys.argv[1])
+rows = [json.loads(line) for line in matrix.read_text().splitlines() if line.strip()]
+selected = [
+    str(index)
+    for index, row in enumerate(rows)
+    if row.get("pde") == "burger"
+    and row.get("task") == "sparse_solution"
+    and row.get("baseline") in {"var4d", "vivid"}
+    and not row.get("skip_reason")
+]
+if len(selected) != 4:
+    raise SystemExit(f"expected 4 Burgers Var4D/VIVID rows, found {len(selected)}")
+print(",".join(selected))
+PY
+)"
+
+python scripts/run_experiments.py "$MATRIX" \
+  --data-root "$DATA_ROOT" \
+  --gpus 0,1 \
+  --jobs-per-gpu 1 \
+  --indices "$VARIATIONAL_INDICES"
+
+python scripts/run_experiments.py "$MATRIX" --status
+```
+
+The publication collector intentionally requires every runnable row in the
+matrix. Therefore, run the collection command below only after the entire
+formal matrix has completed, not immediately after this four-row selection.
+
+### Var4D/VIVID smoke checks
+
+These synthetic CPU commands exercise the complete method paths without the PDE
+dataset. They deliberately reduce every budget to one and are diagnostics only;
+their outputs are not eligible for the formal comparison.
+
+```bash
+python -m baselines.run \
+  --baseline var4d --pde burger --task sparse_solution \
+  --task-group time_varying_da_main \
+  --config baselines/configs/paper.yaml \
+  --experiment-mode smoke --synthetic-data --synthetic-resolution 128 \
+  --train-size 2 --val-size 1 --test-size 1 --batch-size 1 \
+  --num-sensors 500 --sensor-mode random_per_sample \
+  --sensor-budget-mode total --load-full-trajectory \
+  --steps 1 --device cpu --output-dir outputs/smoke/var4d \
+  --no-save-checkpoint --no-save-sample-artifacts
+
+python -m baselines.run \
+  --baseline vivid --pde burger --task sparse_solution \
+  --task-group time_varying_da_main \
+  --config baselines/configs/paper.yaml \
+  --experiment-mode smoke --synthetic-data --synthetic-resolution 128 \
+  --train-size 2 --val-size 1 --test-size 1 --batch-size 1 --epochs 1 \
+  --num-sensors 500 --sensor-mode random_per_sample \
+  --sensor-budget-mode total --load-full-trajectory \
+  --refine-steps 1 --device cpu --output-dir outputs/smoke/vivid \
+  --no-save-checkpoint --no-save-sample-artifacts
+```
 
 ### 3. Collect the results
 
