@@ -26,6 +26,8 @@ task_groups:
   - sparse_inverse_main
   - sparse_solution_main_amortized
   - sparse_solution_burger_time_slices
+  - time_varying_da_main
+  - time_varying_da_burger_time_slices
   - sparse_forward_main_amortized
   - sparse_forward_main_physics
 task_group_overrides:
@@ -74,6 +76,24 @@ task_group_overrides:
     sensor_budget_mode: total
     noise_level: 0.0
     load_full_trajectory: true
+  time_varying_da_main:
+    task: sparse_solution
+    pdes: [burger]
+    baselines: [var4d, vivid]
+    num_sensors: 500
+    sensor_mode: random_per_sample
+    sensor_budget_mode: total
+    noise_level: 0.0
+    load_full_trajectory: true
+  time_varying_da_burger_time_slices:
+    task: sparse_solution
+    pdes: [burger]
+    baselines: [var4d, vivid]
+    num_sensors: 5
+    sensor_mode: time_slices_per_sample
+    sensor_budget_mode: total
+    noise_level: 0.0
+    load_full_trajectory: true
   sparse_forward_main_amortized:
     task: sparse_forward
     pdes: [poisson, helmholtz, darcy, nsnonbounded]
@@ -110,3 +130,14 @@ resources:
   pde_opt:
     batch_size: 1
     steps: 500
+  var4d:
+    batch_size: 1
+    steps: 500
+    load_full_trajectory: true
+  vivid:
+    batch_size: 1
+    epochs: 1
+    train_inverse_operator: true
+    uses_official_inverse_observation_operator: false
+    refine_steps: 300
+    load_full_trajectory: true

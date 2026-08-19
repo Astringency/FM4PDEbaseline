@@ -17,7 +17,7 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
 
     assert summary["experiment_kind"] == "main"
     assert summary["ablation_factor"] == ""
-    assert summary["run_count"] == 76
+    assert summary["run_count"] == 80
     assert summary["by_task_group"] == {
         "full_forward_main": 12,
         "full_inverse_main": 4,
@@ -25,6 +25,8 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
         "sparse_inverse_main": 9,
         "sparse_solution_main_amortized": 15,
         "sparse_solution_burger_time_slices": 3,
+        "time_varying_da_main": 2,
+        "time_varying_da_burger_time_slices": 2,
         "sparse_forward_main_amortized": 12,
         "sparse_forward_main_physics": 9,
     }
@@ -52,6 +54,8 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
         "sparse_inverse_main_amortized",
         "sparse_solution_main_amortized",
         "sparse_solution_burger_time_slices",
+        "time_varying_da_main",
+        "time_varying_da_burger_time_slices",
         "sparse_forward_main_amortized",
         "sparse_forward_main_physics",
         "sparse_inverse_main",
@@ -94,6 +98,31 @@ def test_main_results_includes_burger_complete_time_slice_mode(tmp_path: Path, m
     assert {row["sensor_mode"] for row in tv_rows} == {"time_slices_per_sample"}
     assert {row["num_sensors"] for row in tv_rows} == {5}
     assert {row["load_full_trajectory"] for row in tv_rows} == {True}
+
+
+def test_main_results_assigns_var4d_and_vivid_only_to_burger_sparse_reconstruction(tmp_path: Path, monkeypatch):
+    for key in MATRIX_ENV:
+        monkeypatch.delenv(key, raising=False)
+    cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
+    rows, _skipped, _summary = build_matrix(cfg, tmp_path / "main_results", "main_results")
+    da_rows = [row for row in rows if row["baseline"] in {"var4d", "vivid"}]
+
+    assert len(da_rows) == 4
+    assert {row["pde"] for row in da_rows} == {"burger"}
+    assert {row["task"] for row in da_rows} == {"sparse_solution"}
+    assert {
+        (row["num_sensors"], row["sensor_mode"], row["sensor_budget_mode"])
+        for row in da_rows
+    } == {
+        (500, "random_per_sample", "total"),
+        (5, "time_slices_per_sample", "total"),
+    }
+    assert {row["load_full_trajectory"] for row in da_rows} == {True}
+    assert {row["capability_status"] for row in da_rows} == {"adapted"}
+    assert {row["implementation_required"] for row in da_rows} == {"adapted_allowed"}
+    assert {row["paper_table_eligible"] for row in da_rows} == {False}
+    assert {row["official_native_eligible"] for row in da_rows} == {False}
+    assert not any(row["pde"] == "nsnonbounded" for row in da_rows)
 
 
 def test_main_results_includes_disclosed_scalar_pcbnn_adaptation(tmp_path: Path, monkeypatch):

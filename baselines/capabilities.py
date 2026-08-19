@@ -37,6 +37,7 @@ TIME_DEPENDENT_PDES = {
 }
 
 TIME_VARYING_DA_PDES = {"nsnonbounded", "burger", "reaction_diffusion", "shallow_water"}
+VAR4D_VIVID_PDES = {"burger"}
 
 ALL_BASELINES = [
     "deeponet",
@@ -794,6 +795,18 @@ def _time_varying_capability(
             family,
             "time-varying DA is defined for sparse trajectory/state observation tasks only",
         )
+    if baseline in {"var4d", "vivid"} and pde not in VAR4D_VIVID_PDES:
+        return _cap(
+            baseline,
+            pde,
+            task,
+            sensor_mode,
+            "unsupported",
+            "unsupported",
+            family,
+            "the audited Var4D/VIVID adapters are scoped only to Burgers sparse trajectory reconstruction",
+            "Legacy NS/reaction-diffusion/shallow-water experiment entries were removed after the official-implementation audit.",
+        )
     if pde not in TIME_VARYING_DA_PDES:
         if baseline in {"var4d", "vivid"} and pde in TIME_DEPENDENT_PDES:
             return _cap(
@@ -819,6 +832,18 @@ def _time_varying_capability(
             "time-varying DA main table requires explicit multi-time observations/trajectory data",
         )
     if load_full_trajectory is False:
+        if baseline in {"var4d", "vivid"}:
+            return _cap(
+                baseline,
+                pde,
+                task,
+                sensor_mode,
+                "unsupported",
+                "unsupported",
+                family,
+                "the audited Burgers Var4D/VIVID adapters require the complete T x X trajectory contract",
+                "Endpoint/two-level legacy entries were removed.",
+            )
         return _cap(
             baseline,
             pde,
@@ -850,38 +875,25 @@ def _time_varying_capability(
             pde,
             task,
             sensor_mode,
-            "native",
-            "canonical_math",
+            "adapted",
+            "adapted_allowed",
             family,
-            "4D-Var is canonical for time-dependent data assimilation over a trajectory",
-            "Requires observation, background, and model-dynamics residual over a loaded trajectory.",
+            "the Burgers adapter optimizes the complete trajectory with Adam and a soft PDE-residual penalty; canonical strong-constraint 4D-Var instead optimizes an initial/control state through a dynamical propagator",
+            "Report as a weak-constraint Var4D-style Burgers adaptation, not canonical or official 4D-Var.",
+            eligible=False,
         )
     if baseline == "vivid":
-        if not bool(uses_official_inverse_observation_operator):
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "adapted",
-                "adapted_allowed",
-                family,
-                "VIVID-style refinement without an official inverse-observation operator is not native VIVID",
-                "Only rows that actually import/use official VIVID or invobs inverse-observation components can enter the main table.",
-                eligible=False,
-            )
         return _cap(
             baseline,
             pde,
             task,
             sensor_mode,
-            "official_adapter",
-            "official",
+            "adapted",
+            "adapted_allowed",
             family,
-            "VIVID is native for learned inverse-observation initialization plus variational trajectory refinement",
-            "Use direct VIVID/invobs components if importable; otherwise use the disclosed official-aligned inverse-observation plus variational refinement reimplementation.",
-            official_aligned_allowed=True,
-            eligible_implementation_modes=("official", "official_aligned"),
+            "the Burgers adapter preserves Voronoi inverse initialization plus variational refinement, but does not import the official Keras/ADAO or JAX/invobs pipeline and changes architecture, objective, optimizer, and budget",
+            "Report as a VIVID-style Burgers adaptation; official/native eligibility remains false until an audited official-core port exists.",
+            eligible=False,
         )
     return _cap(
         baseline,

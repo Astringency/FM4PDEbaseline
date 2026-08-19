@@ -28,8 +28,9 @@ def test_00_build_matrices_does_not_default_to_full_all():
 def test_main_results_has_no_sparse_factor_cartesian_product(tmp_path: Path, monkeypatch):
     rows = _rows("main_results", tmp_path, monkeypatch)
     sparse_rows = [row for row in rows if row["task"].startswith("sparse")]
-    standard_sparse = [row for row in sparse_rows if row["task_group"] != "sparse_solution_burger_time_slices"]
-    time_slices = [row for row in sparse_rows if row["task_group"] == "sparse_solution_burger_time_slices"]
+    time_slice_groups = {"sparse_solution_burger_time_slices", "time_varying_da_burger_time_slices"}
+    standard_sparse = [row for row in sparse_rows if row["task_group"] not in time_slice_groups]
+    time_slices = [row for row in sparse_rows if row["task_group"] in time_slice_groups]
     assert {row["num_sensors"] for row in standard_sparse} == {500}
     assert {row["num_sensors"] for row in time_slices} == {5}
     assert {row["sensor_mode"] for row in standard_sparse} == {"random_per_sample"}

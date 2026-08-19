@@ -270,21 +270,6 @@ def get_vivid_official_status() -> None:
     raise OfficialImportError("vendored VIVID/invobs is not exposed as a stable importable inverse-observation adapter")
 
 
-def get_vivid_official_aligned_status() -> None:
-    """Validate local availability of the VIVID/invobs official-aligned adapter."""
-
-    vivid = OFFICIAL_ROOT / "VIVID"
-    invobs = OFFICIAL_ROOT / "invobs-data-assimilation"
-    if not vivid.exists():
-        raise OfficialImportError(f"VIVID source tree not found: {vivid}")
-    if not invobs.exists():
-        raise OfficialImportError(f"invobs source tree not found: {invobs}")
-    try:
-        import baselines.methods.vivid_official_aligned  # noqa: F401
-    except Exception as exc:
-        raise OfficialImportError(f"VIVID official-aligned adapter unavailable: {exc}") from exc
-
-
 def get_pc_bnn_official_aligned_status() -> None:
     """Validate local availability of the PC-BNN official-aligned adapter."""
 

@@ -18,8 +18,8 @@ CASES = [
     ("pinn_sparse", "poisson", "sparse_forward"),
     ("pc_bnn", "poisson", "sparse_solution"),
     ("pde_opt", "darcy", "inverse"),
-    ("var4d", "shallow_water", "sparse_solution"),
-    ("vivid", "shallow_water", "sparse_solution"),
+    ("var4d", "burger", "sparse_solution"),
+    ("vivid", "burger", "sparse_solution"),
 ]
 
 

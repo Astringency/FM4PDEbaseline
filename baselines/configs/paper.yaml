@@ -176,8 +176,8 @@ method_by_baseline:
     steps: 500
     lr: 0.01
     lambda_reg: 0.00001
-  # Ablation-only methods. The formal main_results design does not select
-  # either baseline.
+  # Burgers sparse-trajectory reconstruction methods. Both optimize or refine
+  # each test trajectory; VIVID additionally fits an inverse-observation model.
   var4d:
     normalize: false
     steps: 500
@@ -185,11 +185,11 @@ method_by_baseline:
     lambda_background: 0.1
     lambda_obs: 1.0
   vivid:
-    normalize: true
-    implementation_mode: official_aligned
-    official_backend: vivid
+    normalize: false
+    implementation_mode: adapted
+    official_backend: adapted
     train_inverse_operator: true
-    uses_official_inverse_observation_operator: true
+    uses_official_inverse_observation_operator: false
     refine_steps: 300
     lr: 0.005
     lambda_inverse_operator: 0.25

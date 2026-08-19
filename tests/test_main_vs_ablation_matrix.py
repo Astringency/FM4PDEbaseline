@@ -20,8 +20,9 @@ def _rows(name: str, tmp_path: Path, monkeypatch) -> list[dict]:
 def test_main_results_sparse_tasks_use_one_standard_sparse_setting(tmp_path: Path, monkeypatch):
     rows = _rows("main_results", tmp_path, monkeypatch)
     sparse_rows = [row for row in rows if str(row["task"]).startswith("sparse")]
-    standard_sparse = [row for row in sparse_rows if row["task_group"] != "sparse_solution_burger_time_slices"]
-    time_slices = [row for row in sparse_rows if row["task_group"] == "sparse_solution_burger_time_slices"]
+    time_slice_groups = {"sparse_solution_burger_time_slices", "time_varying_da_burger_time_slices"}
+    standard_sparse = [row for row in sparse_rows if row["task_group"] not in time_slice_groups]
+    time_slices = [row for row in sparse_rows if row["task_group"] in time_slice_groups]
     assert sparse_rows
     assert {row["num_sensors"] for row in standard_sparse} == {500}
     assert {row["num_sensors"] for row in time_slices} == {5}

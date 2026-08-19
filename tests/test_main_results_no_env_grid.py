@@ -15,8 +15,9 @@ def test_main_results_sparse_tasks_have_one_default_sensor_noise_setting(tmp_pat
     cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
     rows, _skipped, _summary = build_matrix(cfg, tmp_path / "main_results", "main_results")
     sparse_rows = [row for row in rows if str(row["task"]).startswith("sparse")]
-    standard_sparse = [row for row in sparse_rows if row["task_group"] != "sparse_solution_burger_time_slices"]
-    time_slices = [row for row in sparse_rows if row["task_group"] == "sparse_solution_burger_time_slices"]
+    time_slice_groups = {"sparse_solution_burger_time_slices", "time_varying_da_burger_time_slices"}
+    standard_sparse = [row for row in sparse_rows if row["task_group"] not in time_slice_groups]
+    time_slices = [row for row in sparse_rows if row["task_group"] in time_slice_groups]
 
     assert {row["num_sensors"] for row in standard_sparse} == {500}
     assert {row["num_sensors"] for row in time_slices} == {5}

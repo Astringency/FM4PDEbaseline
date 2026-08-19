@@ -35,7 +35,7 @@ def test_endpoint_da_is_surrogate_not_main():
     assert cap.paper_table_eligible is False
 
     surrogate = resolve_capability("var4d", "heat", "sparse_solution", "time_varying", "time_varying", load_full_trajectory=False)
-    assert surrogate.support_status == "adapted"
+    assert surrogate.support_status == "unsupported"
     assert surrogate.paper_table_eligible is False
 
 

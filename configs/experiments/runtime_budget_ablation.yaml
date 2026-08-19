@@ -3,7 +3,7 @@ experiment_kind: ablation
 ablation_factor: runtime_budget
 config: baselines/configs/paper.yaml
 data_files_config: configs/data_files/formal_128.yaml
-pdes: [poisson, nsnonbounded]
+pdes: [poisson, burger]
 baselines: [pinn_sparse, pc_bnn, pde_opt, var4d, vivid]
 seeds: [1]
 train_size: 50000
@@ -12,6 +12,7 @@ test_size: 1000
 train_shards: 5
 num_sensors: 500
 sensor_mode: random_per_sample
+sensor_budget_mode: total
 noise_level: 0.0
 data_loading_mode: eager
 num_workers: 4
@@ -22,7 +23,7 @@ device: cuda
 task_groups:
   - runtime_budget_sparse_forward
   - runtime_budget_pcbnn
-  - runtime_budget_time_varying_da
+  - time_varying_da_runtime_budget
 task_group_overrides:
   runtime_budget_sparse_forward:
     task: sparse_forward
@@ -41,11 +42,12 @@ task_group_overrides:
       pc_bnn:
         steps: [50, 100, 250, 500, 1000]
         particles: 8
-  runtime_budget_time_varying_da:
+  time_varying_da_runtime_budget:
     task: sparse_solution
-    pdes: [nsnonbounded]
+    pdes: [burger]
     baselines: [var4d, vivid]
-    sensor_mode: time_varying
+    sensor_mode: random_per_sample
+    sensor_budget_mode: total
     load_full_trajectory: true
     budget_by_baseline:
       var4d:
@@ -77,5 +79,8 @@ resources:
     load_full_trajectory: true
   vivid:
     batch_size: 1
+    epochs: 1
+    train_inverse_operator: true
+    uses_official_inverse_observation_operator: false
     refine_steps: 300
     load_full_trajectory: true

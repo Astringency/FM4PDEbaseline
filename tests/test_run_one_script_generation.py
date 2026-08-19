@@ -101,7 +101,8 @@ def test_run_one_generates_load_full_trajectory_for_time_varying(tmp_path: Path)
         stdout=subprocess.PIPE,
     )
     assert "--load-full-trajectory" in result.stdout
-    assert "--sensor-mode time_varying" in result.stdout
+    assert "--sensor-mode random_per_sample" in result.stdout
+    assert "--sensor-budget-mode total" in result.stdout
 
 
 def test_2gpu_parallel_launcher_preserves_fingerprinted_row_and_uses_existing_runner():

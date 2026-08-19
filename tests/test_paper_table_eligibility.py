@@ -10,7 +10,7 @@ def test_adapted_and_surrogate_capabilities_are_not_main_eligible():
 
     vivid_style = resolve_capability(
         "vivid",
-        "reaction_diffusion",
+        "burger",
         "sparse_solution",
         "time_varying",
         "time_varying",
@@ -100,7 +100,7 @@ def test_official_architecture_must_be_explicitly_allowed():
 def test_vivid_style_without_official_import_is_not_official_native():
     vivid_style = resolve_capability(
         "vivid",
-        "reaction_diffusion",
+        "burger",
         "sparse_solution",
         "time_varying",
         "time_varying",

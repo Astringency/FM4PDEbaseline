@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-import warnings
 
 import torch
 import torch.nn.functional as F
@@ -18,8 +17,25 @@ class Var4DBaseline(BaselineModel):
 
     def build(self, config, data_spec):
         super().build(config, data_spec)
+        pde = str(data_spec.get("pde", "")).lower()
+        if pde != "burger":
+            raise ValueError("The audited Var4D adapter is scoped only to Burgers sparse trajectory reconstruction")
         self.optimized_numel = _optimized_state_numel(data_spec)
-        self.mark_canonical_math("var4d", adapter_status="canonical_4dvar")
+        self.set_backend(
+            "var4d_burgers_weak_constraint",
+            "4dvar_mathematical_reference",
+            implementation_mode_effective="adapted",
+            implementation_source="local_burgers_weak_constraint_trajectory_optimization",
+            official_import_success=False,
+            official_reimplementation_success=False,
+            official_alignment_level="local",
+            official_alignment_notes=(
+                "Optimizes every Burgers trajectory value with Adam under observation, background, and soft PDE-residual "
+                "losses. This is not canonical strong-constraint 4D-Var, which optimizes an initial/control state through "
+                "a dynamical propagator."
+            ),
+            adapter_status="var4d_style_burgers_weak_constraint_adapted",
+        )
         return self
 
     def parameter_count(self) -> int:
@@ -30,14 +46,12 @@ class Var4DBaseline(BaselineModel):
 
     def predict(self, batch: PDEBatch):
         start = time.perf_counter()
-        if not batch.metadata.get("supports_trajectory", False):
-            mode = _assimilation_mode(batch)
-            if mode == "two_level_surrogate":
-                warnings.warn("4D-Var requested without full trajectory; using a two-level dynamics surrogate.", RuntimeWarning, stacklevel=2)
-            else:
-                warnings.warn("4D-Var requested for data without trajectory metadata; using state reconstruction surrogate.", RuntimeWarning, stacklevel=2)
+        if batch.pde_name.lower() != "burger" or not batch.metadata.get("supports_trajectory", False):
+            raise ValueError("Var4D requires a loaded Burgers T x X trajectory")
         state0, output_view, background, dyn_meta = _initial_trajectory(batch)
         batch.metadata["assimilation_mode"] = str(dyn_meta.get("assimilation_mode", _assimilation_mode(batch)))
+        batch.metadata["assimilation_background_source"] = str(dyn_meta.get("assimilation_background_source", "task_background"))
+        batch.metadata["assimilation_uses_hidden_truth"] = bool(dyn_meta.get("assimilation_uses_hidden_truth", False))
         state = torch.nn.Parameter(state0.detach().clone())
         steps = int(self.config.get("steps", 3))
         lr = float(self.config.get("lr", 2e-2))
@@ -60,116 +74,65 @@ class Var4DBaseline(BaselineModel):
         return output_view(state).detach()
 
 
-def _smoothness_surrogate(x: torch.Tensor) -> torch.Tensor:
-    return (x[..., 1:, :] - x[..., :-1, :]).pow(2).mean() + (x[..., :, 1:] - x[..., :, :-1]).pow(2).mean()
-
-
 def _optimized_state_numel(data_spec: dict) -> int:
-    metadata = data_spec.get("metadata", {})
-    full_shape = tuple(metadata.get("full_shape", ()))
-    if len(full_shape) == 5:
-        channels = int(full_shape[1])
-        steps = int(full_shape[2])
-        input_idx = int(metadata.get("input_time_index", 0))
-        optimized_steps = max(steps - input_idx, 2)
-        return int(channels * optimized_steps * full_shape[3] * full_shape[4])
     target_shape = tuple(data_spec.get("target_shape", ()))
     return int(torch.tensor(target_shape[1:]).prod().item()) if len(target_shape) > 1 else 0
 
 
 def _initial_trajectory(batch: PDEBatch):
     pde = batch.pde_name.lower()
-    full = batch.full_tensor.detach()
+    if pde != "burger" or batch.target_fields.ndim != 4:
+        raise ValueError("Var4D/VIVID trajectory initialization supports only Burgers [B,C,T,X]")
     guess = batch.metadata.get("voronoi_grid", batch.input_fields).detach()
     mode = _assimilation_mode(batch)
-    meta = {"full_tensor": full, "input_fields": batch.input_fields, "task": "trajectory", **batch.metadata, "assimilation_mode": mode}
-    if pde == "nsnonbounded":
-        initial = full[:, :, :1]
-        target_guess = guess.reshape(guess.shape[0], 1, -1, guess.shape[-2], guess.shape[-1])
-        state0 = torch.cat([initial.to(guess.device, guess.dtype), target_guess], dim=2)
-        background = initial[:, :, 0].to(guess.device, guess.dtype)
-
-        def output_view(state):
-            if batch.target_fields.ndim == 5:
-                return state[:, :, 1:]
-            return state[:, :, 1:].reshape(state.shape[0], -1, state.shape[-2], state.shape[-1])
-
-        return state0, output_view, background, {**meta, "final_time": float(batch.metadata.get("final_time", 1.0))}
-    if pde == "burger" and full.ndim == 4:
-        initial = full[:, :, :1].to(guess.device, guess.dtype)
-        if guess.ndim == 4 and tuple(guess.shape[-2:]) == tuple(full.shape[-2:]):
-            state0 = guess[:, :1].clone()
-        else:
-            final_guess = guess[:, :1] if guess.ndim == 4 else full[:, :, -1:].to(guess.device, guess.dtype)
-            alpha = torch.linspace(0.0, 1.0, full.shape[-2], device=guess.device, dtype=guess.dtype).view(1, 1, full.shape[-2], 1)
-            state0 = initial * (1.0 - alpha) + final_guess[..., -1:, :] * alpha
-        state0[:, :, :1] = initial
-        background = state0.detach().clone()
-
-        def output_view(state):
-            return state
-
-        return state0, output_view, background, {**meta, "final_time": float(batch.metadata.get("final_time", 1.0)), "input_time_index": 0}
-    if pde in {"reaction_diffusion", "shallow_water"} and full.ndim == 5:
-        input_idx = int(batch.metadata.get("input_time_index", 0))
-        initial = full[:, :, input_idx].to(guess.device, guess.dtype)
-        steps = max(full.shape[2] - input_idx, 2)
-        if guess.ndim == 5:
-            state0 = guess[:, : initial.shape[1], :steps].clone()
-            if state0.shape[2] < steps:
-                pad = state0[:, :, -1:].expand(-1, -1, steps - state0.shape[2], -1, -1)
-                state0 = torch.cat([state0, pad], dim=2)
-        else:
-            final_guess = guess[:, : initial.shape[1]]
-            alpha = torch.linspace(0.0, 1.0, steps, device=guess.device, dtype=guess.dtype).view(1, 1, steps, 1, 1)
-            state0 = initial[:, :, None] * (1.0 - alpha) + final_guess[:, :, None] * alpha
-        state0[:, :, 0] = initial
-        total_t = float(batch.metadata.get("final_time", 1.0 if pde == "shallow_water" else 5.0))
-        segment_t = total_t * (steps - 1) / max(full.shape[2] - 1, 1)
-
-        def output_view(state):
-            if batch.target_fields.ndim == 5:
-                return state
-            return state[:, :, -1]
-
-        return state0, output_view, initial, {**meta, "final_time": segment_t, "input_time_index": 0}
-
-    state0 = guess
+    meta = {"input_fields": batch.input_fields, "task": "trajectory", **batch.metadata, "assimilation_mode": mode}
+    expected_shape = tuple(batch.target_fields.shape)
+    if guess.ndim != 4 or tuple(guess.shape) != expected_shape:
+        raise ValueError(
+            "Burgers Var4D requires an observation-derived full T x X background "
+            f"with shape {expected_shape}; got {tuple(guess.shape)}"
+        )
+    # The complete state, including t=0, must be inferred from the sparse
+    # observations. Never seed it from full_tensor/initial_1d.
+    state0 = guess.clone()
+    background = state0.detach().clone()
 
     def output_view(state):
         return state
 
-    return state0, output_view, batch.input_fields.detach(), meta
+    hidden_truth_keys = {
+        "full_tensor",
+        "full_trajectory",
+        "original_input_fields",
+        "observation_source_fields",
+        "observed_solution_fields",
+        "background_fields",
+        "solution_fields",
+        "source_fields",
+        "coeff_fields",
+        "initial_1d",
+    }
+    observation_meta = {key: value for key, value in meta.items() if key not in hidden_truth_keys}
+    observation_meta.update(
+        {
+            "input_fields": background,
+            "initial_1d": background[:, 0, 0, :],
+            "final_time": float(batch.metadata.get("final_time", 1.0)),
+            "input_time_index": 0,
+            "assimilation_background_source": "voronoi_grid_from_sparse_observations",
+            "assimilation_uses_hidden_truth": False,
+        }
+    )
+    return state0, output_view, background, observation_meta
 
 
 def _background_view(state: torch.Tensor, batch: PDEBatch) -> torch.Tensor:
-    if state.ndim == 5:
-        return state[:, :, 0]
-    if batch.pde_name.lower() == "burger" and state.ndim == 4 and batch.target_fields.ndim == 4:
+    if batch.pde_name.lower() == "burger" and state.ndim == 4:
         return state
-    return state[:, : batch.input_fields.shape[1]]
+    raise ValueError("Var4D/VIVID background view supports only Burgers [B,C,T,X]")
 
 
 def _assimilation_mode(batch: PDEBatch) -> str:
-    pde = batch.pde_name.lower()
-    if pde in {"nsnonbounded", "reaction_diffusion", "shallow_water"} and batch.full_tensor.ndim == 5:
+    if batch.pde_name.lower() == "burger" and batch.target_fields.ndim == 4 and batch.target_fields.shape[-2] > 2:
         return "full_trajectory"
-    if pde == "burger" and batch.full_tensor.ndim == 4 and batch.full_tensor.shape[-2] > 2:
-        return "full_trajectory"
-    if pde in {"heat", "wave", "advection_diffusion", "burger"} or bool(batch.metadata.get("time_dependent", False)):
-        return "two_level_surrogate"
-    return "state_surrogate"
-
-
-def _obs_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-    if tuple(pred.shape) != tuple(target.shape):
-        raise ValueError(f"4D-Var observation prediction {tuple(pred.shape)} must exactly match target {tuple(target.shape)}")
-    if mask is None:
-        return F.mse_loss(pred, target)
-    local_mask = mask
-    if tuple(local_mask.shape) == tuple(pred.shape[1:]):
-        local_mask = local_mask.unsqueeze(0).expand(pred.shape[0], *local_mask.shape)
-    if tuple(local_mask.shape) != tuple(pred.shape):
-        raise ValueError(f"4D-Var mask {tuple(mask.shape)} must match prediction {tuple(pred.shape)} with or without batch")
-    local_mask = local_mask.to(pred.device, pred.dtype)
-    return (((pred - target) ** 2) * local_mask).sum() / local_mask.sum().clamp_min(1.0)
+    raise ValueError("Var4D/VIVID assimilation mode supports only a complete Burgers trajectory")

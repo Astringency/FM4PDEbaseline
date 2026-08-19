@@ -59,6 +59,7 @@ GROUP_TO_TASK = {
     "full_inverse_main": "inverse",
     "sparse_solution_main_amortized": "sparse_solution",
     "sparse_solution_burger_time_slices": "sparse_solution",
+    "time_varying_da_burger_time_slices": "sparse_solution",
     "sparse_solution_main_physics": "sparse_solution",
     "sparse_forward_main_amortized": "sparse_forward",
     "sparse_forward_main_physics": "sparse_forward",
@@ -72,7 +73,7 @@ GROUP_TO_TASK = {
     "runtime_budget_ablation": "sparse_solution",
     "runtime_budget_sparse_forward": "sparse_forward",
     "runtime_budget_pcbnn": "sparse_solution",
-    "runtime_budget_time_varying_da": "sparse_solution",
+    "time_varying_da_runtime_budget": "sparse_solution",
     "train_size_ablation": "sparse_solution",
 }
 
@@ -81,12 +82,13 @@ DEFAULT_BASELINES_BY_GROUP = {
     "full_inverse_main": ["fno", "deeponet", "ifno"],
     "sparse_solution_main_amortized": ["recfno", "senseiver", "voronoicnn"],
     "sparse_solution_burger_time_slices": ["recfno", "senseiver", "voronoicnn"],
+    "time_varying_da_burger_time_slices": ["var4d", "vivid"],
     "sparse_solution_main_physics": ["pinn_sparse", "pc_bnn", "pde_opt"],
     "sparse_forward_main_amortized": ["recfno", "senseiver", "voronoicnn"],
     "sparse_forward_main_physics": ["pinn_sparse", "pde_opt"],
     "sparse_inverse_main_amortized": ["recfno", "senseiver", "voronoicnn"],
     "sparse_inverse_main": ["pinn_sparse", "pde_opt"],
-    "time_varying_da_main": ["senseiver", "var4d", "vivid"],
+    "time_varying_da_main": ["var4d", "vivid"],
     "sensor_count_ablation": ["recfno", "senseiver", "voronoicnn"],
     "noise_ablation": ["recfno", "senseiver", "voronoicnn"],
     "sensor_mode_ablation": ["recfno", "senseiver", "voronoicnn"],
@@ -94,7 +96,7 @@ DEFAULT_BASELINES_BY_GROUP = {
     "runtime_budget_ablation": ["pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"],
     "runtime_budget_sparse_forward": ["pinn_sparse", "pde_opt"],
     "runtime_budget_pcbnn": ["pc_bnn"],
-    "runtime_budget_time_varying_da": ["var4d", "vivid"],
+    "time_varying_da_runtime_budget": ["var4d", "vivid"],
     "train_size_ablation": ["recfno", "senseiver", "voronoicnn"],
 }
 
@@ -693,7 +695,7 @@ def _matrix_uses_official_inverse_observation_operator(cfg: dict[str, Any], grou
                 "uses_official_inverse_observation_operator",
                 group_baseline_resources.get(
                     "uses_official_inverse_observation_operator",
-                    baseline_resources.get("uses_official_inverse_observation_operator", True),
+                    baseline_resources.get("uses_official_inverse_observation_operator", False),
                 ),
             )
         )
@@ -754,8 +756,6 @@ def _group_expansion(cfg: dict[str, Any], group_cfg: dict[str, Any], defaults: d
         sensor_modes = ["none"]
         noise_levels = [0.0]
     train_sizes = _env_list("TRAIN_SIZES", group_cfg.get("train_sizes", cfg.get("train_sizes", [group_cfg.get("train_size", defaults["train_size"])])), int)
-    if task_group == "time_varying_sensor_ablation":
-        sensor_modes = ["time_varying"]
     return {
         "sensor_counts": sensor_counts,
         "sensor_modes": sensor_modes,

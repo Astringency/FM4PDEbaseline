@@ -44,20 +44,6 @@ def test_official_aligned_available_combinations_do_not_preflight_skip():
     cap = resolve_capability("ifno", "darcy", "forward")
     assert _preflight_backend_availability(args, cap, {"implementation_mode": "official_aligned"}) is None
 
-    args = Namespace(experiment_mode="paper", baseline="vivid", pde="reaction_diffusion")
-    cap = resolve_capability(
-        "vivid",
-        "reaction_diffusion",
-        "sparse_solution",
-        "time_varying",
-        "time_varying",
-        load_full_trajectory=True,
-        train_inverse_operator=True,
-        uses_official_inverse_observation_operator=True,
-    )
-    assert _preflight_backend_availability(args, cap, {"implementation_mode": "official_aligned"}) is None
-
-
 def test_official_or_skip_uses_aligned_when_direct_official_missing():
     args = Namespace(experiment_mode="paper", baseline="ifno", pde="darcy")
     cap = resolve_capability("ifno", "darcy", "forward")

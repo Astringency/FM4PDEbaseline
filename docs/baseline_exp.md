@@ -38,7 +38,18 @@ PINN-sparse 对每个测试样本先执行 Adam（上限 1000 iterations），�
 
 ### Sparse Solution Reconstruction
 
-给定 $[O_{a}, O_{u}]$ 求解 $[a, u]$。主要涉及 RecFNO、Senseiver、VoronoiCNN 三种方法，覆盖 Poisson、Helmholtz、Darcy、Burgers、Navier-Stokes 5 个 PDE，其中 Burgers 是一维的数据，但重建时是恢复 128 时间网格 * 128 空间网格拼在一起的 128 * 128 的全部的解，提供两种稀疏模式：一是在 128 * 128 的网格上选出 500 个散布的稀疏观测；二是取出 5 个时间片段的全部值（供128 * 5 个点），其余方程为两通道二维数据，只取散布的稀疏观测值即可，注意是 $O_{a}, O_{u}$ 各 500 个。
+给定 $[O_{a}, O_{u}]$ 求解 $[a, u]$。RecFNO、Senseiver、VoronoiCNN 覆盖 Poisson、Helmholtz、Darcy、Burgers、Navier-Stokes 5 个 PDE；Var4D、VIVID 仅用于 Burgers，不再在 Navier-Stokes（`nsnonbounded`）上设置实验任务。
+
+Burgers 是一维时变数据，重建目标为完整的 $128\times128$（时间 $\times$ 空间）轨迹，其中首个时间片对应 $a=u(t=0)$，其余时间片对应 $u$。五种方法均运行以下两种观测协议：
+
+1. 在完整 $128\times128$ 时间—空间网格上，每个样本独立随机选择总计 500 个散布观测点；
+2. 每个样本独立选择 5 个完整时间片，共 $5\times128$ 个观测点。
+
+Var4D 不进行离线训练，对每个测试样本执行最多 500 次轨迹优化；VIVID 先用训练集拟合 1 epoch 的逆观测网络，再对每个测试样本执行最多 300 次变分细化。两者的初始背景场只能由当前样本的稀疏观测做 Voronoi 填充得到，禁止读取未观测的真实首时间片或完整轨迹。相应的传感器数量消融和运行预算消融也固定在 Burgers Sparse Solution Reconstruction 上。
+
+经 vendored 官方源码对照，当前 Var4D 是直接优化完整轨迹并以 PDE 残差作软约束的 weak-constraint adaptation；当前 VIVID 保留 Voronoi 逆映射初始化和变分细化思想，但没有保留官方网络、L-BFGS-B 优化器及官方训练预算。因此两者暂不满足本方案第 7 条的 official-core 要求，结果必须标记为 `adapted`，不得标记为 canonical/official/official-aligned 或 official-native。详细差异见 [`docs/var4d_vivid_official_audit.md`](var4d_vivid_official_audit.md)。
+
+其余方程为两通道二维数据，只取散布的稀疏观测值，注意是 $O_{a}$、$O_{u}$ 各 500 个。
 
 ### Sparse Forward
 

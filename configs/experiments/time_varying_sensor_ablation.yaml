@@ -4,7 +4,7 @@ ablation_factor: time_varying_sensor_count
 config: baselines/configs/paper.yaml
 data_files_config: configs/data_files/formal_128.yaml
 pdes:
-  - nsnonbounded
+  - burger
 baselines: [var4d, vivid, senseiver]
 seeds: [1]
 train_size: 50000
@@ -13,7 +13,8 @@ test_size: 1000
 train_shards: 5
 load_full_trajectory: true
 sensor_counts: [50, 100, 250, 500]
-sensor_mode: time_varying
+sensor_mode: random_per_sample
+sensor_budget_mode: total
 noise_level: 0.0
 data_loading_mode: eager
 num_workers: 4
@@ -37,5 +38,8 @@ resources:
     load_full_trajectory: true
   vivid:
     batch_size: 1
+    epochs: 1
+    train_inverse_operator: true
+    uses_official_inverse_observation_operator: false
     refine_steps: 300
     load_full_trajectory: true

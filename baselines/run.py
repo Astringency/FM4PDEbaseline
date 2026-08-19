@@ -40,8 +40,6 @@ from baselines.methods.official import (
     get_ifno_official_status,
     get_pc_bnn_net_class,
     get_pc_bnn_official_aligned_status,
-    get_vivid_official_aligned_status,
-    get_vivid_official_status,
 )
 from baselines.methods.pc_bnn import PCBNNBaseline
 from baselines.methods.pde_opt import PDEOptBaseline
@@ -1273,7 +1271,7 @@ def _make_split_dataset(
             noise_level=args.noise_level,
             seed=args.sensor_seed,
             experiment_mode=args.experiment_mode,
-            build_voronoi_grid=args.baseline in {"recfno", "voronoicnn"},
+            build_voronoi_grid=args.baseline in {"recfno", "voronoicnn", "var4d", "vivid"},
         )
         return PDEBatchDataset(batch)
     return registry.make_dataset(
@@ -1298,7 +1296,7 @@ def _make_split_dataset(
         data_loading_mode=args.data_loading_mode,
         load_full_trajectory=_split_load_full_trajectory(args, split),
         experiment_mode=args.experiment_mode,
-        build_voronoi_grid=args.baseline in {"recfno", "voronoicnn"},
+        build_voronoi_grid=args.baseline in {"recfno", "voronoicnn", "var4d", "vivid"},
         strict_size=(
             args.strict_size
             if strict_size_override is None
@@ -1501,6 +1499,8 @@ def _evaluate_full_test_loader(
             "bc_status_counts": json.dumps(metric_payload["bc_status_counts"], sort_keys=True),
             "assimilation_mode": str(batch.metadata.get("assimilation_mode", "")),
             "assimilation_mode_counts": json.dumps(_assimilation_mode_counts(batch), sort_keys=True),
+            "assimilation_background_source": str(batch.metadata.get("assimilation_background_source", "")),
+            "assimilation_uses_hidden_truth": bool(batch.metadata.get("assimilation_uses_hidden_truth", False)),
             "inverse_observation_operator_used": bool(batch.metadata.get("inverse_observation_operator_used", False)),
             "learned_state_injection_mode": str(batch.metadata.get("learned_state_injection_mode", "")),
             "learned_state_shape": json.dumps(list(batch.metadata.get("learned_state_shape", ())) if batch.metadata.get("learned_state_shape") else []),
@@ -1829,6 +1829,11 @@ def _summarize_run(
         "residual_mode_counts": json.dumps(dict(_residual_mode_counter(rows)), sort_keys=True),
         "bc_status_counts": json.dumps(dict(_bc_status_counter(rows)), sort_keys=True),
         "assimilation_mode_counts": json.dumps(dict(_assimilation_mode_counter(rows)), sort_keys=True),
+        "assimilation_background_source": next(
+            (str(row.get("assimilation_background_source", "")) for row in rows if row.get("assimilation_background_source")),
+            "",
+        ),
+        "assimilation_uses_hidden_truth": any(bool(row.get("assimilation_uses_hidden_truth", False)) for row in rows),
         "inverse_observation_operator_used": any(bool(row.get("inverse_observation_operator_used", False)) for row in rows),
         "learned_state_injection_mode_counts": json.dumps(dict(Counter(str(row.get("learned_state_injection_mode", "")) for row in rows if row.get("learned_state_injection_mode"))), sort_keys=True),
         "posterior_particles": max((int(row.get("posterior_particles", 0) or 0) for row in rows), default=0),
@@ -1971,6 +1976,8 @@ def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
     for key in (
         "inference_optimization_time",
         "assimilation_mode",
+        "assimilation_background_source",
+        "assimilation_uses_hidden_truth",
         "inverse_observation_operator_used",
         "posterior_particles",
         "official_alignment_level",
@@ -2387,15 +2394,8 @@ def _validate_and_bind_run_fingerprint(
 
 
 def _uses_official_inverse_observation_operator(baseline: str, method_cfg: dict[str, Any]) -> bool:
-    if baseline != "vivid":
-        return bool(method_cfg.get("uses_official_inverse_observation_operator", False))
-    mode = _official_request_mode(method_cfg)
-    return bool(method_cfg.get("uses_official_inverse_observation_operator", False)) or mode in {
-        "official",
-        "official_or_skip",
-        "official_aligned",
-        "auto",
-    }
+    del baseline
+    return bool(method_cfg.get("uses_official_inverse_observation_operator", False))
 
 
 def _preflight_backend_availability(
@@ -2421,19 +2421,6 @@ def _preflight_backend_availability(
                     if not bool(getattr(capability, "official_aligned_allowed", False)):
                         raise
                     get_ifno_official_aligned_status()
-            return None
-        if args.baseline == "vivid" and capability.task_family == "time_varying_da":
-            if mode == "official":
-                get_vivid_official_status()
-            elif mode == "official_aligned":
-                get_vivid_official_aligned_status()
-            else:
-                try:
-                    get_vivid_official_status()
-                except OfficialImportError:
-                    if not bool(getattr(capability, "official_aligned_allowed", False)):
-                        raise
-                    get_vivid_official_aligned_status()
             return None
         if args.baseline == "pc_bnn" and capability.task_family == "sparse_reconstruction":
             if args.pde.lower() != "shallow_water":

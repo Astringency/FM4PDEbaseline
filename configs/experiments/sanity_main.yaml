@@ -63,11 +63,3 @@ resources:
   pde_opt:
     batch_size: 1
     steps: 2
-  var4d:
-    batch_size: 1
-    steps: 2
-    load_full_trajectory: true
-  vivid:
-    batch_size: 1
-    refine_steps: 2
-    load_full_trajectory: true
