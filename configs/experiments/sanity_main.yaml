@@ -1,6 +1,7 @@
 name: sanity_main
 experiment_kind: main
 config: baselines/configs/paper.yaml
+data_files_config: configs/data_files/formal_128.yaml
 pdes: [poisson, helmholtz, darcy, burger, nsnonbounded]
 seeds: [1]
 train_size: 128

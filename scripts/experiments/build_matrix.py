@@ -29,6 +29,7 @@ from baselines.experiment_matrix import (
     capability_skip_row,
     resolve_capability,
 )
+from baselines.common.data_files import files_for_pde, load_data_files_from_config
 from scripts.experiments.provenance import (
     DEFAULT_SENSOR_PROTOCOL_VERSION,
     DEFAULT_TASK_PROTOCOL_VERSION,
@@ -179,6 +180,7 @@ MATRIX_FIELDS = [
     "val_size",
     "test_size",
     "train_shards",
+    "data_files",
     "num_sensors",
     "sensor_mode",
     "sensor_budget_mode",
@@ -251,6 +253,7 @@ def load_data_manifest_binding(
     *,
     experiment_config_path: str | Path | None = None,
     expected_pdes: list[str] | None = None,
+    expected_data_files_config_sha256: str = "",
 ) -> tuple[str, str]:
     """Validate a full data-protocol report and return absolute path + SHA-256."""
     expected_config_sha256 = (
@@ -258,13 +261,25 @@ def load_data_manifest_binding(
         if experiment_config_path is not None
         else ""
     )
-    _manifest, manifest_path, manifest_sha256 = validate_full_data_manifest(
+    manifest, manifest_path, manifest_sha256 = validate_full_data_manifest(
         path,
         expected_experiment_config_sha256=expected_config_sha256,
         expected_pdes=expected_pdes,
         expected_verifier_sha256=sha256_file(ROOT / "scripts" / "verify_data_protocol.py"),
         verify_source_signatures=True,
     )
+    observed_data_files_sha256 = str(
+        manifest.get("data_files_config_sha256", "") or ""
+    )
+    if (
+        expected_data_files_config_sha256
+        and observed_data_files_sha256 != expected_data_files_config_sha256
+    ):
+        raise ValueError(
+            "data manifest was generated from a different explicit data-file configuration: "
+            f"manifest={observed_data_files_sha256}, "
+            f"expected={expected_data_files_config_sha256}"
+        )
     return manifest_path, manifest_sha256
 
 
@@ -307,6 +322,9 @@ def build_matrix(
             data_manifest,
             experiment_config_path=experiment_config_path,
             expected_pdes=_configured_manifest_pdes(cfg),
+            expected_data_files_config_sha256=str(
+                global_defaults.get("data_files_sha256", "")
+            ),
         )
     else:
         # Direct construction remains useful for capability/design inspection.
@@ -618,12 +636,18 @@ def _comparison_track(cfg: dict[str, Any]) -> str:
 
 def _global_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     train_size = _env_int("TRAIN_SIZE", int(cfg.get("train_size", 50000)))
+    data_files, data_files_config_path, data_files_sha256 = load_data_files_from_config(
+        cfg, repository_root=ROOT
+    )
     return {
         "seeds": _env_list("SEEDS", cfg.get("seeds", [1]), int),
         "train_size": train_size,
         "val_size": _env_int("VAL_SIZE", int(cfg.get("val_size", 1000))),
         "test_size": _env_int("TEST_SIZE", int(cfg.get("test_size", 1000))),
         "train_shards": _env_int("TRAIN_SHARDS", int(cfg.get("train_shards", 5))),
+        "data_files": data_files,
+        "data_files_config_path": data_files_config_path,
+        "data_files_sha256": data_files_sha256,
         "sensor_counts": _env_list("SENSOR_COUNTS", _first_present(cfg, ["sensor_counts", "num_sensors", "sensor_count"], [500]), int),
         "sensor_modes": _env_list(
             "SENSOR_MODES",
@@ -894,6 +918,9 @@ def _make_run_row(
         load_full_trajectory = True
     scalar_param_mode = _scalar_param_mode(defaults, pde, task)
     config_path = str(group_cfg.get("config", defaults["config"]))
+    data_files = files_for_pde(defaults.get("data_files", {}), pde)
+    if defaults.get("data_files") and data_files is None:
+        raise ValueError(f"data_files_config does not define required PDE {pde!r}")
     row: dict[str, Any] = {
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
         "summary_schema_version": SUMMARY_SCHEMA_VERSION,
@@ -968,6 +995,8 @@ def _make_run_row(
         "status_file": "",
         "skip_reason": "",
     }
+    if data_files is not None:
+        row["data_files"] = data_files
     row["run_fingerprint"] = run_fingerprint(row)
     row["run_id"] = _run_id(row)
     row["run_name"] = _run_name(row)

@@ -66,6 +66,36 @@ def test_bounded_audit_mirrors_train_tail_validation_and_is_disjoint(tiny_data_r
     assert all(sample["content_sha256"] for sample in samples)
 
 
+def test_audit_uses_the_same_explicit_file_contract_as_training(tiny_data_root, tmp_path: Path):
+    config = {
+        **_config(),
+        "data_files": {
+            "poisson": {
+                "train": ["poisson/poisson_10000-128-128_1.mat"],
+                "test": ["poisson/poisson_test_10000-128-128.mat"],
+            }
+        },
+    }
+    report, _ = run_audit(
+        config,
+        config_path=_config_file(tmp_path, config),
+        data_root=tiny_data_root,
+        output_dir=tmp_path / "explicit",
+        options=ScanOptions(sample_limit=2, chunk_size=1),
+    )
+
+    assert report["status"] == "pass"
+    assert report["data_files"]["poisson"]["test"] == [
+        "poisson/poisson_test_10000-128-128.mat"
+    ]
+    source_files = {
+        Path(source["path"]).name
+        for split in report["results"][0]["splits"]
+        for source in split["source_files"]
+    }
+    assert "poisson_test_10000-128-128.mat" in source_files
+
+
 def test_independent_validation_still_counts_inside_the_configured_training_budget(tiny_data_root, tmp_path: Path):
     train_path = tiny_data_root / "poisson/poisson_10000-128-128_1.mat"
     train = scipy.io.loadmat(train_path)

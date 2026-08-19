@@ -2,6 +2,7 @@ name: runtime_budget_ablation
 experiment_kind: ablation
 ablation_factor: runtime_budget
 config: baselines/configs/paper.yaml
+data_files_config: configs/data_files/formal_128.yaml
 pdes: [poisson, nsnonbounded]
 baselines: [pinn_sparse, pc_bnn, pde_opt, var4d, vivid]
 seeds: [1]

@@ -47,3 +47,11 @@ def test_ifno_budget_records_all_three_stages_and_total():
 def test_central_paper_config_is_the_only_method_recipe_source():
     standalone_dir = ROOT / "baselines" / "configs" / "paper"
     assert not standalone_dir.exists() or not list(standalone_dir.glob("*.yaml"))
+
+
+def test_baseline_summary_does_not_reference_removed_method_recipe_files():
+    text = (ROOT / "docs" / "RecFNO_Senseiver_VoronoiCNN_baselines.md").read_text(encoding="utf-8")
+
+    assert "baselines/configs/paper/recfno.yaml" not in text
+    assert "baselines/configs/paper/senseiver.yaml" not in text
+    assert "baselines/configs/paper/voronoicnn.yaml" not in text

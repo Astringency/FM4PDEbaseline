@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 from baselines.capabilities import paper_table_eligible as capability_paper_table_eligible
 from baselines.capabilities import resolve_capability
 from baselines.common.data_adapter import PDEBatch, PDEBatchDataset, build_default_registry, pde_collate, slice_pde_batch
+from baselines.common.data_files import normalize_data_files
 from baselines.common.metrics import (
     append_result_csv,
     append_result_jsonl,
@@ -110,6 +111,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--val-size", type=int, default=1000)
     parser.add_argument("--test-size", type=int, default=1000)
     parser.add_argument("--train-shards", type=int, default=5)
+    parser.add_argument(
+        "--data-files-json",
+        default="",
+        help="Exact train/val/test files for this PDE as a JSON mapping; disables glob discovery.",
+    )
     parser.add_argument("--test-split", choices=["test"], default="test")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=None)
@@ -342,6 +348,7 @@ def build_data_spec(batch: PDEBatch) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    args.data_files = _parse_data_files_json(args.data_files_json, args.pde)
     reject_historical_experiment_path(args.output_dir, field="--output-dir")
     _validate_mode(args)
     if args.experiment_mode == "paper" and requires_full_data_manifest(
@@ -1121,6 +1128,18 @@ def _split_load_full_trajectory(args: argparse.Namespace, split: str) -> bool:
     return False
 
 
+def _parse_data_files_json(value: str, pde: str) -> dict[str, list[str]] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--data-files-json must be valid JSON") from exc
+    normalized = normalize_data_files({str(pde).lower(): payload})
+    return normalized[str(pde).lower()]
+
+
 def _effective_sizes(args: argparse.Namespace) -> tuple[int, int, int]:
     train_size = int(args.train_size)
     val_size = int(args.val_size)
@@ -1254,6 +1273,7 @@ def _make_split_dataset(
             if strict_size_override is None
             else bool(strict_size_override)
         ),
+        data_files=args.data_files,
     )
 
 
@@ -1391,6 +1411,7 @@ def _evaluate_full_test_loader(
             "val_from_train_offset": split_info["val_from_train_offset"],
             "test_size": len(test_dataset),
             "train_shards": args.train_shards,
+            "data_files_json": json.dumps(getattr(args, "data_files", None) or {}, sort_keys=True),
             **_requested_design_fields(args),
             "data_loading_mode": args.data_loading_mode,
             "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
@@ -1732,6 +1753,7 @@ def _summarize_run(
         "val_from_train_offset": split_info["val_from_train_offset"],
         "test_size": len(test_dataset),
         "train_shards": args.train_shards,
+        "data_files_json": json.dumps(getattr(args, "data_files", None) or {}, sort_keys=True),
         **_requested_design_fields(args),
         "data_loading_mode": args.data_loading_mode,
         "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
@@ -2311,6 +2333,8 @@ def _validate_and_bind_run_fingerprint(
         "data_manifest_sha256": str(args.data_manifest_sha256),
         "commit_hash": str(args.commit_hash),
     }
+    if args.data_files is not None:
+        payload["data_files"] = args.data_files
     if args.execution_mode == "eval_only":
         payload.update(
             {

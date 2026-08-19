@@ -36,6 +36,15 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
     assert {row["pin_memory"] for row in rows} == {True}
     assert {row["persistent_workers"] for row in rows} == {True}
     assert {row["prefetch_factor"] for row in rows} == {2}
+    assert all(row.get("data_files") for row in rows)
+    poisson = next(row for row in rows if row["pde"] == "poisson")
+    helmholtz = next(row for row in rows if row["pde"] == "helmholtz")
+    assert poisson["data_files"]["test"] == [
+        "poisson/poisson_test_10000-128-128.mat"
+    ]
+    assert helmholtz["data_files"]["test"] == [
+        "helmholtz/helmholtz_test_10000-128-128.mat"
+    ]
     assert {row["epochs"] for row in rows if row["baseline"] == "ifno"} == {500}
     assert set(summary["by_task_group"]) == {
         "full_forward_main",

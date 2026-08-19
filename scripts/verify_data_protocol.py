@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.common.data_adapter import PDEDataRegistry, build_default_registry
+from baselines.common.data_files import files_for_pde, load_data_files_from_config
 
 
 REPORT_SCHEMA_VERSION = "fm4pde-data-protocol-report-v1"
@@ -52,6 +53,7 @@ class SplitRequest:
     train_shards: int = 5
     scalar_param_mode: str = "metadata"
     load_full_trajectory: bool = True
+    data_files: dict[str, list[str]] | None = None
 
     def cache_identity(self, data_root: Path, *, content_hashes: bool) -> dict[str, Any]:
         return {
@@ -199,6 +201,7 @@ def _probe_validation_source(
     train_shards: int,
     scalar_param_mode: str,
     load_full_trajectory: bool,
+    data_files: dict[str, list[str]] | None,
 ) -> tuple[str, int | None, int]:
     """Mirror baselines.run: prefer native val, otherwise reserve train tail."""
     if val_size <= 0:
@@ -213,6 +216,7 @@ def _probe_validation_source(
             scalar_param_mode=scalar_param_mode,
             load_full_trajectory=load_full_trajectory,
             strict_size=False,
+            data_files=data_files,
         )
         if train_size <= val_size:
             raise ValueError(
@@ -237,6 +241,7 @@ def _probe_validation_source(
             scalar_param_mode=scalar_param_mode,
             load_full_trajectory=load_full_trajectory,
             strict_size=True,
+            data_files=data_files,
         )
         return "deterministic_train_subset", offset, offset
 
@@ -256,6 +261,12 @@ def build_requests_for_pde(
     # Content identity should cover the whole physical sample, not only the
     # endpoint representation chosen by a particular method.
     load_full_trajectory = bool(options.hashes_enabled or config.get("load_full_trajectory", False))
+    configured_files, _config_path, _config_sha256 = load_data_files_from_config(
+        config, repository_root=ROOT
+    )
+    data_files = files_for_pde(configured_files, pde)
+    if configured_files and data_files is None:
+        raise ValueError(f"data_files_config does not define required PDE {pde!r}")
     val_source, val_offset, effective_train_size = _probe_validation_source(
         registry,
         pde=pde,
@@ -265,6 +276,7 @@ def build_requests_for_pde(
         train_shards=train_shards,
         scalar_param_mode=scalar_param_mode,
         load_full_trajectory=load_full_trajectory,
+        data_files=data_files,
     )
     requests = [
         SplitRequest(
@@ -275,6 +287,7 @@ def build_requests_for_pde(
             train_shards=train_shards,
             scalar_param_mode=scalar_param_mode,
             load_full_trajectory=load_full_trajectory,
+            data_files=data_files,
         )
     ]
     if val_size > 0:
@@ -289,6 +302,7 @@ def build_requests_for_pde(
                 train_shards=train_shards,
                 scalar_param_mode=scalar_param_mode,
                 load_full_trajectory=load_full_trajectory,
+                data_files=data_files,
             )
         )
     if test_size > 0:
@@ -301,6 +315,7 @@ def build_requests_for_pde(
                 train_shards=train_shards,
                 scalar_param_mode=scalar_param_mode,
                 load_full_trajectory=load_full_trajectory,
+                data_files=data_files,
             )
         )
     return requests, {
@@ -456,6 +471,7 @@ def _load_request_chunk(
         "scalar_param_mode": request.scalar_param_mode,
         "load_full_trajectory": request.load_full_trajectory,
         "strict_size": False,
+        "data_files": request.data_files,
     }
     if request.source_kind == "deterministic_train_subset":
         assert request.val_from_train_offset is not None
@@ -689,6 +705,9 @@ def run_audit(
 
     config_path = Path(config_path).resolve()
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    configured_files, data_files_config_path, data_files_config_sha256 = load_data_files_from_config(
+        config, repository_root=ROOT
+    )
     ordered_samples = _ordered_sample_rows(samples)
     report = {
         "report_schema_version": REPORT_SCHEMA_VERSION,
@@ -699,6 +718,9 @@ def run_audit(
         "experiment_name": str(config.get("name", config_path.stem)),
         "experiment_config": str(config_path),
         "experiment_config_sha256": config_sha256,
+        "data_files_config": data_files_config_path,
+        "data_files_config_sha256": data_files_config_sha256,
+        "data_files": configured_files,
         "data_root": str(data_root.resolve()),
         "mode": "full" if options.full else "bounded",
         "content_hashes": options.hashes_enabled,

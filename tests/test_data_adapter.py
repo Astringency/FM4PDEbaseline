@@ -235,6 +235,61 @@ def test_train_val_test_are_distinct_splits(tiny_data_root):
     assert any("test" in p.rsplit("/", 1)[-1] for p in test.batch.file_paths)
 
 
+def test_explicit_data_files_disable_discovery_and_select_exact_test_file(tiny_data_root):
+    registry = build_default_registry()
+    data_files = {
+        "train": ["poisson/poisson_10000-128-128_1.mat"],
+        "test": ["poisson/poisson_test_10000-128-128.mat"],
+    }
+
+    raw = registry.load_raw(
+        "poisson",
+        tiny_data_root,
+        split="test",
+        max_samples=1,
+        data_files=data_files,
+    )
+
+    assert raw["global_sample_ids"] == ["poisson_test_10000-128-128.mat:0"]
+    assert raw["file_paths"] == [
+        str(tiny_data_root / "poisson" / "poisson_test_10000-128-128.mat")
+    ]
+
+
+def test_explicit_data_files_reserve_validation_tail_without_val_file(tiny_data_root):
+    registry = build_default_registry()
+    data_files = {
+        "train": ["poisson/poisson_10000-128-128_1.mat"],
+        "test": ["poisson/poisson_test_10000-128-128.mat"],
+    }
+
+    raw = registry.load_raw(
+        "poisson",
+        tiny_data_root,
+        split="val",
+        max_samples=1,
+        val_from_train_offset=2,
+        data_files=data_files,
+        strict_size=True,
+    )
+
+    assert raw["split"] == "val"
+    assert raw["metadata"]["split_source"] == "deterministic_train_subset"
+    assert raw["global_sample_ids"] == ["poisson_10000-128-128_1.mat:2"]
+
+
+def test_explicit_data_files_never_fall_back_to_discovery(tiny_data_root):
+    registry = build_default_registry()
+    with pytest.raises(FileNotFoundError, match="Explicitly configured data file not found"):
+        registry.load_raw(
+            "poisson",
+            tiny_data_root,
+            split="test",
+            max_samples=1,
+            data_files={"test": ["poisson/not-the-configured-test.mat"]},
+        )
+
+
 def test_sensor_budget_metadata_static_and_time_varying():
     registry = build_default_registry()
     raw_static = registry.synthetic_raw("poisson", n=1, resolution=8)

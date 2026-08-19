@@ -4,7 +4,7 @@ External baseline experiments for the protocol in
 [`docs/baseline_exp.md`](docs/baseline_exp.md). The formal `main_results`
 design is the single source of truth and contains 76 runnable experiments.
 `baselines/configs/paper.yaml` contains the shared runtime and canonical
-per-method recipes; supplemental-only methods are labeled in place.
+per-method recipes; ablation-only methods are labeled in place.
 
 ## Entry points
 
@@ -135,7 +135,7 @@ without retraining.
 
 ## Ablations
 
-These are supplemental designs, not alternate definitions of the formal
+These are ablation designs, not alternate definitions of the formal
 experiment. They inherit the formal one-seed, 50,000-total-training-sample and
 1,000-test-sample defaults, then vary only their named factor.
 

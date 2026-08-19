@@ -2,12 +2,15 @@ name: main_results
 experiment_kind: main
 comparison_track: unified_adapted
 config: baselines/configs/paper.yaml
+data_files_config: configs/data_files/formal_128.yaml
 task_protocol_version: fm4pde-task-contract-v3
 sensor_protocol_version: fm4pde-sensor-contract-v3
 pdes: [poisson, helmholtz, darcy, burger, nsnonbounded]
 seeds: [1]
+# train_size is the shared train/validation pool. With no explicit val files,
+# the final val_size samples are reserved for validation (49,000 + 1,000 here).
 train_size: 50000
-val_size: 1000
+val_size: 5000
 test_size: 1000
 train_shards: 5
 data_loading_mode: eager

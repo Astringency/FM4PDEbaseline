@@ -2,6 +2,7 @@ name: noise_ablation
 experiment_kind: ablation
 ablation_factor: noise_level
 config: baselines/configs/paper.yaml
+data_files_config: configs/data_files/formal_128.yaml
 pdes:
   - poisson
   - helmholtz

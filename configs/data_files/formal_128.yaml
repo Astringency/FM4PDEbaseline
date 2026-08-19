@@ -1,0 +1,46 @@
+data_files:
+  poisson:
+    train:
+      - poisson/poisson_10000-128-128_1.mat
+      - poisson/poisson_10000-128-128_2.mat
+      - poisson/poisson_10000-128-128_3.mat
+      - poisson/poisson_10000-128-128_4.mat
+      - poisson/poisson_10000-128-128_5.mat
+    test:
+      - poisson/poisson_test_10000-128-128.mat
+  helmholtz:
+    train:
+      - helmholtz/helmholtz_10000-128-128_1.mat
+      - helmholtz/helmholtz_10000-128-128_2.mat
+      - helmholtz/helmholtz_10000-128-128_3.mat
+      - helmholtz/helmholtz_10000-128-128_4.mat
+      - helmholtz/helmholtz_10000-128-128_5.mat
+    test:
+      - helmholtz/helmholtz_test_10000-128-128.mat
+  darcy:
+    train:
+      - darcy/darcy_10000-128-128_1.mat
+      - darcy/darcy_10000-128-128_2.mat
+      - darcy/darcy_10000-128-128_3.mat
+      - darcy/darcy_10000-128-128_4.mat
+      - darcy/darcy_10000-128-128_5.mat
+    test:
+      - darcy/darcy_test_10000-128-128.mat
+  burger:
+    train:
+      - burgers/burger_10000-128-128_1.mat
+      - burgers/burger_10000-128-128_2.mat
+      - burgers/burger_10000-128-128_3.mat
+      - burgers/burger_10000-128-128_4.mat
+      - burgers/burger_10000-128-128_5.mat
+    test:
+      - burgers/burger_test_10000-128-128.mat
+  nsnonbounded:
+    train:
+      - nsnonbounded/nsnonbounded_10000-128-128-10_1_new.mat
+      - nsnonbounded/nsnonbounded_10000-128-128-10_2_new.mat
+      - nsnonbounded/nsnonbounded_10000-128-128-10_3_new.mat
+      - nsnonbounded/nsnonbounded_10000-128-128-10_4_new.mat
+      - nsnonbounded/nsnonbounded_10000-128-128-10_5_new.mat
+    test:
+      - nsnonbounded/nsnonbounded_test_10000-128-128-10.mat

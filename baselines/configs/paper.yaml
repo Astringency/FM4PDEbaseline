@@ -176,8 +176,8 @@ method_by_baseline:
     steps: 500
     lr: 0.01
     lambda_reg: 0.00001
-  # Supplemental ablation-only methods. The formal main_results design does
-  # not select either baseline.
+  # Ablation-only methods. The formal main_results design does not select
+  # either baseline.
   var4d:
     normalize: false
     steps: 500

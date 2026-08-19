@@ -4,7 +4,7 @@ import hashlib
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 import re
 
 import h5py
@@ -13,6 +13,7 @@ import scipy.io
 import torch
 from torch.utils.data import Dataset
 
+from .data_files import resolve_split_files
 from .sensors import build_observation_tensors, make_coordinate_grid
 
 
@@ -307,6 +308,7 @@ class PDEDataRegistry:
         scalar_param_mode: str = "metadata",
         load_full_trajectory: bool = True,
         strict_size: bool = False,
+        data_files: Mapping[str, list[str]] | None = None,
     ) -> dict[str, Any]:
         spec = self.get(pde_name)
         split = _validate_split(split)
@@ -320,17 +322,22 @@ class PDEDataRegistry:
             )
             scalar_param_mode = "metadata"
         try:
+            loader_kwargs = {
+                "split": split,
+                "max_samples": max_samples,
+                "train_shards": train_shards,
+                "sample_offset": sample_offset,
+                "val_from_train_offset": val_from_train_offset,
+                "prefer_test": prefer_test,
+                "scalar_param_mode": scalar_param_mode,
+                "load_full_trajectory": load_full_trajectory,
+                "strict_size": strict_size,
+            }
+            if data_files is not None:
+                loader_kwargs["data_files"] = data_files
             raw = spec.loader(
                 root,
-                split=split,
-                max_samples=max_samples,
-                train_shards=train_shards,
-                sample_offset=sample_offset,
-                val_from_train_offset=val_from_train_offset,
-                prefer_test=prefer_test,
-                scalar_param_mode=scalar_param_mode,
-                load_full_trajectory=load_full_trajectory,
-                strict_size=strict_size,
+                **loader_kwargs,
             )
             if split == "val":
                 raw.setdefault("metadata", {}).setdefault("split_source", "independent_val")
@@ -339,17 +346,22 @@ class PDEDataRegistry:
             if split == "val" and val_from_train_offset is not None:
                 train_offset = int(val_from_train_offset)
                 try:
+                    loader_kwargs = {
+                        "split": "train",
+                        "max_samples": max_samples,
+                        "train_shards": train_shards,
+                        "sample_offset": train_offset,
+                        "val_from_train_offset": val_from_train_offset,
+                        "prefer_test": False,
+                        "scalar_param_mode": scalar_param_mode,
+                        "load_full_trajectory": load_full_trajectory,
+                        "strict_size": strict_size,
+                    }
+                    if data_files is not None:
+                        loader_kwargs["data_files"] = data_files
                     raw = spec.loader(
                         root,
-                        split="train",
-                        max_samples=max_samples,
-                        train_shards=train_shards,
-                        sample_offset=train_offset,
-                        val_from_train_offset=val_from_train_offset,
-                        prefer_test=False,
-                        scalar_param_mode=scalar_param_mode,
-                        load_full_trajectory=load_full_trajectory,
-                        strict_size=strict_size,
+                        **loader_kwargs,
                     )
                     raw.setdefault("metadata", {})["split"] = "val"
                     raw["metadata"]["split_source"] = "deterministic_train_subset"
@@ -659,6 +671,7 @@ class PDEDataRegistry:
         experiment_mode: str = "debug",
         strict_size: bool = False,
         build_voronoi_grid: bool = True,
+        data_files: Mapping[str, list[str]] | None = None,
     ) -> Dataset:
         if data_loading_mode not in {"eager", "lazy"}:
             raise ValueError(f"data_loading_mode must be eager or lazy, got {data_loading_mode!r}")
@@ -685,6 +698,7 @@ class PDEDataRegistry:
             scalar_param_mode=scalar_param_mode,
             load_full_trajectory=load_full_trajectory,
             strict_size=strict_size,
+            data_files=data_files,
         )
         batch = self.make_task(
             self.to_canonical(raw, pde_name),
@@ -1477,6 +1491,7 @@ def _load_darcy(
     scalar_param_mode: str = "metadata",
     load_full_trajectory: bool = True,
     strict_size: bool = False,
+    data_files: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
@@ -1486,7 +1501,12 @@ def _load_darcy(
         patterns = ["darcy_val_*-128-128.mat", "darcy_*-128-128_val.mat"]
     else:
         patterns = ["darcy_10000-128-128_*.mat"]
-    files = _train_limited(_candidate_files(root, "darcy", active_split, patterns), active_split, train_shards)
+    configured = resolve_split_files(root, active_split, data_files)
+    files = _train_limited(
+        configured if configured is not None else _candidate_files(root, "darcy", active_split, patterns),
+        active_split,
+        train_shards,
+    )
     if not files:
         raise _missing_error(root, "darcy", active_split, patterns)
     parts = []
@@ -1547,6 +1567,7 @@ def _load_poisson(
     scalar_param_mode: str = "metadata",
     load_full_trajectory: bool = True,
     strict_size: bool = False,
+    data_files: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     active_split = "test" if prefer_test else _validate_split(split)
     return _load_static_mat(
@@ -1561,6 +1582,7 @@ def _load_poisson(
         sample_offset=sample_offset,
         active_split=active_split,
         strict_size=strict_size,
+        data_files=data_files,
     )
 
 
@@ -1575,6 +1597,7 @@ def _load_helmholtz(
     scalar_param_mode: str = "metadata",
     load_full_trajectory: bool = True,
     strict_size: bool = False,
+    data_files: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     active_split = "test" if prefer_test else _validate_split(split)
     return _load_static_mat(
@@ -1591,6 +1614,7 @@ def _load_helmholtz(
         active_split=active_split,
         strict_size=strict_size,
         exclude_pattern=r"(?:_|-)k\d+\.mat$",
+        data_files=data_files,
     )
 
 
@@ -1608,11 +1632,17 @@ def _load_static_mat(
     active_split: str | None = None,
     strict_size: bool = False,
     exclude_pattern: str | None = None,
+    data_files: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     split = _validate_split(split)
     active_split = active_split or split
-    files = _train_limited(_candidate_files(root, pde, active_split, patterns), active_split, train_shards)
-    if exclude_pattern is not None:
+    configured = resolve_split_files(root, active_split, data_files)
+    files = _train_limited(
+        configured if configured is not None else _candidate_files(root, pde, active_split, patterns),
+        active_split,
+        train_shards,
+    )
+    if configured is None and exclude_pattern is not None:
         files = [path for path in files if re.search(exclude_pattern, path.name) is None]
     if not files:
         raise _missing_error(root, pde, active_split, patterns)
@@ -1702,6 +1732,7 @@ def _load_nsnonbounded(
     scalar_param_mode: str = "metadata",
     load_full_trajectory: bool = True,
     strict_size: bool = False,
+    data_files: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
@@ -1711,8 +1742,13 @@ def _load_nsnonbounded(
         patterns = ["nsnonbounded_val_*-128-128-10_*.mat", "nsnonbounded_*-128-128-10_val*.mat"]
     else:
         patterns = ["nsnonbounded_10000-128-128-10_*_new.mat"]
-    files = _train_limited(_candidate_files(root, "nsnonbounded", active_split, patterns), active_split, train_shards)
-    if active_split == "test":
+    configured = resolve_split_files(root, active_split, data_files)
+    files = _train_limited(
+        configured if configured is not None else _candidate_files(root, "nsnonbounded", active_split, patterns),
+        active_split,
+        train_shards,
+    )
+    if configured is None and active_split == "test":
         files = _filter_nsnonbounded_test_files(files)
     if not files:
         raise _missing_error(root, "nsnonbounded", active_split, patterns)
@@ -1794,6 +1830,7 @@ def _load_burger(
     scalar_param_mode: str = "metadata",
     load_full_trajectory: bool = True,
     strict_size: bool = False,
+    data_files: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     split = _validate_split(split)
     active_split = "test" if prefer_test else split
@@ -1803,7 +1840,14 @@ def _load_burger(
         patterns = ["burger_val_*-128-128.mat", "burger_*-128-128_val.mat"]
     else:
         patterns = ["burger_10000-128-128_*.mat"]
-    files = _train_limited(_candidate_files(root, "burger", active_split, patterns, aliases=("burgers",)), active_split, train_shards)
+    configured = resolve_split_files(root, active_split, data_files)
+    files = _train_limited(
+        configured
+        if configured is not None
+        else _candidate_files(root, "burger", active_split, patterns, aliases=("burgers",)),
+        active_split,
+        train_shards,
+    )
     if not files:
         raise _missing_error(root, "burger", active_split, patterns, aliases=("burgers",))
     parts = []

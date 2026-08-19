@@ -74,6 +74,7 @@ EVAL_FINGERPRINT_FIELDS = (
     "source_train_seed",
     "checkpoint_sha256",
 )
+OPTIONAL_FINGERPRINT_FIELDS = ("data_files",)
 
 SUMMARY_IDENTITY_FIELDS = ("task_group", "task", "pde", "baseline", "seed")
 AMORTIZED_CHECKPOINT_BASELINES = {
@@ -598,6 +599,7 @@ def _update_revision_digest(digest: Any, label: bytes, content: bytes) -> None:
 
 def run_fingerprint(row: Mapping[str, Any]) -> str:
     fields = list(FINGERPRINT_FIELDS)
+    fields.extend(field for field in OPTIONAL_FINGERPRINT_FIELDS if field in row)
     if row.get("execution_mode") == "eval_only":
         fields.extend(EVAL_FINGERPRINT_FIELDS)
     missing = [field for field in FINGERPRINT_FIELDS if field not in row]

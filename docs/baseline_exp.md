@@ -6,12 +6,16 @@
 
 1. 实验涉及五个 PDE 上进行：Poisson、Helmholtz、Darcy、Burgers、Navier-Stokes
 2. 基于训练的模型默认存储 checkpoint 以供训练之后的复用，不必每次评估都需重新训练
-3. 训练数据 50000 个，其中 1000 个为验证数据（49000 train + 1000 val），测试数据 1000 个
+3. 训练数据 50000 个，其中 5000 个为验证数据（45000 train + 5000 val），测试数据 1000 个
 4. 实验需要有早停逻辑，早停主要以损失下降平缓为判定依据，判定阈值为 1e-4
 5. 稀疏任务的观测点个数默认取 500 个，Burgers 有特殊情况，见下面的具体设置
 6. 需要确保各个任务不出现数据泄露，测试数据不可包含在训练数据当中
 7. 各个 Baseline 方法应当在 Official 实现的基础上进行任务适配，保留官方网络架构、损失、优化器、学习率调度和分阶段训练等核心流程；统一的是 FM4PDE 的任务输入、数据划分、预算记录、checkpoint 与评估接口，不以“统一训练器”为由改写方法核心
 8. 采样评估结果报告相对误差和 PDE 指标。主 PDE 指标统一指内部方程残差均方 `pde_residual`：静态 Forward 使用 $R(a_{true},u_{pred})$，静态 Inverse 使用 $R(a_{pred},u_{true})$，联合重建使用 $R(a_{pred},u_{pred})$。`bc_residual`、`ic_residual` 以及二者与内部残差的加权和 `physics_loss` 作为分项诊断，不代替主 PDE 指标。仅输出初末端点的 Navier-Stokes 任务报告 `endpoint_secant` 近似，并通过 `residual_mode` 与完整轨迹残差区分。
+
+正式实验的数据文件由 `configs/data_files/formal_128.yaml` 逐个列出。矩阵、数据协议校验器和运行器必须传递同一份文件清单；配置清单存在时禁止回退到 glob 自动发现，缺失文件直接报错。清单中的相对路径以 `DATA_ROOT` 为根，因此迁移到其他机器时不需要修改绝对路径。
+
+`train_size` 表示训练/验证共享数据池的总大小，而不是最终用于拟合的样本数。当没有单独的 `val` 文件时，验证集固定取该数据池尾部：训练区间为 `[0, train_size - val_size)`，验证区间为 `[train_size - val_size, train_size)`。因此当前 `train_size: 50000`、`val_size: 1000` 对应 49000+1000；若改为 45000+5000，只需保持 `train_size: 50000` 并设置 `val_size: 5000`，之后重新生成数据 manifest 和实验矩阵。
 9. 每个实验只跑一次即可，不需要像现在这样有三个 seed
 10. 评估得到的采样结果需要存储为可再次读入的文件，并绘制 pdf 图片
 11. 所有已完成实验进入同一份 `summary` 与 LaTeX 表；不再按 main/supplement 等展示层级过滤结果。实现来源、是否适配及 official-native 资格仍作为审计字段保留，不参与结果丢弃

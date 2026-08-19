@@ -145,6 +145,13 @@ def build_command(row: dict[str, Any]) -> list[str]:
         str(values["sensor_seed"]),
         "--strict-size",
     ]
+    if values["data_files"]:
+        cmd.extend(
+            [
+                "--data-files-json",
+                json.dumps(values["data_files"], sort_keys=True, separators=(",", ":")),
+            ]
+        )
     provenance_flags = {
         "--matrix-schema-version": row.get("matrix_schema_version"),
         "--summary-schema-version": row.get("summary_schema_version"),
@@ -213,7 +220,7 @@ def build_command(row: dict[str, Any]) -> list[str]:
 def _validate_matrix_provenance(
     row: dict[str, Any], values: dict[str, Any], *, data_root: str | Path
 ) -> None:
-    """Fail before launch when a v2 matrix row no longer describes the command."""
+    """Fail before launch when a formal matrix row no longer describes the command."""
     expected_fingerprint = str(row.get("run_fingerprint", "") or "")
     if not expected_fingerprint:
         return
@@ -234,7 +241,7 @@ def _validate_matrix_provenance(
             not data_manifest_path or not expected_data_manifest_hash
         ):
             raise ValueError(
-                "formal v2 matrix row requires data_manifest_path and data_manifest_sha256"
+                "formal matrix row requires data_manifest_path and data_manifest_sha256"
             )
         if data_manifest_path:
             manifest, _manifest_path, observed_data_manifest_hash = validate_full_data_manifest(
@@ -287,6 +294,7 @@ def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
         "val_size": row_value(row, "val_size", "VAL_SIZE", allow_override),
         "test_size": row_value(row, "test_size", "TEST_SIZE", allow_override),
         "train_shards": row_value(row, "train_shards", "TRAIN_SHARDS", allow_override),
+        "data_files": row.get("data_files") or {},
         "batch_size": row_value(row, "batch_size", "BATCH_SIZE", allow_override),
         "epochs": row_value(row, "epochs", "EPOCHS", allow_override),
         "scalar_param_mode": row_value(row, "scalar_param_mode", "SCALAR_PARAM_MODE", allow_override),
