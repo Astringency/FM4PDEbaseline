@@ -2,9 +2,59 @@
 
 External baseline experiments for the protocol in
 [`docs/baseline_exp.md`](docs/baseline_exp.md). The formal `main_results`
-design is the single source of truth and contains 76 runnable experiments.
-`baselines/configs/paper.yaml` contains the shared runtime and canonical
-per-method recipes; ablation-only methods are labeled in place.
+design is the single source of truth and contains 80 runnable experiments.
+`baselines/configs/paper.yaml` contains the shared runtime and per-method
+recipes. Capability and result metadata distinguish direct official code,
+official-architecture adapters, canonical mathematical baselines, and local
+adaptations; these labels must not be treated as interchangeable.
+
+## Formal experiment protocol
+
+The formal split uses one seed, a 50,000-sample train/validation pool split as
+45,000 train + 5,000 validation, and 1,000 test samples. With no explicit
+validation files, validation is the final non-overlapping portion of the
+training pool.
+
+| Task | PDE scope | Baselines |
+|---|---|---|
+| Full Forward | Poisson, Helmholtz, Darcy, Navier-Stokes | FNO, DeepONet, iFNO |
+| Full Inverse | Poisson, Helmholtz, Darcy, Navier-Stokes | iFNO |
+| Sparse Solution Reconstruction | Five formal PDEs | RecFNO, Senseiver, VoronoiCNN |
+| Burgers Sparse Solution Reconstruction | Burgers only | Var4D, VIVID, plus the three amortized reconstruction methods |
+| Sparse Forward | Poisson, Helmholtz, Darcy, Navier-Stokes for amortized methods; no Navier-Stokes physics baseline | RecFNO, Senseiver, VoronoiCNN, PINN-sparse, PDE-opt, PC-BNN |
+| Sparse Inverse | Poisson, Helmholtz, Darcy, Navier-Stokes for amortized methods; no Navier-Stokes physics baseline | RecFNO, Senseiver, VoronoiCNN, PINN-sparse, PDE-opt, PC-BNN |
+
+Burgers reconstructs the complete `128 × 128` time-space trajectory under two
+protocols: 500 total scattered observations sampled independently per example,
+or 5 complete time slices (`5 × 128` observations). Var4D and VIVID are not
+configured for `nsnonbounded`, Reaction-Diffusion, or Shallow-Water.
+
+Important method budgets and adaptations:
+
+- Senseiver and VoronoiCNN use early-stopping patience 20 with minimum
+  improvement `1e-4`.
+- PINN-sparse runs at most 1,000 Adam iterations followed by 500 L-BFGS steps;
+  both phases and their combined budget are recorded separately.
+- Var4D performs at most 500 per-sample L-BFGS-B iterations over a
+  covariance-decorrelated Burgers initial-state increment; a differentiable
+  pseudo-spectral solver propagates the complete trajectory under a strong
+  dynamical constraint.
+- VIVID trains the official VCNN architecture with Adam/MSE for 20 epochs at
+  learning rate `1e-4` and effective batch size 64, then performs at most 1,000
+  per-sample L-BFGS-B iterations of the original three-term VIVID objective.
+
+Var4D is now labeled `canonical_math`: it is strong-constraint 4D-Var with a
+Burgers-specific propagator, not an end-to-end official-code claim. VIVID is an
+`official_architecture` Burgers task adapter: it preserves the vendored 6×48
+hidden `8×8` VCNN plus linear output layer, Glorot initialization, official
+training budget, $J_b+J_p+J_o$ objective, covariance scales, and L-BFGS-B
+recipe. The original VIVID is 3D-Var, so the adapter treats the complete
+time-space solution as one two-dimensional state; it does not silently turn
+VIVID into 4D-Var. Both are unified-table eligible but remain
+`official_native_eligible=false` because their Burgers data/operator adapters
+are not the official shallow-water experiment. See the [Var4D/VIVID
+official-source audit](docs/var4d_vivid_official_audit.md) for retained core
+details and disclosed adaptations.
 
 ## Entry points
 
@@ -148,6 +198,11 @@ Available designs:
 - `runtime_budget_ablation`
 - `train_size_ablation`
 
+`time_varying_sensor_ablation` varies the total scattered-observation count on
+Burgers for Var4D, VIVID, and Senseiver. The Var4D/VIVID portion of
+`runtime_budget_ablation` also uses Burgers Sparse Solution Reconstruction;
+neither ablation generates legacy `nsnonbounded` Var4D/VIVID rows.
+
 Use the same workflow with another config:
 
 ```bash
@@ -203,4 +258,6 @@ python -m pytest -q
 ```
 
 Do not edit `offical/` unless intentionally updating the vendored upstream
-source snapshots.
+source snapshots. The snapshots currently lack verified upstream commit/tag
+records; see [`baselines/OFFICIAL_SOURCE_METADATA.md`](baselines/OFFICIAL_SOURCE_METADATA.md)
+before making official-source claims.

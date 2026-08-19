@@ -40,6 +40,8 @@ from baselines.methods.official import (
     get_ifno_official_status,
     get_pc_bnn_net_class,
     get_pc_bnn_official_aligned_status,
+    get_vivid_official_architecture_status,
+    get_vivid_official_status,
 )
 from baselines.methods.pc_bnn import PCBNNBaseline
 from baselines.methods.pde_opt import PDEOptBaseline
@@ -469,7 +471,8 @@ def main(argv: list[str] | None = None) -> None:
 
     val_dataset, split_info = _make_val_dataset_if_requested(registry, args, val_size, train_size, use_sensors)
     effective_train_size = int(split_info["effective_train_size"])
-    is_per_instance = args.baseline in PER_INSTANCE_BASELINES
+    has_per_instance_optimization = args.baseline in PER_INSTANCE_BASELINES
+    is_per_instance = has_per_instance_optimization
     if args.baseline == "vivid" and (
         bool(method_cfg.get("train_inverse_operator", False)) or _uses_official_inverse_observation_operator(args.baseline, method_cfg)
     ):
@@ -525,7 +528,9 @@ def main(argv: list[str] | None = None) -> None:
             "train_size_loaded_for_spec": len(spec_dataset),
             "train_size_requested": int(train_size),
             "train_size_loaded_in_memory": int(getattr(train_dataset_for_fit, "loaded_in_memory_samples", len(train_dataset_for_fit))),
-            "per_instance_baseline": bool(is_per_instance),
+            "per_instance_baseline": bool(has_per_instance_optimization),
+            "per_instance_only_baseline": bool(is_per_instance),
+            "amortized_training": bool(not is_per_instance),
         }
     )
     _run_stage(
@@ -1098,6 +1103,14 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
     ifno_pretrain_epochs = int(method_cfg.get("ifno_pretrain_epochs", 0) or 0) if baseline == "ifno" else 0
     vae_pretrain_epochs = int(method_cfg.get("vae_pretrain_epochs", 0) or 0) if baseline == "ifno" else 0
     joint_epochs = int(method_cfg.get("joint_epochs", 0) or 0) if baseline == "ifno" else 0
+    vivid_inverse_epochs = int(method_cfg.get("epochs", 0) or 0) if baseline == "vivid" else 0
+    var4d_lbfgsb_steps = steps if baseline == "var4d" else 0
+    vivid_lbfgsb_steps = refine_steps if baseline == "vivid" else 0
+    variational_cost_tolerance = (
+        float(method_cfg.get("cost_decrement_tolerance", 0.0) or 0.0)
+        if baseline in {"var4d", "vivid"}
+        else 0.0
+    )
     labels = []
     if baseline == "pinn_sparse" and bool(method_cfg.get("deepxde_native", False)):
         labels.extend(
@@ -1116,9 +1129,22 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
                 f"total_epochs={ifno_pretrain_epochs + vae_pretrain_epochs + joint_epochs}",
             ]
         )
-    if refine_steps > 0 and baseline == "vivid":
-        labels.append(f"refine_steps={refine_steps}")
-    if steps > 0 and baseline != "pinn_sparse":
+    if baseline == "var4d":
+        labels.extend(
+            [
+                f"var4d_lbfgsb_steps={var4d_lbfgsb_steps}",
+                f"cost_decrement_tolerance={variational_cost_tolerance:g}",
+            ]
+        )
+    if baseline == "vivid":
+        labels.extend(
+            [
+                f"vivid_inverse_epochs={vivid_inverse_epochs}",
+                f"vivid_lbfgsb_steps={vivid_lbfgsb_steps}",
+                f"cost_decrement_tolerance={variational_cost_tolerance:g}",
+            ]
+        )
+    if steps > 0 and baseline not in {"pinn_sparse", "var4d"}:
         labels.append(f"steps={steps}")
     if particles > 0 and baseline == "pc_bnn":
         labels.append(f"particles={particles}")
@@ -1136,6 +1162,10 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
         "ifno_pretrain_epochs": ifno_pretrain_epochs,
         "vae_pretrain_epochs": vae_pretrain_epochs,
         "joint_epochs": joint_epochs,
+        "vivid_inverse_epochs": vivid_inverse_epochs,
+        "var4d_lbfgsb_steps": var4d_lbfgsb_steps,
+        "vivid_lbfgsb_steps": vivid_lbfgsb_steps,
+        "variational_cost_decrement_tolerance": variational_cost_tolerance,
         "total_training_epochs": ifno_pretrain_epochs + vae_pretrain_epochs + joint_epochs if baseline == "ifno" else 0,
         "method_budget_label": ",".join(labels),
     }
@@ -1336,7 +1366,8 @@ def _evaluate_full_test_loader(
     raw_path = out_dir / "results_raw.jsonl"
     grad_enabled = args.baseline in {"pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"}
     per_instance = bool(split_info.get("per_instance_baseline", False))
-    reported_train_size = 0 if per_instance else int(split_info["effective_train_size"])
+    amortized_training = bool(split_info.get("amortized_training", not per_instance))
+    reported_train_size = int(split_info["effective_train_size"]) if amortized_training else 0
     checkpoint_sha256 = _file_sha256(Path(checkpoint_path)) if checkpoint_path else ""
     checkpoint_provenance = dict(getattr(model, "provenance", {}) or {})
     artifact_writer: EvaluationArtifactWriter | None = None
@@ -1509,11 +1540,26 @@ def _evaluate_full_test_loader(
             "train_time": train_time,
             "fit_setup_time": float(split_info.get("fit_setup_time", 0.0) or 0.0),
             "test_time_optimization": per_instance,
-            "amortized_training": not per_instance,
+            "amortized_training": amortized_training,
             "inference_time": elapsed,
             "inference_optimization_time": inf_opt,
             "optimization_steps_completed": int(batch.metadata.get("optimization_steps_completed", 0) or 0),
+            "optimization_budget_steps_per_sample": int(
+                batch.metadata.get("optimization_budget_steps_per_sample", 0) or 0
+            ),
+            "optimization_function_evaluations": int(
+                batch.metadata.get("optimization_function_evaluations", 0) or 0
+            ),
             "optimization_early_stopped": bool(batch.metadata.get("optimization_early_stopped", False)),
+            "optimization_variable": str(batch.metadata.get("optimization_variable", "")),
+            "optimization_optimizer": str(batch.metadata.get("optimization_optimizer", "")),
+            "optimization_status_per_sample": json.dumps(
+                _json_safe(batch.metadata.get("optimization_status_per_sample", [])), sort_keys=True
+            ),
+            "dynamics_model": str(batch.metadata.get("dynamics_model", "")),
+            "dynamics_substeps": int(batch.metadata.get("dynamics_substeps", 0) or 0),
+            "vivid_objective": str(batch.metadata.get("vivid_objective", "")),
+            "background_covariance": str(batch.metadata.get("background_covariance", "")),
             "num_params": int(model.parameter_count() if hasattr(model, "parameter_count") else num_parameters(model)),
             "num_params_storage": int(
                 model.parameter_storage_count()
@@ -1735,7 +1781,8 @@ def _summarize_run(
         "physics_loss",
     ]
     per_instance = bool(split_info.get("per_instance_baseline", False))
-    reported_train_size = 0 if per_instance else int(split_info["effective_train_size"])
+    amortized_training = bool(split_info.get("amortized_training", not per_instance))
+    reported_train_size = int(split_info["effective_train_size"]) if amortized_training else 0
     summary: dict[str, Any] = {
         "run_id": args.run_id,
         "run_name": args.run_name,
@@ -1842,10 +1889,13 @@ def _summarize_run(
         "inference_optimization_time_total": eval_totals["inference_optimization_time_total"],
         "inference_optimization_time_per_sample": eval_totals["inference_optimization_time_total"] / max(len(test_dataset), 1),
         "optimization_steps_completed_total": int(sum(int(row.get("optimization_steps_completed", 0) or 0) for row in rows)),
+        "optimization_function_evaluations_total": int(
+            sum(int(row.get("optimization_function_evaluations", 0) or 0) for row in rows)
+        ),
         "optimization_early_stopped_batches": int(sum(bool(row.get("optimization_early_stopped", False)) for row in rows)),
         "fit_setup_time": float(split_info.get("fit_setup_time", 0.0) or 0.0),
         "test_time_optimization": per_instance,
-        "amortized_training": not per_instance,
+        "amortized_training": amortized_training,
         "sample_artifact_count": int(eval_totals.get("sample_artifact_count", 0) or 0),
         "sample_artifact_schema_version": str(eval_totals.get("sample_artifact_schema_version", "")),
         "sample_artifact_dir": str(eval_totals.get("sample_artifact_dir", "")),
@@ -1985,8 +2035,16 @@ def _copy_eval_metadata(dst: PDEBatch, src: PDEBatch) -> None:
         "learned_state_shape",
         "optimized_state_shape",
         "optimization_steps_completed",
+        "optimization_budget_steps_per_sample",
+        "optimization_function_evaluations",
         "optimization_early_stopped",
         "optimization_status_per_sample",
+        "optimization_variable",
+        "optimization_optimizer",
+        "dynamics_model",
+        "dynamics_substeps",
+        "vivid_objective",
+        "background_covariance",
         "pc_bnn_joint_field_posterior",
         "pc_bnn_posterior_objective",
         "pc_bnn_task_adapter",
@@ -2436,6 +2494,12 @@ def _preflight_backend_availability(
                     if not bool(getattr(capability, "official_aligned_allowed", False)):
                         raise
                     get_pc_bnn_official_aligned_status()
+            return None
+        if args.baseline == "vivid" and capability.task_family == "time_varying_da":
+            if mode == "official":
+                get_vivid_official_status()
+            else:
+                get_vivid_official_architecture_status()
             return None
     except OfficialImportError as exc:
         reason = f"official backend unavailable before dataset loading: {exc}"

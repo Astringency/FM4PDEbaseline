@@ -151,6 +151,16 @@ def resolve_capability(
     sensor_mode = str(sensor_mode or "").lower()
     task_group = str(task_group or "").lower()
     family = task_family_for(task, sensor_mode, task_group)
+    if (
+        baseline in {"var4d", "vivid"}
+        and pde == "burger"
+        and task in {"sparse_solution", "sparse_reconstruction"}
+        and load_full_trajectory is not False
+    ):
+        # These methods always operate on the complete Burgers assimilation
+        # window, even when a direct CLI invocation omits the matrix task-group
+        # label and uses random_per_sample sensors.
+        family = "time_varying_da"
 
     if pde in {"diffusionpde", "diffusion_pde", "diffusion"}:
         return _cap(
@@ -804,8 +814,8 @@ def _time_varying_capability(
             "unsupported",
             "unsupported",
             family,
-            "the audited Var4D/VIVID adapters are scoped only to Burgers sparse trajectory reconstruction",
-            "Legacy NS/reaction-diffusion/shallow-water experiment entries were removed after the official-implementation audit.",
+            "the registered Var4D/VIVID implementations are scoped only to Burgers sparse trajectory reconstruction",
+            "Legacy NS/reaction-diffusion/shallow-water experiment entries remain removed.",
         )
     if pde not in TIME_VARYING_DA_PDES:
         if baseline in {"var4d", "vivid"} and pde in TIME_DEPENDENT_PDES:
@@ -841,7 +851,7 @@ def _time_varying_capability(
                 "unsupported",
                 "unsupported",
                 family,
-                "the audited Burgers Var4D/VIVID adapters require the complete T x X trajectory contract",
+                "the Burgers Var4D/VIVID methods require the complete T x X trajectory contract",
                 "Endpoint/two-level legacy entries were removed.",
             )
         return _cap(
@@ -875,25 +885,51 @@ def _time_varying_capability(
             pde,
             task,
             sensor_mode,
-            "adapted",
-            "adapted_allowed",
+            "native",
+            "canonical_math",
             family,
-            "the Burgers adapter optimizes the complete trajectory with Adam and a soft PDE-residual penalty; canonical strong-constraint 4D-Var instead optimizes an initial/control state through a dynamical propagator",
-            "Report as a weak-constraint Var4D-style Burgers adaptation, not canonical or official 4D-Var.",
-            eligible=False,
+            "canonical strong-constraint Burgers 4D-Var optimizes only the initial state and propagates the complete window through differentiable dynamics",
+            "The pseudo-spectral Burgers propagator and sparse-observation background are task adapters; no end-to-end official-native code claim is made.",
+            eligible=True,
+            official_native_eligible=False,
         )
     if baseline == "vivid":
+        if train_inverse_operator is False:
+            return _cap(
+                baseline,
+                pde,
+                task,
+                sensor_mode,
+                "unsupported",
+                "unsupported",
+                family,
+                "VIVID requires its supervised VCNN inverse operator to be trained or loaded from a checkpoint",
+            )
+        if uses_official_inverse_observation_operator is False:
+            return _cap(
+                baseline,
+                pde,
+                task,
+                sensor_mode,
+                "unsupported",
+                "unsupported",
+                family,
+                "the official-core VIVID recipe requires the audited VIVID VCNN inverse operator",
+            )
         return _cap(
             baseline,
             pde,
             task,
             sensor_mode,
-            "adapted",
-            "adapted_allowed",
+            "official_adapter",
+            "official",
             family,
-            "the Burgers adapter preserves Voronoi inverse initialization plus variational refinement, but does not import the official Keras/ADAO or JAX/invobs pipeline and changes architecture, objective, optimizer, and budget",
-            "Report as a VIVID-style Burgers adaptation; official/native eligibility remains false until an audited official-core port exists.",
-            eligible=False,
+            "the Burgers adapter ports the vendored VIVID VCNN architecture/training and three-term L-BFGS-B 3D-Var objective",
+            "Report as an official-architecture VIVID task adapter: the T x X Burgers solution is the 2-D state and the dense covariance uses a matrix-free circulant embedding.",
+            eligible=True,
+            official_architecture_allowed=True,
+            eligible_implementation_modes=("official_architecture",),
+            official_native_eligible=False,
         )
     return _cap(
         baseline,

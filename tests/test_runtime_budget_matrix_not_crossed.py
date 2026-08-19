@@ -27,7 +27,7 @@ def test_runtime_budget_ablation_does_not_cross_steps_refine_steps_particles(tmp
 
     vivid_rows = [row for row in rows if row["baseline"] == "vivid"]
     assert {row["steps"] for row in vivid_rows} == {0}
-    assert {row["refine_steps"] for row in vivid_rows} == {50, 100, 250, 500}
+    assert {row["refine_steps"] for row in vivid_rows} == {50, 100, 250, 500, 1000}
     assert {row["particles"] for row in vivid_rows} == {0}
 
     pc_bnn_rows = [row for row in rows if row["baseline"] == "pc_bnn"]

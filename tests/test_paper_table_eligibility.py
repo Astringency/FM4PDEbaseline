@@ -3,7 +3,7 @@ from __future__ import annotations
 from baselines.capabilities import paper_table_eligible, resolve_capability
 
 
-def test_adapted_and_surrogate_capabilities_are_not_main_eligible():
+def test_adapted_capabilities_and_vivid_without_a_trained_official_inverse_are_not_main_eligible():
     fno_inverse = resolve_capability("fno", "poisson", "inverse")
     assert fno_inverse.support_status == "adapted"
     assert paper_table_eligible(fno_inverse, "official") is False
@@ -17,8 +17,8 @@ def test_adapted_and_surrogate_capabilities_are_not_main_eligible():
         load_full_trajectory=True,
         train_inverse_operator=False,
     )
-    assert vivid_style.support_status == "adapted"
-    assert paper_table_eligible(vivid_style, "adapted") is False
+    assert vivid_style.support_status == "unsupported"
+    assert paper_table_eligible(vivid_style, "official_architecture") is False
 
 
 def test_unified_component_adapter_is_not_misreported_as_official_native():
@@ -97,8 +97,8 @@ def test_official_architecture_must_be_explicitly_allowed():
     ) is False
 
 
-def test_vivid_style_without_official_import_is_not_official_native():
-    vivid_style = resolve_capability(
+def test_vivid_official_architecture_adapter_is_table_eligible_but_not_official_native():
+    vivid = resolve_capability(
         "vivid",
         "burger",
         "sparse_solution",
@@ -106,15 +106,17 @@ def test_vivid_style_without_official_import_is_not_official_native():
         "time_varying",
         load_full_trajectory=True,
         train_inverse_operator=True,
-        uses_official_inverse_observation_operator=False,
+        uses_official_inverse_observation_operator=True,
     )
-    assert vivid_style.support_status == "adapted"
+    assert vivid.support_status == "official_adapter"
     assert paper_table_eligible(
-        vivid_style,
+        vivid,
         backend_info={
-            "implementation_mode_effective": "adapted",
+            "implementation_mode_effective": "official_architecture",
             "official_import_success": False,
+            "official_reimplementation_success": True,
             "fallback_used": False,
-            "adapter_status": "vivid_style_trained_inverse_operator",
+            "adapter_status": "official_architecture_vivid_burgers_task_adapter",
         },
-    ) is False
+    ) is True
+    assert vivid.official_native_eligible is False

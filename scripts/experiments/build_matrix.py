@@ -1028,7 +1028,7 @@ def _method_steps(baseline: str, resources: dict[str, Any]) -> int:
 
 def _method_refine_steps(baseline: str, resources: dict[str, Any]) -> int:
     if baseline == "vivid":
-        return _env_int("VIVID_REFINE_STEPS", int(resources.get("refine_steps", 300)))
+        return _env_int("VIVID_REFINE_STEPS", int(resources.get("refine_steps", 1000)))
     return int(resources.get("refine_steps", 0) or 0)
 
 

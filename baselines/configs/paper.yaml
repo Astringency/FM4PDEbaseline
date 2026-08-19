@@ -176,24 +176,43 @@ method_by_baseline:
     steps: 500
     lr: 0.01
     lambda_reg: 0.00001
-  # Burgers sparse-trajectory reconstruction methods. Both optimize or refine
-  # each test trajectory; VIVID additionally fits an inverse-observation model.
+  # Burgers sparse-trajectory reconstruction methods. Var4D is a canonical
+  # strong-constraint initial-state optimization. VIVID ports the architecture,
+  # training recipe, three-term objective, covariance scales, and L-BFGS-B
+  # budget from the vendored official implementation.
   var4d:
     normalize: false
     steps: 500
-    lr: 0.01
-    lambda_background: 0.1
-    lambda_obs: 1.0
+    optimizer: scipy_lbfgsb
+    cost_decrement_tolerance: 1.0e-6
+    gradient_tolerance: 1.0e-8
+    background_variance: 0.01
+    background_correlation_length: 5.0
+    observation_variance: 1.0
+    dynamics_substeps: 1
   vivid:
     normalize: false
-    implementation_mode: adapted
-    official_backend: adapted
+    implementation_mode: official_architecture
+    official_backend: vivid
     train_inverse_operator: true
-    uses_official_inverse_observation_operator: false
-    refine_steps: 300
-    lr: 0.005
-    lambda_inverse_operator: 0.25
-    lambda_background: 0.05
+    uses_official_inverse_observation_operator: true
+    epochs: 20
+    inverse_learning_rate: 0.0001
+    inverse_adam_epsilon: 1.0e-7
+    vcnn_micro_batch_size: 4
+    vcnn_inference_batch_size: 4
+    early_stopping: true
+    early_stopping_patience: 20
+    early_stopping_min_delta: 1.0e-4
+    restore_best: false
+    refine_steps: 1000
+    optimizer: scipy_lbfgsb
+    cost_decrement_tolerance: 1.0e-6
+    gradient_tolerance: 1.0e-8
+    background_variance: 1000.0
+    background_correlation_length: 5.0
+    inverse_operator_variance: 100.0
+    observation_variance: 1.0
 
 method_by_baseline_and_pde:
   ifno:

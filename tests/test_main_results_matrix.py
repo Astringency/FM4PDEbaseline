@@ -118,9 +118,9 @@ def test_main_results_assigns_var4d_and_vivid_only_to_burger_sparse_reconstructi
         (5, "time_slices_per_sample", "total"),
     }
     assert {row["load_full_trajectory"] for row in da_rows} == {True}
-    assert {row["capability_status"] for row in da_rows} == {"adapted"}
-    assert {row["implementation_required"] for row in da_rows} == {"adapted_allowed"}
-    assert {row["paper_table_eligible"] for row in da_rows} == {False}
+    assert {row["capability_status"] for row in da_rows} == {"native", "official_adapter"}
+    assert {row["implementation_required"] for row in da_rows} == {"canonical_math", "official"}
+    assert {row["paper_table_eligible"] for row in da_rows} == {True}
     assert {row["official_native_eligible"] for row in da_rows} == {False}
     assert not any(row["pde"] == "nsnonbounded" for row in da_rows)
 

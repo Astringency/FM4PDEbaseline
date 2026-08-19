@@ -270,6 +270,18 @@ def get_vivid_official_status() -> None:
     raise OfficialImportError("vendored VIVID/invobs is not exposed as a stable importable inverse-observation adapter")
 
 
+def get_vivid_official_architecture_status() -> None:
+    """Validate the vendored files used by the audited PyTorch VIVID port."""
+
+    required = (
+        OFFICIAL_ROOT / "VIVID" / "VCNN_training.py",
+        OFFICIAL_ROOT / "VIVID" / "VIVID.py",
+    )
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise OfficialImportError(f"Required VIVID source files are missing: {missing}")
+
+
 def get_pc_bnn_official_aligned_status() -> None:
     """Validate local availability of the PC-BNN official-aligned adapter."""
 

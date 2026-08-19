@@ -45,9 +45,21 @@ Burgers 是一维时变数据，重建目标为完整的 $128\times128$（时间
 1. 在完整 $128\times128$ 时间—空间网格上，每个样本独立随机选择总计 500 个散布观测点；
 2. 每个样本独立选择 5 个完整时间片，共 $5\times128$ 个观测点。
 
-Var4D 不进行离线训练，对每个测试样本执行最多 500 次轨迹优化；VIVID 先用训练集拟合 1 epoch 的逆观测网络，再对每个测试样本执行最多 300 次变分细化。两者的初始背景场只能由当前样本的稀疏观测做 Voronoi 填充得到，禁止读取未观测的真实首时间片或完整轨迹。相应的传感器数量消融和运行预算消融也固定在 Burgers Sparse Solution Reconstruction 上。
+Var4D 不进行离线训练。它使用标准控制变量变换 $u_0=u_b+Lv$、$B=LL^\top$，以去相关初值增量 $v$ 为唯一优化变量，用可微的周期伪谱 Burgers 数值模型传播完整同化窗，最小化 Balgovind 背景项和多时刻稀疏观测项；逐样本使用 SciPy L-BFGS-B，最多 500 iterations，cost-decrement tolerance 为 `1e-6`。任何 $t>0$ 的轨迹值都由动力学传播得到，不再独立优化完整 $T\times X$ 网格，也不再以 PDE 残差作为软约束。结果标记为 `canonical_math`，同时明确 Burgers 离散传播器属于任务实现，不声称复用了某个端到端官方 Var4D 仓库。
 
-经 vendored 官方源码对照，当前 Var4D 是直接优化完整轨迹并以 PDE 残差作软约束的 weak-constraint adaptation；当前 VIVID 保留 Voronoi 逆映射初始化和变分细化思想，但没有保留官方网络、L-BFGS-B 优化器及官方训练预算。因此两者暂不满足本方案第 7 条的 official-core 要求，结果必须标记为 `adapted`，不得标记为 canonical/official/official-aligned 或 official-native。详细差异见 [`docs/var4d_vivid_official_audit.md`](var4d_vivid_official_audit.md)。
+VIVID 遵照 `offical/VIVID` 与原文实现：VCNN 为 6 个 `48` 通道、`8×8`、ReLU、Keras `same` 卷积层，接 1 个单通道线性 `8×8` 输出卷积；使用 Glorot-uniform 初始化、Adam/MSE、学习率 `1e-4`、20 epochs、有效 batch size 64。128×128 训练通过微批梯度累积维持有效 batch 64，微批大小仅控制显存，不改变一次 Adam 更新的目标。统一数据协议仍使用非重叠的 45000 train + 5000 validation，而不是官方脚本内部的 5% `validation_split`。
+
+VIVID 原文是 3D-Var，而不是 4D-Var；论文把时空 4D-Var 列为未来扩展。Burgers 适配因此把完整 $T\times X$ 解场视为一个二维状态，保留原文
+
+$$
+J(x)=\frac12\lVert x-x_b\rVert_{B^{-1}}^2
++\frac12\lVert x-x_v\rVert_{P^{-1}}^2
++\frac12\lVert y-H(x)\rVert_{R^{-1}}^2,
+$$
+
+其中 $x_v$ 是 VCNN 输出。优化从背景场 $x_b$ 开始，使用 SciPy L-BFGS-B，最多 1000 iterations，cost-decrement tolerance 为 `1e-6`；协方差尺度遵照 vendored 脚本取 $B=1000\,B_{\mathrm{Balgovind}}(L=5)$、$P=100I$、$R=I$。为避免 128×128 状态对应的稠密 $B$ 超过 2 GiB，Balgovind 逆协方差作用采用矩阵自由循环嵌入，这是实现层面的规模适配。
+
+Var4D 的背景初值和 VIVID 的背景解场都只能由当前样本的稀疏观测做 Voronoi 填充得到，禁止读取未观测的真实首时间片或完整轨迹。相应的传感器数量消融和运行预算消融固定在 Burgers Sparse Solution Reconstruction 上。VIVID 标记为 `official_architecture` task adapter：其官方架构、训练、目标、优化器和预算已保留，但由于 PDE、状态语义、观测算子和协方差存储方式发生了任务适配，`official_native_eligible=false`。详细审计见 [`docs/var4d_vivid_official_audit.md`](var4d_vivid_official_audit.md)。
 
 其余方程为两通道二维数据，只取散布的稀疏观测值，注意是 $O_{a}$、$O_{u}$ 各 500 个。
 

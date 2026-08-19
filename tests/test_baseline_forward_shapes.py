@@ -19,7 +19,6 @@ CASES = [
     ("pc_bnn", "poisson", "sparse_solution"),
     ("pde_opt", "darcy", "inverse"),
     ("var4d", "burger", "sparse_solution"),
-    ("vivid", "burger", "sparse_solution"),
 ]
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from baselines.capabilities import resolve_capability
 
 
-def test_burger_var4d_and_vivid_are_explicitly_adapted_not_official():
+def test_burger_var4d_is_canonical_and_vivid_is_official_architecture_adapter():
     var4d = resolve_capability(
         "var4d",
         "burger",
@@ -20,14 +20,19 @@ def test_burger_var4d_and_vivid_are_explicitly_adapted_not_official():
         "time_varying_da_main",
         load_full_trajectory=True,
         train_inverse_operator=True,
-        uses_official_inverse_observation_operator=False,
+        uses_official_inverse_observation_operator=True,
     )
 
-    for capability in (var4d, vivid):
-        assert capability.support_status == "adapted"
-        assert capability.implementation_required == "adapted_allowed"
-        assert capability.paper_table_eligible is False
-        assert capability.official_native_eligible is False
+    assert var4d.support_status == "native"
+    assert var4d.implementation_required == "canonical_math"
+    assert var4d.paper_table_eligible is True
+    assert vivid.support_status == "official_adapter"
+    assert vivid.implementation_required == "official"
+    assert vivid.official_architecture_allowed is True
+    assert vivid.eligible_implementation_modes == ("official_architecture",)
+    assert vivid.paper_table_eligible is True
+    assert var4d.official_native_eligible is False
+    assert vivid.official_native_eligible is False
 
 
 def test_burger_variational_adapters_require_full_trajectory():

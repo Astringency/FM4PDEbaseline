@@ -84,7 +84,7 @@ def test_runtime_budget_ablation_varies_one_budget_per_baseline(tmp_path: Path, 
             assert {row["particles"] for row in baseline_rows} == {0}
 
     vivid_rows = by_baseline["vivid"]
-    assert {row["refine_steps"] for row in vivid_rows} == {50, 100, 250, 500}
+    assert {row["refine_steps"] for row in vivid_rows} == {50, 100, 250, 500, 1000}
     assert {row["steps"] for row in vivid_rows} == {0}
     assert {row["particles"] for row in vivid_rows} == {0}
 
@@ -94,7 +94,7 @@ def test_runtime_budget_ablation_varies_one_budget_per_baseline(tmp_path: Path, 
     assert {row["sensor_budget_mode"] for row in time_varying_rows} == {"total"}
 
     for baseline, baseline_rows in by_baseline.items():
-        expected = 4 if baseline == "vivid" else 5
+        expected = 5
         per_problem = defaultdict(set)
         for row in baseline_rows:
             per_problem[(row["pde"], row["seed"])].add((row["steps"], row["refine_steps"], row["particles"]))
