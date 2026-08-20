@@ -11,6 +11,11 @@ CONFIG="${CONFIG:-configs/experiments/main_results.yaml}"
 MATRIX_NAME="${MATRIX_NAME:-main_results}"
 GPUS="${GPUS:-0,1}"
 JOBS_PER_GPU="${JOBS_PER_GPU:-2}"
+# Optional comma-separated subset used for recovery runs, for example
+# BASELINES=ifno MATRIX_NAME=ifno_earlystop. The matrix builder applies the
+# filter without changing the experiment protocol/configuration files.
+BASELINES="${BASELINES:-}"
+export BASELINES
 
 # Set VERIFY_DATA=0 only when DATA_REPORT already exists and matches CONFIG.
 VERIFY_DATA="${VERIFY_DATA:-1}"
@@ -75,6 +80,7 @@ log "OUT_ROOT=$OUT_ROOT"
 log "CONFIG=$CONFIG"
 log "MATRIX=$MATRIX"
 log "GPUS=$GPUS JOBS_PER_GPU=$JOBS_PER_GPU"
+log "BASELINES=${BASELINES:-all configured baselines}"
 log "PLOT_SAMPLES=$PLOT_SAMPLES PLOT_LIMIT=$PLOT_LIMIT"
 
 if [ "$DRY_RUN" != "1" ]; then

@@ -128,7 +128,8 @@ class IFNOBaseline(BaselineModel):
                 official_alignment_notes=(
                     "Retains the bidirectional invertible coupling with vendored neuraloperator FNOBlocks, official "
                     "VanillaVAE topology, posterior-mean inverse inference, and iFNO/VAE/joint three-stage AdamW "
-                    "training behind the FM4PDE data adapter."
+                    "training behind the FM4PDE data adapter. FM4PDE additionally applies independent validation "
+                    "early stopping and best-weight restoration to each fixed-budget stage."
                 ),
                 adapter_status="official_training_ifno_task_adapter",
                 **official_source_info("ifno"),
@@ -398,8 +399,26 @@ class IFNOBaseline(BaselineModel):
         history = {
             "training_protocol": "official_three_stage",
             "stage_epochs": stage_epochs,
+            "requested_epochs": sum(stage_epochs.values()),
             "stage_order": stage_order,
             "stage_losses": {name: [] for name in stage_epochs},
+            "stage_val_losses": {name: [] for name in stage_epochs},
+            "stage_lr_history": {name: [] for name in stage_epochs},
+            "stage_early_stopping": {
+                name: {
+                    **_ifno_stage_early_stopping_settings(self.config, name),
+                    "requested_epochs": stage_epochs[name],
+                    "completed_epochs": 0,
+                    "best_epoch": None,
+                    "best_monitor_loss": None,
+                    "best_val_loss": None,
+                    "early_stopped": False,
+                    "stop_epoch": None,
+                    "stop_reason": "",
+                    "restored_best": False,
+                }
+                for name in stage_epochs
+            },
             "train_loss": [],
             "val_loss": [],
             "best_epoch": None,
@@ -412,15 +431,15 @@ class IFNOBaseline(BaselineModel):
             "normalization_stats": self.normalization_stats.json_summary() if self.normalization_stats is not None else None,
         }
         completed_epochs = 0
-        best_monitor = None
-        best_state = None
-        no_improve = 0
-        patience = max(int(self.config.get("early_stopping_patience", 20)), 1)
-        min_delta = float(self.config.get("early_stopping_min_delta", 1e-4))
-        min_epochs = max(int(self.config.get("min_epochs", 1)), 1)
+        restore_best = bool(self.config.get("restore_best", True))
 
         for stage in stage_order:
+            stage_status = history["stage_early_stopping"][stage]
+            best_monitor = None
+            best_state = None
+            no_improve = 0
             for epoch in range(stage_epochs[stage]):
+                _set_dataset_epoch(train_loader, completed_epochs)
                 self.train()
                 total = 0.0
                 sample_count = 0
@@ -486,53 +505,104 @@ class IFNOBaseline(BaselineModel):
                     total += float(loss.detach().cpu())
                     sample_count += batch_size
                 train_loss = total / max(sample_count, 1)
+                _raise_if_nonfinite_scalar(train_loss, self, epoch + 1, -1, f"{stage}_train_loss")
                 history["stage_losses"][stage].append(train_loss)
                 completed_epochs += 1
                 history["completed_stage"] = stage
+                stage_status["completed_epochs"] = epoch + 1
                 if stage == "vae_pretrain":
                     vae_scheduler.step(train_loss)
-                if stage != "joint_train":
-                    _write_incremental_history(self.config, history, completed_epochs)
-                    continue
+                    current_lr = float(vae_optimizer.param_groups[0]["lr"])
+                elif stage == "ifno_pretrain":
+                    current_lr = float(pretrain_optimizer.param_groups[0]["lr"])
+                else:
+                    current_lr = float(forward_optimizer.param_groups[0]["lr"])
+                history["stage_lr_history"][stage].append(current_lr)
 
-                val_loss = (
-                    self._official_ifno_eval_loss(val_loader, device, max_val_steps)
-                    if val_loader is not None
-                    else None
-                )
+                val_loss = None
+                if val_loader is not None:
+                    if stage == "ifno_pretrain":
+                        val_loss = self._official_ifno_pretrain_eval_loss(
+                            val_loader,
+                            device,
+                            max_val_steps,
+                            reconstruction_weight=reconstruction_weight,
+                        )
+                    elif stage == "vae_pretrain":
+                        val_loss = self._official_vae_eval_loss(
+                            val_loader,
+                            device,
+                            max_val_steps,
+                            kl_weight=kl_weight,
+                        )
+                    else:
+                        val_loss = self._official_ifno_eval_loss(val_loader, device, max_val_steps)
+                    _raise_if_nonfinite_scalar(val_loss, self, epoch + 1, -1, f"{stage}_val_loss")
+                    history["stage_val_losses"][stage].append(val_loss)
+
                 monitor = train_loss if val_loss is None else val_loss
-                history["train_loss"].append(train_loss)
-                if val_loss is not None:
-                    history["val_loss"].append(val_loss)
-                history["lr_history"].append(float(forward_optimizer.param_groups[0]["lr"]))
-                if best_monitor is None or monitor < best_monitor - min_delta:
+                monitor_name = "train_loss" if val_loss is None else "val_loss"
+                stage_status["monitor_name"] = monitor_name
+                if best_monitor is None or monitor < best_monitor - float(stage_status["min_delta"]):
                     best_monitor = monitor
-                    best_state = snapshot_state_dict(self)
-                    history["best_epoch"] = epoch + 1
-                    history["best_val_loss"] = val_loss
+                    if restore_best and bool(stage_status["enabled"]):
+                        best_state = snapshot_state_dict(self)
+                    stage_status["best_epoch"] = epoch + 1
+                    stage_status["best_monitor_loss"] = float(monitor)
+                    stage_status["best_val_loss"] = val_loss
                     no_improve = 0
                 else:
                     no_improve += 1
+
+                if stage == "joint_train":
+                    history["train_loss"].append(train_loss)
+                    if val_loss is not None:
+                        history["val_loss"].append(val_loss)
+                    history["lr_history"].append(current_lr)
+                    history["best_epoch"] = stage_status["best_epoch"]
+                    history["best_val_loss"] = stage_status["best_val_loss"]
+
                 should_stop = (
-                    bool(self.config.get("early_stopping", False))
-                    and epoch + 1 >= min_epochs
-                    and no_improve >= patience
+                    bool(stage_status["enabled"])
+                    and epoch + 1 >= int(stage_status["min_epochs"])
+                    and no_improve >= int(stage_status["patience"])
                 )
                 if should_stop:
+                    stage_status["early_stopped"] = True
+                    stage_status["stop_epoch"] = epoch + 1
+                    stage_status["stop_reason"] = (
+                        f"no improvement in {monitor_name} for {no_improve} epochs "
+                        f"(patience={stage_status['patience']}, min_delta={stage_status['min_delta']})"
+                    )
                     history["early_stopped"] = True
-                    history["stop_epoch"] = epoch + 1
-                    history["stop_reason"] = f"joint loss plateau for {no_improve} epochs"
+                    history["stop_epoch"] = completed_epochs
+                    prior_reasons = [reason for reason in str(history["stop_reason"]).split("; ") if reason]
+                    prior_reasons.append(f"{stage}: {stage_status['stop_reason']}")
+                    history["stop_reason"] = "; ".join(prior_reasons)
                 _write_incremental_history(self.config, history, completed_epochs)
                 if should_stop:
                     break
-        if history["stop_epoch"] is None:
-            history["stop_epoch"] = len(history["train_loss"])
+
+            if stage_status["stop_epoch"] is None:
+                stage_status["stop_epoch"] = int(stage_status["completed_epochs"])
+                stage_status["stop_reason"] = "configured epoch budget completed"
+            if best_state is not None and restore_best and bool(stage_status["enabled"]):
+                restore_state_dict(self, best_state)
+                stage_status["restored_best"] = True
+
         history["completed_epochs"] = completed_epochs
         history["completed_stage_epochs"] = {
             stage: len(history["stage_losses"][stage]) for stage in stage_order
         }
-        if best_state is not None and bool(self.config.get("restore_best", True)):
-            restore_state_dict(self, best_state)
+        stopped_stages = [
+            stage for stage in stage_order if history["stage_early_stopping"][stage]["early_stopped"]
+        ]
+        history["early_stopped"] = bool(stopped_stages)
+        history["stop_epoch"] = completed_epochs
+        history["stop_reason"] = "; ".join(
+            f"{stage}: {history['stage_early_stopping'][stage]['stop_reason']}"
+            for stage in stopped_stages
+        )
         return history
 
     def _prepare_ifno_batch(self, batch: PDEBatch, device: torch.device) -> PDEBatch:
@@ -565,6 +635,64 @@ class IFNOBaseline(BaselineModel):
                         )
                     ).cpu()
                 )
+                count += int(x.shape[0])
+        return total / max(count, 1)
+
+    def _official_ifno_pretrain_eval_loss(
+        self,
+        loader,
+        device: torch.device,
+        max_steps,
+        *,
+        reconstruction_weight: float,
+    ) -> float:
+        self.eval()
+        total = count = 0
+        with torch.no_grad():
+            for step, raw_batch in enumerate(loader):
+                if max_steps is not None and step >= int(max_steps):
+                    break
+                batch = self._prepare_ifno_batch(raw_batch, device)
+                x, y = _physical_pair(batch)
+                forward, recon_x = self.operator.forward_map(x)
+                inverse, recon_y = self.operator.inverse_map(y)
+                loss = (
+                    _relative_l2_loss(
+                        _ifno_physical_scale(self, batch, forward, "y"),
+                        _ifno_physical_scale(self, batch, y, "y"),
+                    )
+                    + float(reconstruction_weight) * recon_x
+                    + _relative_l2_loss(
+                        _ifno_physical_scale(self, batch, inverse, "x"),
+                        _ifno_physical_scale(self, batch, x, "x"),
+                    )
+                    + float(reconstruction_weight) * recon_y
+                )
+                total += float(loss.cpu())
+                count += int(x.shape[0])
+        return total / max(count, 1)
+
+    def _official_vae_eval_loss(
+        self,
+        loader,
+        device: torch.device,
+        max_steps,
+        *,
+        kl_weight: float,
+    ) -> float:
+        """Evaluate VAE pretraining deterministically and without augmentation."""
+
+        self.eval()
+        total = count = 0
+        with torch.no_grad():
+            for step, raw_batch in enumerate(loader):
+                if max_steps is not None and step >= int(max_steps):
+                    break
+                batch = self._prepare_ifno_batch(raw_batch, device)
+                x, _ = _physical_pair(batch)
+                reconstructed, mu, log_var = self.operator.vae_reconstruct(x, sample=False)
+                loss = _relative_l2_loss(reconstructed, x) + float(kl_weight) * _vae_kl(mu, log_var)
+                total += float(loss.cpu())
                 count += int(x.shape[0])
         return total / max(count, 1)
 
@@ -638,6 +766,44 @@ def _ifno_official_stage_order(pde_name: str) -> list[str]:
     if str(pde_name).lower() == "nsnonbounded":
         return ["vae_pretrain", "ifno_pretrain", "joint_train"]
     return ["ifno_pretrain", "vae_pretrain", "joint_train"]
+
+
+def _ifno_stage_early_stopping_settings(config: dict, stage: str) -> dict[str, int | float | bool | str]:
+    """Resolve auditable, independent early-stopping settings per iFNO stage."""
+
+    defaults = {
+        "ifno_pretrain": {"patience": 20, "min_delta": 1e-4, "min_epochs": 50},
+        "vae_pretrain": {"patience": 20, "min_delta": 1e-4, "min_epochs": 30},
+        "joint_train": {
+            "patience": max(int(config.get("early_stopping_patience", 20)), 1),
+            "min_delta": float(config.get("early_stopping_min_delta", 1e-4)),
+            "min_epochs": max(int(config.get("min_epochs", 1)), 1),
+        },
+    }
+    if stage not in defaults:
+        raise ValueError(f"Unknown iFNO training stage {stage!r}")
+    stage_defaults = defaults[stage]
+    prefix = stage
+    enabled = bool(config.get(f"{prefix}_early_stopping", config.get("early_stopping", False)))
+    patience = max(
+        int(config.get(f"{prefix}_early_stopping_patience", stage_defaults["patience"])),
+        1,
+    )
+    min_delta = float(
+        config.get(f"{prefix}_early_stopping_min_delta", stage_defaults["min_delta"])
+    )
+    min_epochs = max(int(config.get(f"{prefix}_min_epochs", stage_defaults["min_epochs"])), 1)
+    if min_delta < 0:
+        raise ValueError(
+            f"{prefix}_early_stopping_min_delta must be non-negative, got {min_delta}"
+        )
+    return {
+        "enabled": enabled,
+        "patience": patience,
+        "min_delta": min_delta,
+        "min_epochs": min_epochs,
+        "monitor_name": "validation_loss_when_available_else_train_loss",
+    }
 
 
 def _ifno_vae_augmentation(field: torch.Tensor, *, enabled: bool) -> torch.Tensor:

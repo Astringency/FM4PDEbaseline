@@ -6,7 +6,15 @@ from scripts.experiments.build_matrix import build_matrix, load_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MATRIX_ENV = ["SEEDS", "SENSOR_COUNTS", "SENSOR_MODES", "NOISE_LEVELS", "TRAIN_SIZES", "FULL_ABLATION_ALL"]
+MATRIX_ENV = [
+    "SEEDS",
+    "SENSOR_COUNTS",
+    "SENSOR_MODES",
+    "NOISE_LEVELS",
+    "TRAIN_SIZES",
+    "FULL_ABLATION_ALL",
+    "BASELINES",
+]
 
 
 def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatch):
@@ -68,6 +76,21 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
         row["pde"] == "nsnonbounded" and row["baseline"] in {"pinn_sparse", "pde_opt", "pc_bnn"}
         for row in rows
     )
+
+
+def test_main_results_can_build_an_isolated_ifno_recovery_matrix(tmp_path: Path, monkeypatch):
+    for key in MATRIX_ENV:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("BASELINES", "ifno")
+    cfg = load_config(ROOT / "configs" / "experiments" / "main_results.yaml")
+
+    rows, skipped, summary = build_matrix(cfg, tmp_path / "ifno_recovery", "ifno_recovery")
+
+    assert len(rows) == 8
+    assert {row["baseline"] for row in rows} == {"ifno"}
+    assert {row["task_group"] for row in rows} == {"full_forward_main", "full_inverse_main"}
+    assert summary["run_count"] == 8
+    assert skipped == []
 
 
 def test_main_results_sparse_inverse_uses_all_requested_baselines(tmp_path: Path, monkeypatch):

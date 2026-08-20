@@ -726,15 +726,31 @@ def _resolve_baselines(
     experiment_kind: str,
     ablation_factor: str,
 ) -> list[str]:
+    configured: list[str]
     if experiment_kind == "ablation" and _env_flag("FULL_ABLATION_ALL"):
         if ablation_factor == "runtime_budget":
             budget_cfg = group_cfg.get("budget_by_baseline", {}) or group_cfg.get("runtime_budget_by_baseline", {}) or {}
             if budget_cfg:
-                return list(budget_cfg)
-        if ablation_factor == "time_varying_sensor_count":
-            return sorted(TIME_VARYING_SENSOR_BASELINES)
-        return _all_baselines_for_task(task)
-    return list(group_cfg.get("baselines", cfg.get("baselines", DEFAULT_BASELINES_BY_GROUP[task_group])))
+                configured = list(budget_cfg)
+            else:
+                configured = _all_baselines_for_task(task)
+        elif ablation_factor == "time_varying_sensor_count":
+            configured = sorted(TIME_VARYING_SENSOR_BASELINES)
+        else:
+            configured = _all_baselines_for_task(task)
+    else:
+        configured = list(
+            group_cfg.get("baselines", cfg.get("baselines", DEFAULT_BASELINES_BY_GROUP[task_group]))
+        )
+
+    requested_text = str(os.environ.get("BASELINES", "") or "").strip()
+    if not requested_text:
+        return configured
+    requested = {item.strip().lower() for item in requested_text.split(",") if item.strip()}
+    unknown = requested.difference(ALL_BASELINES)
+    if unknown:
+        raise ValueError(f"BASELINES contains unknown baselines: {sorted(unknown)}")
+    return [baseline for baseline in configured if baseline.lower() in requested]
 
 
 def _all_baselines_for_task(task: str) -> list[str]:

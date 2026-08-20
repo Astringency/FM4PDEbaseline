@@ -33,6 +33,13 @@ Important method budgets and adaptations:
 
 - Senseiver and VoronoiCNN use early-stopping patience 20 with minimum
   improvement `1e-4`.
+- iFNO records requested and completed budgets independently for operator
+  pretraining, VAE pretraining, and joint training. Each stage monitors the
+  5,000-sample validation split and restores its own best checkpoint. Operator
+  and VAE pretraining use patience 20 with minimum improvement `1e-4` and
+  minimum budgets of 50 and 30 epochs, respectively; joint training keeps its
+  configured patience 12. This validation stopping is an FM4PDE compute-budget
+  adaptation on top of the official fixed-epoch three-stage recipe.
 - PINN-sparse runs at most 1,000 Adam iterations followed by 500 L-BFGS steps;
   both phases and their combined budget are recorded separately.
 - Var4D performs at most 500 per-sample L-BFGS-B iterations over a
@@ -99,6 +106,24 @@ The script verifies data, builds the matrix, resumes unfinished experiments,
 collects results, renders PDFs in a separate process, and prints status when it
 finishes or is interrupted. It uses an output lock and will not restart a
 `run.running` row whose process is alive.
+
+After changing iFNO training code, do not rebuild and launch the complete
+`main_results` matrix: the formal code fingerprint changes. Stop the old jobs
+and create an isolated recovery matrix instead. The following command launches
+only the eight full-field iFNO rows under a new matrix/output namespace, so all
+existing completed artifacts remain untouched. `JOBS_PER_GPU=1` is recommended
+for 24 GB GPUs because concurrent iFNO jobs can exhaust device memory.
+
+```bash
+DATA_ROOT=/absolute/path/to/PDEdata \
+OUT_ROOT=/absolute/path/to/outputs/FM4PDEbaseline \
+MATRIX_NAME=ifno_earlystop \
+BASELINES=ifno \
+GPUS=0,1 \
+JOBS_PER_GPU=1 \
+PLOT_LIMIT=100 \
+bash scripts/run_baseline.sh
+```
 
 Preview the complete workflow without launching training:
 

@@ -20,7 +20,7 @@
 10. 评估得到的采样结果需要存储为可再次读入的文件，并绘制 pdf 图片
 11. 所有已完成实验进入同一份 `summary` 与 LaTeX 表；不再按 main/supplement 等展示层级过滤结果。实现来源、是否适配及 official-native 资格仍作为审计字段保留，不参与结果丢弃
 
-监督方法的训练适配保留以下官方核心设置：FNO 使用 NeuralOperator 的 H1 loss、AdamW、weight decay 与 StepLR；DeepONet 使用 DeepXDE 网络及 Adam/MSE；RecFNO 使用 L1、Adam 与 ExponentialLR；Senseiver 使用 sum-MSE、Adam 与 train-loss 早停；VoronoiCNN 使用七层 7x7 卷积栈、Adam/MSE 与 validation-loss 最佳 checkpoint。为减少无效训练，Senseiver 和 VoronoiCNN 的早停 patience 统一适配为 20。iFNO 明确记录 iFNO 预训练、VAE 预训练、联合训练三个预算，Darcy 顺序为 iFNO→VAE→joint，Navier-Stokes 顺序为 VAE→iFNO→joint，并保留 VAE 四倍几何增强。
+监督方法的训练适配保留以下官方核心设置：FNO 使用 NeuralOperator 的 H1 loss、AdamW、weight decay 与 StepLR；DeepONet 使用 DeepXDE 网络及 Adam/MSE；RecFNO 使用 L1、Adam 与 ExponentialLR；Senseiver 使用 sum-MSE、Adam 与 train-loss 早停；VoronoiCNN 使用七层 7x7 卷积栈、Adam/MSE 与 validation-loss 最佳 checkpoint。为减少无效训练，Senseiver 和 VoronoiCNN 的早停 patience 统一适配为 20。iFNO 明确记录 iFNO 预训练、VAE 预训练、联合训练三个请求预算和实际完成预算，Darcy 顺序为 iFNO→VAE→joint，Navier-Stokes 顺序为 VAE→iFNO→joint，并保留 VAE 四倍几何增强。官方 iFNO 的三个阶段本身采用固定 epoch；本项目额外对三个阶段分别执行验证集早停并分别恢复最佳权重，属于 FM4PDE 的计算预算适配：iFNO 预训练使用 `min_epochs=50`、`patience=20`，VAE 预训练使用 `min_epochs=30`、`patience=20`，二者和联合训练的下降阈值均为 `1e-4`。VAE 的验证损失关闭几何增强和随机潜变量采样，避免随机性影响停止判定；联合训练继续采用 iFNO 配置中的 `patience=12`。
 
 PINN-sparse 对每个测试样本先执行 Adam（上限 1000 iterations），再执行 L-BFGS（上限 500 steps）。结果中必须分别记录 `adam_iterations`、`lbfgs_steps` 与两阶段上限之和 `total_optimization_steps`，不得只用单一 `steps` 字段代替。
 
