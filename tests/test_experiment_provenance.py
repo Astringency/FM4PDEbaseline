@@ -15,7 +15,13 @@ from baselines.run import parse_args as parse_baseline_args
 import scripts.export_results_xlsx as exporter
 from scripts.experiments.build_matrix import build_matrix
 from scripts.experiments.run_one import build_command, run_one as run_matrix_row
-from scripts.experiments.provenance import SUMMARY_DESIGN_FIELD_MAP, repository_revision, run_fingerprint
+from scripts.experiments.provenance import (
+    SUMMARY_DESIGN_FIELD_MAP,
+    baseline_code_sha256,
+    baseline_code_dependency_paths,
+    repository_revision,
+    run_fingerprint,
+)
 from scripts.export_results_xlsx import (
     ExportValidationError,
     collect_results,
@@ -71,6 +77,9 @@ def _valid_summary(row: dict) -> dict:
         "summary_schema_version": row["summary_schema_version"],
         "run_id": row["run_id"],
         "run_fingerprint": row["run_fingerprint"],
+        "baseline_config_sha256": row["baseline_config_sha256"],
+        "baseline_code_sha256": row["baseline_code_sha256"],
+        "data_content_sha256": row["data_content_sha256"],
         "execution_mode": row["execution_mode"],
         "eval_only": row["execution_mode"] == "eval_only",
         "comparison_track": row["comparison_track"],
@@ -124,6 +133,84 @@ def test_matrix_fingerprint_tracks_config_content(tmp_path: Path):
     assert changed["run_id"] != first["run_id"]
 
 
+def test_fno_resume_identity_ignores_unrelated_deeponet_config(tmp_path: Path):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text(
+        "method:\n  normalize: true\nmethod_by_baseline:\n  fno:\n    width: 16\n  deeponet:\n    hidden: 32\n",
+        encoding="utf-8",
+    )
+    cfg = _config(method_config)
+    first = _only_row(cfg, tmp_path / "first")
+    deeponet_cfg = deepcopy(cfg)
+    deeponet_cfg["task_group_overrides"]["full_forward_main"]["baselines"] = [
+        "deeponet"
+    ]
+    first_deeponet = _only_row(deeponet_cfg, tmp_path / "first-deeponet")
+
+    method_config.write_text(
+        "method:\n  normalize: true\nmethod_by_baseline:\n  fno:\n    width: 16\n  deeponet:\n    hidden: 64\n",
+        encoding="utf-8",
+    )
+    changed = _only_row(cfg, tmp_path / "changed")
+    changed_deeponet = _only_row(
+        deeponet_cfg, tmp_path / "changed-deeponet"
+    )
+
+    assert changed["config_content_sha256"] != first["config_content_sha256"]
+    assert changed["baseline_config_sha256"] == first["baseline_config_sha256"]
+    assert changed["baseline_code_sha256"] == first["baseline_code_sha256"]
+    assert changed["run_fingerprint"] == first["run_fingerprint"]
+    assert changed["run_id"] == first["run_id"]
+    assert (
+        changed_deeponet["baseline_config_sha256"]
+        != first_deeponet["baseline_config_sha256"]
+    )
+    assert changed_deeponet["run_fingerprint"] != first_deeponet["run_fingerprint"]
+
+
+def test_fno_code_dependency_manifest_excludes_deeponet_implementation():
+    dependencies = set(baseline_code_dependency_paths("fno", root=ROOT))
+
+    assert "baselines/methods/fno.py" in dependencies
+    assert "baselines/methods/deeponet.py" not in dependencies
+    assert any(path.startswith("offical/neuraloperator/neuralop/") for path in dependencies)
+
+
+def test_baseline_code_hash_changes_only_for_selected_or_shared_dependencies(
+    tmp_path: Path,
+):
+    files = {
+        "baselines/run.py": "runner-v1\n",
+        "baselines/configuration.py": "resolver-v1\n",
+        "baselines/capabilities.py": "capabilities-v1\n",
+        "baselines/methods/__init__.py": "init-v1\n",
+        "baselines/methods/base.py": "base-v1\n",
+        "baselines/methods/shared.py": "shared-v1\n",
+        "baselines/methods/official.py": "official-v1\n",
+        "baselines/methods/fno.py": "fno-v1\n",
+        "baselines/methods/deeponet.py": "deeponet-v1\n",
+        "baselines/common/data_adapter.py": "adapter-v1\n",
+        "offical/neuraloperator/neuralop/model.py": "vendor-fno-v1\n",
+    }
+    for relative, content in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    original = baseline_code_sha256("fno", root=tmp_path)
+    (tmp_path / "baselines/methods/deeponet.py").write_text(
+        "deeponet-v2\n", encoding="utf-8"
+    )
+    assert baseline_code_sha256("fno", root=tmp_path) == original
+
+    (tmp_path / "baselines/run.py").write_text("runner-v2\n", encoding="utf-8")
+    assert baseline_code_sha256("fno", root=tmp_path) != original
+    (tmp_path / "baselines/run.py").write_text("runner-v1\n", encoding="utf-8")
+
+    (tmp_path / "baselines/methods/fno.py").write_text("fno-v2\n", encoding="utf-8")
+    assert baseline_code_sha256("fno", root=tmp_path) != original
+
+
 def test_matrix_rejects_nonignored_in_repository_output_root(tmp_path: Path):
     method_config = tmp_path / "method.yaml"
     method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
@@ -163,14 +250,14 @@ def test_repository_revision_covers_tracked_and_untracked_content(tmp_path: Path
     assert repository_revision(repo) != first_untracked_revision
 
 
-def test_run_fingerprint_tracks_repository_revision(tmp_path: Path):
+def test_run_fingerprint_ignores_repository_revision_audit_field(tmp_path: Path):
     method_config = tmp_path / "method.yaml"
     method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
     row = _only_row(_config(method_config), tmp_path / "matrix")
     changed = dict(row)
     changed["commit_hash"] = f"{row['commit_hash']}-different"
 
-    assert run_fingerprint(changed) != row["run_fingerprint"]
+    assert run_fingerprint(changed) == row["run_fingerprint"]
 
 
 @pytest.mark.parametrize(
@@ -246,8 +333,9 @@ def test_remaining_runner_accepts_only_a_successful_matching_v2_summary(tmp_path
         ("status", "failed"),
         ("run_id", "another-run"),
         ("run_fingerprint", "0" * 64),
-        ("config_content_sha256", "1" * 64),
-        ("commit_hash", "different-repository-revision"),
+        ("baseline_config_sha256", "1" * 64),
+        ("baseline_code_sha256", "2" * 64),
+        ("data_content_sha256", "3" * 64),
         ("execution_mode", "eval_only"),
     ]:
         invalid = dict(valid)
@@ -269,6 +357,31 @@ def test_completion_rejects_an_internally_inconsistent_matrix_fingerprint(tmp_pa
     assert "matrix_mismatch:run_fingerprint" in completion_reasons(row)
 
 
+def test_completion_reuses_semantically_identical_run_across_audit_revision(tmp_path: Path):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text(
+        "method:\n  normalize: true\nmethod_by_baseline:\n  fno:\n    width: 16\n  deeponet:\n    hidden: 32\n",
+        encoding="utf-8",
+    )
+    cfg = _config(method_config)
+    original = _only_row(cfg, tmp_path / "original")
+    summary = _valid_summary(original)
+
+    method_config.write_text(
+        "method:\n  normalize: true\nmethod_by_baseline:\n  fno:\n    width: 16\n  deeponet:\n    hidden: 64\n",
+        encoding="utf-8",
+    )
+    rebuilt = _only_row(cfg, tmp_path / "rebuilt")
+    rebuilt["output_dir"] = original["output_dir"]
+    output_dir = Path(original["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+    assert rebuilt["run_fingerprint"] == original["run_fingerprint"]
+    assert rebuilt["config_content_sha256"] != original["config_content_sha256"]
+    assert is_complete(rebuilt)
+
+
 def test_run_command_forwards_matrix_provenance_to_core_runner(tmp_path: Path, monkeypatch):
     method_config = tmp_path / "method.yaml"
     method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
@@ -281,6 +394,9 @@ def test_run_command_forwards_matrix_provenance_to_core_runner(tmp_path: Path, m
         "--summary-schema-version": str(row["summary_schema_version"]),
         "--run-fingerprint": row["run_fingerprint"],
         "--config-content-sha256": row["config_content_sha256"],
+        "--baseline-config-sha256": row["baseline_config_sha256"],
+        "--baseline-code-sha256": row["baseline_code_sha256"],
+        "--data-content-sha256": row["data_content_sha256"],
         "--task-protocol-version": row["task_protocol_version"],
         "--sensor-protocol-version": row["sensor_protocol_version"],
         "--execution-mode": row["execution_mode"],
@@ -293,6 +409,9 @@ def test_run_command_forwards_matrix_provenance_to_core_runner(tmp_path: Path, m
     parsed = parse_baseline_args(command[3:])
     assert parsed.run_fingerprint == row["run_fingerprint"]
     assert parsed.config_content_sha256 == row["config_content_sha256"]
+    assert parsed.baseline_config_sha256 == row["baseline_config_sha256"]
+    assert parsed.baseline_code_sha256 == row["baseline_code_sha256"]
+    assert parsed.data_content_sha256 == row["data_content_sha256"]
     assert parsed.summary_schema_version == row["summary_schema_version"]
     assert parsed.execution_mode == "train"
     assert parsed.task_protocol_version == row["task_protocol_version"]
@@ -448,7 +567,7 @@ def test_exporter_rejects_multiple_provenance_cohorts(tmp_path: Path):
     cfg["seeds"] = [1, 2]
     rows, _skipped, _summary = build_matrix(cfg, tmp_path / "matrix", "provenance_test")
 
-    rows[1]["commit_hash"] = f"{rows[1]['commit_hash']}-alternate-cohort"
+    rows[1]["data_content_sha256"] = "f" * 64
     rows[1]["run_fingerprint"] = run_fingerprint(rows[1])
     for row in rows:
         summary = _valid_summary(row)

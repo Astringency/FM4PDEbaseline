@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 
 from baselines.capabilities import paper_table_eligible as capability_paper_table_eligible
 from baselines.capabilities import resolve_capability
+from baselines.configuration import resolve_method_config
 from baselines.common.data_adapter import PDEBatch, PDEBatchDataset, build_default_registry, pde_collate, slice_pde_batch
 from baselines.common.data_files import normalize_data_files
 from baselines.common.metrics import (
@@ -56,6 +57,9 @@ from scripts.experiments.provenance import (
     DEFAULT_SENSOR_PROTOCOL_VERSION,
     DEFAULT_TASK_PROTOCOL_VERSION,
     MATRIX_SCHEMA_VERSION,
+    baseline_code_sha256,
+    baseline_config_sha256,
+    data_content_sha256,
     reject_historical_experiment_path,
     requires_full_data_manifest,
     repository_revision,
@@ -132,6 +136,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-fingerprint", default="", help="Content-addressed experiment fingerprint supplied by the matrix builder.")
     parser.add_argument("--matrix-schema-version", type=int, default=MATRIX_SCHEMA_VERSION)
     parser.add_argument("--config-content-sha256", default="", help="SHA-256 of the resolved experiment config contract.")
+    parser.add_argument("--baseline-config-sha256", default="", help="SHA-256 of this baseline's resolved effective method configuration.")
+    parser.add_argument("--baseline-code-sha256", default="", help="SHA-256 of this baseline's local code dependency manifest.")
     parser.add_argument(
         "--experiment-config-sha256",
         default="",
@@ -141,6 +147,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-manifest-sha256",
         default="",
         help="SHA-256 of the passing full data_protocol_report.json bound to this experiment.",
+    )
+    parser.add_argument(
+        "--data-content-sha256",
+        default="",
+        help="Stable SHA-256 of verified dataset content evidence, excluding report timestamps and paths.",
     )
     parser.add_argument(
         "--data-manifest-path",
@@ -258,6 +269,9 @@ def _validate_checkpoint_payload(payload: dict[str, Any], expected: dict[str, An
         "pde": provenance.get("pde", data_spec.get("pde")),
         "task": provenance.get("task", data_spec.get("task")),
         "run_fingerprint": provenance.get("run_fingerprint"),
+        "baseline_config_sha256": provenance.get("baseline_config_sha256"),
+        "baseline_code_sha256": provenance.get("baseline_code_sha256"),
+        "data_content_sha256": provenance.get("data_content_sha256"),
         "config_content_sha256": provenance.get("config_content_sha256"),
         "experiment_config_sha256": provenance.get("experiment_config_sha256"),
         "data_manifest_sha256": provenance.get("data_manifest_sha256"),
@@ -288,53 +302,28 @@ def _validate_checkpoint_payload(payload: dict[str, Any], expected: dict[str, An
 
 
 def build_method_config(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    merged: dict[str, Any] = dict(cfg.get("method", {}))
-    merged.update(cfg.get("method_by_baseline", {}).get(args.baseline, {}) or {})
-    merged.update(cfg.get("method_by_pde", {}).get(args.pde, {}) or {})
-    merged.update(cfg.get("method_by_baseline_and_pde", {}).get(args.baseline, {}).get(args.pde, {}) or {})
-    if args.epochs is not None:
-        merged["epochs"] = args.epochs
-    else:
-        merged.setdefault("epochs", int(cfg.get("epochs", 1)))
-    if args.lr is not None:
-        merged["lr"] = args.lr
-    else:
-        merged.setdefault("lr", float(cfg.get("learning_rate", 1e-3)))
-    if args.steps is not None:
-        merged["steps"] = int(args.steps)
-        # Matrix rows use the generic ``steps`` field for per-instance methods.
-        # DeepXDE PINN has a named Adam phase, so keep the executable phase
-        # budget aligned with the matrix/requested budget instead of only
-        # changing the reporting alias.
-        if args.baseline == "pinn_sparse" and bool(merged.get("deepxde_native", False)):
-            merged["adam_iterations"] = int(args.steps)
-    if args.refine_steps is not None:
-        merged["refine_steps"] = int(args.refine_steps)
-    if args.particles is not None:
-        merged["particles"] = int(args.particles)
-    if args.implementation_mode is not None:
-        merged["implementation_mode"] = str(args.implementation_mode)
-    if args.official_backend is not None:
-        merged["official_backend"] = str(args.official_backend)
+    method_overrides: dict[str, Any] = {}
     for override in args.method_override or []:
         key, sep, value = str(override).partition("=")
         if not sep or not key:
             raise ValueError(f"--method-override must be key=value, got {override!r}")
-        merged[key] = _parse_override_value(value)
-    merged["device"] = args.device
-    merged.setdefault("seed", int(args.seed))
-    if args.dry_run:
-        merged["max_steps"] = min(int(merged.get("max_steps", 1) or 1), 1)
-        merged["max_val_steps"] = min(int(merged.get("max_val_steps", 1) or 1), 1)
-        merged.setdefault("steps", 1)
-        merged.setdefault("refine_steps", 1)
-        merged["steps"] = min(int(merged.get("steps", 1)), 1)
-        merged["refine_steps"] = min(int(merged.get("refine_steps", 1)), 1)
-        if args.baseline == "pinn_sparse" and bool(merged.get("deepxde_native", False)):
-            merged["adam_iterations"] = min(int(merged.get("adam_iterations", merged["steps"]) or 0), 1)
-            merged["lbfgs_steps"] = min(int(merged.get("lbfgs_steps", 0) or 0), 1)
-        merged["epochs"] = min(int(merged.get("epochs", 1)), 1)
-    return merged
+        method_overrides[key] = _parse_override_value(value)
+    return resolve_method_config(
+        cfg,
+        baseline=args.baseline,
+        pde=args.pde,
+        epochs=args.epochs,
+        lr=args.lr,
+        steps=args.steps,
+        refine_steps=args.refine_steps,
+        particles=args.particles,
+        implementation_mode=args.implementation_mode,
+        official_backend=args.official_backend,
+        method_overrides=method_overrides,
+        device=args.device,
+        seed=args.seed,
+        dry_run=args.dry_run,
+    )
 
 
 def build_data_spec(batch: PDEBatch) -> dict[str, Any]:
@@ -384,6 +373,26 @@ def main(argv: list[str] | None = None) -> None:
     args.physics_metric_mode = _resolve_physics_metric_mode(args, cfg)
     args.sensor_budget_mode = _resolve_sensor_budget_mode(args, cfg)
     method_cfg = build_method_config(cfg, args)
+    observed_baseline_config_sha256 = baseline_config_sha256(method_cfg)
+    if (
+        args.baseline_config_sha256
+        and args.baseline_config_sha256 != observed_baseline_config_sha256
+    ):
+        raise ValueError(
+            "--baseline-config-sha256 does not match the resolved baseline configuration: "
+            f"supplied={args.baseline_config_sha256}, observed={observed_baseline_config_sha256}"
+        )
+    args.baseline_config_sha256 = observed_baseline_config_sha256
+    observed_baseline_code_sha256 = baseline_code_sha256(args.baseline, root=ROOT)
+    if (
+        args.baseline_code_sha256
+        and args.baseline_code_sha256 != observed_baseline_code_sha256
+    ):
+        raise ValueError(
+            "--baseline-code-sha256 does not match the selected baseline dependencies: "
+            f"supplied={args.baseline_code_sha256}, observed={observed_baseline_code_sha256}"
+        )
+    args.baseline_code_sha256 = observed_baseline_code_sha256
     args.epochs_effective = int(method_cfg.get("epochs", 0) or 0)
     derived_execution_mode = "eval_only" if args.eval_only else "train"
     if args.execution_mode is not None and args.execution_mode != derived_execution_mode:
@@ -595,13 +604,11 @@ def main(argv: list[str] | None = None) -> None:
                 "pde": args.pde,
                 "task": args.task,
                 "run_fingerprint": args.source_train_run_fingerprint,
-                "config_content_sha256": args.config_content_sha256,
-                "experiment_config_sha256": args.experiment_config_sha256,
-                "data_manifest_sha256": args.data_manifest_sha256,
-                "data_manifest_path": args.data_manifest_path,
+                "baseline_config_sha256": args.baseline_config_sha256,
+                "baseline_code_sha256": args.baseline_code_sha256,
+                "data_content_sha256": args.data_content_sha256,
                 "task_protocol_version": args.task_protocol_version,
                 "sensor_protocol_version": args.sensor_protocol_version,
-                "commit_hash": args.commit_hash,
                 "source_train_run_id": args.source_train_run_id,
                 "seed": args.source_train_seed,
                 "comparison_track": args.comparison_track,
@@ -656,8 +663,11 @@ def main(argv: list[str] | None = None) -> None:
             "task": args.task,
             "seed": int(args.seed),
             "config_content_sha256": args.config_content_sha256,
+            "baseline_config_sha256": args.baseline_config_sha256,
+            "baseline_code_sha256": args.baseline_code_sha256,
             "experiment_config_sha256": args.experiment_config_sha256,
             "data_manifest_sha256": args.data_manifest_sha256,
+            "data_content_sha256": args.data_content_sha256,
             "data_manifest_path": args.data_manifest_path,
             "config_hash": config_hash,
             "config_path": str(config_snapshot),
@@ -1393,10 +1403,13 @@ def _evaluate_full_test_loader(
         "eval_only": bool(getattr(args, "eval_only", False)),
         "run_fingerprint": str(getattr(args, "run_fingerprint", "")),
         "config_content_sha256": str(getattr(args, "config_content_sha256", "")),
+        "baseline_config_sha256": str(getattr(args, "baseline_config_sha256", "")),
+        "baseline_code_sha256": str(getattr(args, "baseline_code_sha256", "")),
         "experiment_config_sha256": str(
             getattr(args, "experiment_config_sha256", "")
         ),
         "data_manifest_sha256": str(getattr(args, "data_manifest_sha256", "")),
+        "data_content_sha256": str(getattr(args, "data_content_sha256", "")),
         "data_manifest_path": str(getattr(args, "data_manifest_path", "")),
         "task_protocol_version": str(getattr(args, "task_protocol_version", "2")),
         "sensor_protocol_version": str(getattr(args, "sensor_protocol_version", "2")),
@@ -1793,10 +1806,13 @@ def _summarize_run(
         "eval_only": bool(getattr(args, "eval_only", False)),
         "run_fingerprint": str(getattr(args, "run_fingerprint", "")),
         "config_content_sha256": str(getattr(args, "config_content_sha256", "")),
+        "baseline_config_sha256": str(getattr(args, "baseline_config_sha256", "")),
+        "baseline_code_sha256": str(getattr(args, "baseline_code_sha256", "")),
         "experiment_config_sha256": str(
             getattr(args, "experiment_config_sha256", "")
         ),
         "data_manifest_sha256": str(getattr(args, "data_manifest_sha256", "")),
+        "data_content_sha256": str(getattr(args, "data_content_sha256", "")),
         "data_manifest_path": str(getattr(args, "data_manifest_path", "")),
         "task_protocol_version": str(getattr(args, "task_protocol_version", "2")),
         "sensor_protocol_version": str(getattr(args, "sensor_protocol_version", "2")),
@@ -2317,6 +2333,9 @@ def _validate_data_manifest_binding(args: argparse.Namespace) -> None:
     experiment_config_sha256 = str(
         getattr(args, "experiment_config_sha256", "") or ""
     ).strip().lower()
+    supplied_data_content_sha256 = str(
+        getattr(args, "data_content_sha256", "") or ""
+    ).strip().lower()
     formal_paper_run = args.experiment_mode == "paper" and requires_full_data_manifest(
         args.task_protocol_version
     )
@@ -2355,9 +2374,20 @@ def _validate_data_manifest_binding(args: argparse.Namespace) -> None:
             raise ValueError(
                 f"data manifest does not cover requested PDE {args.pde!r}: {manifest_path}"
             )
+        observed_data_content_sha256 = data_content_sha256(manifest)
+        if (
+            supplied_data_content_sha256
+            and supplied_data_content_sha256 != observed_data_content_sha256
+        ):
+            raise ValueError(
+                "--data-content-sha256 does not match the verified dataset evidence: "
+                f"supplied={supplied_data_content_sha256}, observed={observed_data_content_sha256}"
+            )
+        supplied_data_content_sha256 = observed_data_content_sha256
         args.data_manifest_path = manifest_path
     args.data_manifest_sha256 = manifest_sha256
     args.experiment_config_sha256 = experiment_config_sha256
+    args.data_content_sha256 = supplied_data_content_sha256
 
 
 def _require_cli_sha256(value: str, field: str) -> None:
@@ -2418,12 +2448,16 @@ def _validate_and_bind_run_fingerprint(
         "refine_steps": int(method_cfg.get("refine_steps", 0) or 0),
         "particles": int(method_cfg.get("particles", 0) or 0),
         "scalar_param_mode": str(args.scalar_param_mode),
+        "physics_metric_mode": str(args.physics_metric_mode),
         "data_loading_mode": str(args.data_loading_mode_requested),
         "num_workers": int(args.num_workers_requested),
         "pin_memory": bool(args.pin_memory_requested),
         "persistent_workers": bool(args.persistent_workers_requested),
         "prefetch_factor": int(args.prefetch_factor_requested),
         "load_full_trajectory": bool(args.load_full_trajectory),
+        "baseline_config_sha256": str(args.baseline_config_sha256),
+        "baseline_code_sha256": str(args.baseline_code_sha256),
+        "data_content_sha256": str(args.data_content_sha256),
         "config_content_sha256": args.config_content_sha256,
         "experiment_config_sha256": str(args.experiment_config_sha256),
         "data_manifest_sha256": str(args.data_manifest_sha256),

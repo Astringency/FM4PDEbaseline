@@ -172,9 +172,9 @@ def test_ifno_stage_early_stopping_defaults_and_overrides_are_auditable():
     vae = _ifno_stage_early_stopping_settings(config, "vae_pretrain")
     joint = _ifno_stage_early_stopping_settings(config, "joint_train")
 
-    assert (ifno["patience"], ifno["min_delta"], ifno["min_epochs"]) == (20, 1e-4, 50)
-    assert (vae["patience"], vae["min_delta"], vae["min_epochs"]) == (20, 1e-4, 30)
-    assert (joint["patience"], joint["min_delta"], joint["min_epochs"]) == (12, 1e-4, 5)
+    assert (ifno["patience"], ifno["min_delta"], ifno["min_epochs"]) == (3, 1e-4, 3)
+    assert (vae["patience"], vae["min_delta"], vae["min_epochs"]) == (3, 1e-4, 4)
+    assert (joint["patience"], joint["min_delta"], joint["min_epochs"]) == (2, 1e-4, 2)
     overridden = _ifno_stage_early_stopping_settings(
         {
             **config,

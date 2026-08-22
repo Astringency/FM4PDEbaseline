@@ -19,6 +19,14 @@ def test_supervised_baseline_configs_preserve_upstream_training_recipes():
         "training_loss": "h1",
         "lr_scheduler": "step",
     }
+    assert {
+        key: methods["deeponet"][key]
+        for key in ("lr", "lr_scheduler", "scheduler_gamma")
+    } == {
+        "lr": 1e-4,
+        "lr_scheduler": "exponential",
+        "scheduler_gamma": 0.98,
+    }
     assert {key: methods["recfno"][key] for key in ("optimizer", "training_loss", "lr_scheduler")} == {
         "optimizer": "adam",
         "training_loss": "l1",
@@ -38,17 +46,43 @@ def test_supervised_baseline_configs_preserve_upstream_training_recipes():
     assert methods["vivid"]["early_stopping_patience"] == 20
     assert methods["vivid"]["refine_steps"] == 1000
     assert methods["vivid"]["uses_official_inverse_observation_operator"] is True
+    assert {
+        key: methods["ifno"][key]
+        for key in ("ifno_pretrain_epochs", "vae_pretrain_epochs", "joint_epochs")
+    } == {
+        "ifno_pretrain_epochs": 10,
+        "vae_pretrain_epochs": 18,
+        "joint_epochs": 7,
+    }
+    assert {
+        key: methods["ifno"][key]
+        for key in (
+            "ifno_pretrain_early_stopping_patience",
+            "ifno_pretrain_min_epochs",
+            "vae_pretrain_early_stopping_patience",
+            "vae_pretrain_min_epochs",
+            "joint_train_early_stopping_patience",
+            "joint_train_min_epochs",
+        )
+    } == {
+        "ifno_pretrain_early_stopping_patience": 3,
+        "ifno_pretrain_min_epochs": 3,
+        "vae_pretrain_early_stopping_patience": 3,
+        "vae_pretrain_min_epochs": 4,
+        "joint_train_early_stopping_patience": 2,
+        "joint_train_min_epochs": 2,
+    }
 
 
 def test_ifno_budget_records_all_three_stages_and_total():
     budget = _method_budget_fields(
-        {"ifno_pretrain_epochs": 200, "vae_pretrain_epochs": 100, "joint_epochs": 200},
+        {"ifno_pretrain_epochs": 10, "vae_pretrain_epochs": 18, "joint_epochs": 7},
         "ifno",
     )
 
-    assert budget["total_training_epochs"] == 500
+    assert budget["total_training_epochs"] == 35
     assert budget["method_budget_label"] == (
-        "ifno_pretrain_epochs=200,vae_pretrain_epochs=100,joint_epochs=200,total_epochs=500"
+        "ifno_pretrain_epochs=10,vae_pretrain_epochs=18,joint_epochs=7,total_epochs=35"
     )
 
 

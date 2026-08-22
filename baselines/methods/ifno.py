@@ -772,13 +772,12 @@ def _ifno_stage_early_stopping_settings(config: dict, stage: str) -> dict[str, i
     """Resolve auditable, independent early-stopping settings per iFNO stage."""
 
     defaults = {
-        "ifno_pretrain": {"patience": 20, "min_delta": 1e-4, "min_epochs": 50},
-        "vae_pretrain": {"patience": 20, "min_delta": 1e-4, "min_epochs": 30},
-        "joint_train": {
-            "patience": max(int(config.get("early_stopping_patience", 20)), 1),
-            "min_delta": float(config.get("early_stopping_min_delta", 1e-4)),
-            "min_epochs": max(int(config.get("min_epochs", 1)), 1),
-        },
+        # A formal FM4PDE epoch sees 45,000 samples, versus only 200--900
+        # operator pairs in the official experiments.  Waiting 20--50 such
+        # epochs before stopping therefore exceeds an entire official stage.
+        "ifno_pretrain": {"patience": 3, "min_delta": 1e-4, "min_epochs": 3},
+        "vae_pretrain": {"patience": 3, "min_delta": 1e-4, "min_epochs": 4},
+        "joint_train": {"patience": 2, "min_delta": 1e-4, "min_epochs": 2},
     }
     if stage not in defaults:
         raise ValueError(f"Unknown iFNO training stage {stage!r}")

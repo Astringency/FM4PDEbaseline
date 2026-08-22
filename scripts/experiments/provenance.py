@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -49,10 +50,9 @@ FINGERPRINT_FIELDS = (
     "batch_size",
     "epochs",
     "device",
-    "commit_hash",
-    "config_content_sha256",
-    "experiment_config_sha256",
-    "data_manifest_sha256",
+    "baseline_config_sha256",
+    "baseline_code_sha256",
+    "data_content_sha256",
     "num_sensors",
     "sensor_mode",
     "sensor_budget_mode",
@@ -61,6 +61,7 @@ FINGERPRINT_FIELDS = (
     "refine_steps",
     "particles",
     "scalar_param_mode",
+    "physics_metric_mode",
     "data_loading_mode",
     "num_workers",
     "pin_memory",
@@ -91,11 +92,49 @@ COHORT_FIELDS = (
     "comparison_track",
     "task_protocol_version",
     "sensor_protocol_version",
-    "config_content_sha256",
-    "experiment_config_sha256",
-    "data_manifest_sha256",
-    "commit_hash",
+    "data_content_sha256",
 )
+
+_BASELINE_IMPLEMENTATION_FILES = {
+    "fno": ("baselines/methods/fno.py",),
+    "deeponet": ("baselines/methods/deeponet.py",),
+    "ifno": ("baselines/methods/ifno.py", "baselines/methods/ifno_official_aligned.py"),
+    "recfno": ("baselines/methods/recfno.py",),
+    "senseiver": ("baselines/methods/senseiver.py", "baselines/methods/senseiver_positional.py"),
+    "voronoicnn": ("baselines/methods/voronoicnn.py",),
+    "pinn_sparse": ("baselines/methods/pinn_sparse.py",),
+    "pc_bnn": ("baselines/methods/pc_bnn.py", "baselines/methods/variational.py"),
+    "pde_opt": ("baselines/methods/pde_opt.py", "baselines/methods/variational.py"),
+    "var4d": ("baselines/methods/var4d.py", "baselines/methods/variational.py"),
+    "vivid": ("baselines/methods/vivid.py", "baselines/methods/variational.py"),
+}
+
+_BASELINE_OFFICIAL_CODE_DIRS = {
+    "fno": ("offical/neuraloperator/neuralop",),
+    "deeponet": ("offical/deepxde/deepxde",),
+    "ifno": ("offical/iFNO", "offical/neuraloperator/neuralop"),
+    "recfno": ("offical/RecFNO/model",),
+    "senseiver": ("offical/Senseiver",),
+    "voronoicnn": ("offical/Voronoi-CNN",),
+    "pinn_sparse": ("offical/deepxde/deepxde",),
+    "pc_bnn": ("offical/PC-BNN/code",),
+    "pde_opt": (),
+    "var4d": (),
+    "vivid": ("offical/VIVID", "offical/invobs-data-assimilation"),
+}
+
+_SHARED_BASELINE_CODE_PATHS = (
+    "baselines/run.py",
+    "baselines/configuration.py",
+    "baselines/capabilities.py",
+    "baselines/methods/__init__.py",
+    "baselines/methods/base.py",
+    "baselines/methods/shared.py",
+    "baselines/methods/official.py",
+    "baselines/common",
+)
+
+_CODE_SUFFIXES = {".py", ".pyi", ".yaml", ".yml", ".json", ".toml"}
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 HISTORICAL_EXPERIMENT_NAMESPACE = "experiment_plan_v2"
@@ -166,6 +205,7 @@ SUMMARY_DESIGN_FIELD_MAP = {
     "refine_steps": "refine_steps",
     "particles": "particles",
     "scalar_param_mode": "scalar_param_mode_requested",
+    "physics_metric_mode": "metric_granularity",
     "data_loading_mode": "data_loading_mode_requested",
     "num_workers": "num_workers",
     "pin_memory": "pin_memory_requested",
@@ -533,6 +573,90 @@ def canonical_sha256(payload: Mapping[str, Any]) -> str:
     return sha256_bytes(encoded)
 
 
+def baseline_config_sha256(effective_config: Mapping[str, Any]) -> str:
+    """Hash one resolved baseline configuration, excluding unrelated sections."""
+
+    return canonical_sha256(dict(effective_config))
+
+
+def baseline_code_dependency_paths(
+    baseline: str, *, root: str | Path | None = None
+) -> tuple[str, ...]:
+    """Return the deterministic local-code dependency manifest for a baseline."""
+
+    name = str(baseline).lower()
+    if name not in _BASELINE_IMPLEMENTATION_FILES:
+        raise ValueError(f"unknown baseline for code fingerprint: {baseline!r}")
+    repository_root = Path(root or REPOSITORY_ROOT).resolve()
+    requested = (
+        *_SHARED_BASELINE_CODE_PATHS,
+        *_BASELINE_IMPLEMENTATION_FILES[name],
+        *_BASELINE_OFFICIAL_CODE_DIRS[name],
+    )
+    files: set[str] = set()
+    for relative_text in requested:
+        relative = Path(relative_text)
+        path = repository_root / relative
+        if path.is_file():
+            files.add(relative.as_posix())
+            continue
+        if not path.is_dir():
+            raise FileNotFoundError(f"baseline code dependency is missing: {path}")
+        for child in path.rglob("*"):
+            if not child.is_file() or child.suffix.lower() not in _CODE_SUFFIXES:
+                continue
+            if any(part in {".git", "__pycache__", ".pytest_cache"} for part in child.parts):
+                continue
+            files.add(child.relative_to(repository_root).as_posix())
+    return tuple(sorted(files))
+
+
+def baseline_code_sha256(
+    baseline: str, *, root: str | Path | None = None
+) -> str:
+    """Hash only shared execution code and the selected baseline implementation."""
+
+    repository_root = Path(root or REPOSITORY_ROOT).resolve()
+    if repository_root == REPOSITORY_ROOT.resolve():
+        return _baseline_code_sha256_cached(str(baseline).lower())
+    return _hash_dependency_paths(
+        repository_root, baseline_code_dependency_paths(baseline, root=repository_root)
+    )
+
+
+@lru_cache(maxsize=None)
+def _baseline_code_sha256_cached(baseline: str) -> str:
+    return _hash_dependency_paths(
+        REPOSITORY_ROOT.resolve(),
+        baseline_code_dependency_paths(baseline, root=REPOSITORY_ROOT),
+    )
+
+
+def _hash_dependency_paths(repository_root: Path, relative_paths: Iterable[str]) -> str:
+    digest = hashlib.sha256()
+    for relative_text in relative_paths:
+        relative = Path(relative_text)
+        content = (repository_root / relative).read_bytes()
+        _update_revision_digest(digest, b"dependency-path", relative.as_posix().encode("utf-8"))
+        _update_revision_digest(digest, b"dependency-content", content)
+    return digest.hexdigest()
+
+
+def data_content_sha256(manifest: Mapping[str, Any]) -> str:
+    """Hash stable dataset evidence while excluding report timestamps and paths."""
+
+    return canonical_sha256(
+        {
+            "identity_contract": "fm4pde-verified-data-content-v1",
+            "content_hash_contract": manifest.get("content_hash_contract"),
+            "sample_manifest_sha256": manifest.get("sample_manifest_sha256"),
+            "sample_manifest_record_count": manifest.get("sample_manifest_record_count"),
+            "mode": manifest.get("mode"),
+            "content_hashes": bool(manifest.get("content_hashes", False)),
+        }
+    )
+
+
 def repository_revision(root: str | Path | None = None) -> str:
     """Return HEAD plus a deterministic digest when the Git worktree is dirty.
 
@@ -626,6 +750,9 @@ def summary_validation_reasons(row: Mapping[str, Any], summary: Mapping[str, Any
         "execution_mode",
         "comparison_track",
         "config_content_sha256",
+        "baseline_config_sha256",
+        "baseline_code_sha256",
+        "data_content_sha256",
         "task_protocol_version",
         "sensor_protocol_version",
         "sensor_seed",
@@ -663,20 +790,14 @@ def summary_validation_reasons(row: Mapping[str, Any], summary: Mapping[str, Any
         "run_fingerprint",
         "execution_mode",
         "comparison_track",
-        "config_content_sha256",
+        "baseline_config_sha256",
+        "baseline_code_sha256",
+        "data_content_sha256",
         "task_protocol_version",
         "sensor_protocol_version",
         "sensor_seed",
-        "commit_hash",
         *SUMMARY_IDENTITY_FIELDS,
     )
-    if formal_data_contract:
-        compared_fields = (
-            *compared_fields,
-            "experiment_config_sha256",
-            "data_manifest_sha256",
-            "data_manifest_path",
-        )
     for field in compared_fields:
         expected = row.get(field)
         observed = summary.get(field)
@@ -684,6 +805,18 @@ def summary_validation_reasons(row: Mapping[str, Any], summary: Mapping[str, Any
             reasons.append(f"summary_missing:{field}")
         elif expected not in {None, ""} and observed != expected:
             reasons.append(f"summary_mismatch:{field}")
+
+    required_summary_audit_fields = ("config_content_sha256", "commit_hash")
+    if formal_data_contract:
+        required_summary_audit_fields = (
+            *required_summary_audit_fields,
+            "experiment_config_sha256",
+            "data_manifest_sha256",
+            "data_manifest_path",
+        )
+    for field in required_summary_audit_fields:
+        if summary.get(field) in {None, ""}:
+            reasons.append(f"summary_missing:{field}")
 
     if summary.get("config_hash") in {None, ""}:
         reasons.append("summary_missing:config_hash")

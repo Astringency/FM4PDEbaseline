@@ -4,11 +4,17 @@ import json
 import sys
 from pathlib import Path
 
+import yaml
+
+from baselines.configuration import resolve_method_config
 from scripts.experiments import run_one
 from scripts.experiments.provenance import (
     DEFAULT_SENSOR_PROTOCOL_VERSION,
     MATRIX_SCHEMA_VERSION,
     SUMMARY_SCHEMA_VERSION,
+    baseline_code_sha256,
+    baseline_config_sha256,
+    canonical_sha256,
     repository_revision,
     run_fingerprint,
     sha256_file,
@@ -19,6 +25,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _row(tmp_path: Path, run_id: str = "progress_run") -> dict:
+    config_path = ROOT / "baselines/configs/paper.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    effective_method_config = resolve_method_config(
+        config,
+        baseline="recfno",
+        pde="poisson",
+        epochs=1,
+        device="cpu",
+        seed=1,
+    )
     row = {
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
         "summary_schema_version": SUMMARY_SCHEMA_VERSION,
@@ -48,6 +64,7 @@ def _row(tmp_path: Path, run_id: str = "progress_run") -> dict:
         "sensor_budget_mode": "per_time",
         "noise_level": 0.0,
         "scalar_param_mode": "metadata",
+        "physics_metric_mode": "per_sample",
         "data_loading_mode": "eager",
         "num_workers": 0,
         "pin_memory": False,
@@ -63,6 +80,11 @@ def _row(tmp_path: Path, run_id: str = "progress_run") -> dict:
         "commit_hash": repository_revision(ROOT),
         "config": "baselines/configs/paper.yaml",
         "config_content_sha256": sha256_file("baselines/configs/paper.yaml", root=ROOT),
+        "baseline_config_sha256": baseline_config_sha256(effective_method_config),
+        "baseline_code_sha256": baseline_code_sha256("recfno", root=ROOT),
+        "data_content_sha256": canonical_sha256(
+            {"verification": "not_bound_to_full_data_manifest"}
+        ),
         "experiment_config_sha256": "",
         "output_dir": str(tmp_path / run_id),
         "log_dir": str(tmp_path / "logs" / run_id),
@@ -83,6 +105,9 @@ def _summary(row: dict) -> dict:
         "summary_schema_version": row["summary_schema_version"],
         "run_id": row["run_id"],
         "run_fingerprint": row["run_fingerprint"],
+        "baseline_config_sha256": row["baseline_config_sha256"],
+        "baseline_code_sha256": row["baseline_code_sha256"],
+        "data_content_sha256": row["data_content_sha256"],
         "execution_mode": row["execution_mode"],
         "eval_only": False,
         "comparison_track": row["comparison_track"],
@@ -115,6 +140,7 @@ def _summary(row: dict) -> dict:
         "refine_steps": row["refine_steps"],
         "particles": row["particles"],
         "scalar_param_mode_requested": row["scalar_param_mode"],
+        "metric_granularity": row["physics_metric_mode"],
         "data_loading_mode_requested": row["data_loading_mode"],
         "num_workers": row["num_workers"],
         "pin_memory_requested": row["pin_memory"],

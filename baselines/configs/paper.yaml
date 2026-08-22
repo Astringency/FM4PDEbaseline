@@ -69,8 +69,10 @@ method_by_baseline:
     hidden: 256
     basis: 128
     optimizer: adam
+    lr: 1.0e-4
     training_loss: mse
-    lr_scheduler: none
+    lr_scheduler: exponential
+    scheduler_gamma: 0.98
   ifno:
     implementation_mode: official_aligned
     official_backend: ifno
@@ -81,9 +83,15 @@ method_by_baseline:
     padding: 20
     rank: 24
     training_protocol: official_three_stage
-    ifno_pretrain_epochs: 200
-    vae_pretrain_epochs: 100
-    joint_epochs: 200
+    # The official scripts train on only 200--900 operator pairs.  These
+    # budgets preserve the largest per-stage official sample-exposure budget
+    # after scaling it to the formal 45,000-sample training split:
+    #   iFNO: 900 * 500 / 45,000 = 10 epochs (NS)
+    #   VAE:  800 * 1000 / 45,000 ~= 18 epochs (Darcy curve; both use 4x aug.)
+    #   joint: 300 * 1000 / 45,000 ~= 7 epochs (wave-Z)
+    ifno_pretrain_epochs: 10
+    vae_pretrain_epochs: 18
+    joint_epochs: 7
     lr_ifno: 0.00025
     lr_vae: 0.001
     lr_forward: 0.00005
@@ -97,7 +105,12 @@ method_by_baseline:
     ifno_grad_clip_norm: 10.0
     joint_grad_clip_norm: 10.0
     vae_geometric_augmentation: true
-    early_stopping_patience: 12
+    ifno_pretrain_early_stopping_patience: 3
+    ifno_pretrain_min_epochs: 3
+    vae_pretrain_early_stopping_patience: 3
+    vae_pretrain_min_epochs: 4
+    joint_train_early_stopping_patience: 2
+    joint_train_min_epochs: 2
   recfno:
     width: 32
     modes1: 18

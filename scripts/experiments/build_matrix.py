@@ -29,6 +29,7 @@ from baselines.experiment_matrix import (
     capability_skip_row,
     resolve_capability,
 )
+from baselines.configuration import resolve_method_config
 from baselines.common.data_files import files_for_pde, load_data_files_from_config
 from scripts.experiments.provenance import (
     DEFAULT_SENSOR_PROTOCOL_VERSION,
@@ -38,6 +39,10 @@ from scripts.experiments.provenance import (
     HistoricalExperimentError,
     MATRIX_SCHEMA_VERSION,
     SUMMARY_SCHEMA_VERSION,
+    baseline_code_sha256,
+    baseline_config_sha256,
+    canonical_sha256,
+    data_content_sha256,
     repository_revision,
     reject_historical_experiment_path,
     run_fingerprint,
@@ -188,6 +193,7 @@ MATRIX_FIELDS = [
     "sensor_budget_mode",
     "noise_level",
     "scalar_param_mode",
+    "physics_metric_mode",
     "data_loading_mode",
     "num_workers",
     "pin_memory",
@@ -203,7 +209,10 @@ MATRIX_FIELDS = [
     "commit_hash",
     "config",
     "config_content_sha256",
+    "baseline_config_sha256",
+    "baseline_code_sha256",
     "experiment_config_sha256",
+    "data_content_sha256",
     "checkpoint_path",
     "checkpoint_sha256",
     "output_dir",
@@ -328,11 +337,18 @@ def build_matrix(
                 global_defaults.get("data_files_sha256", "")
             ),
         )
+        data_manifest_payload = json.loads(
+            Path(data_manifest_path).read_text(encoding="utf-8")
+        )
+        data_content_digest = data_content_sha256(data_manifest_payload)
     else:
         # Direct construction remains useful for capability/design inspection.
         # Such formal rows cannot be executed or published until rebuilt from
         # the CLI with a passing full manifest.
         data_manifest_path, data_manifest_sha256 = "", ""
+        data_content_digest = canonical_sha256(
+            {"verification": "not_bound_to_full_data_manifest"}
+        )
 
     for task_group in task_groups:
         if task_group not in GROUP_TO_TASK:
@@ -399,6 +415,7 @@ def build_matrix(
                                 experiment_config_sha256,
                                 data_manifest_path,
                                 data_manifest_sha256,
+                                data_content_digest,
                             )
                         )
             for baseline in candidate_baselines:
@@ -457,6 +474,7 @@ def build_matrix(
                                     experiment_config_sha256,
                                     data_manifest_path,
                                     data_manifest_sha256,
+                                    data_content_digest,
                                 )
                             )
                         continue
@@ -489,6 +507,7 @@ def build_matrix(
                                             experiment_config_sha256=experiment_config_sha256,
                                             data_manifest_path=data_manifest_path,
                                             data_manifest_sha256=data_manifest_sha256,
+                                            data_content_digest=data_content_digest,
                                         )
                                         rows.append(row)
 
@@ -504,6 +523,7 @@ def build_matrix(
         experiment_config_sha256,
         data_manifest_path,
         data_manifest_sha256,
+        data_content_digest,
     )
     return rows, skipped_rows, summary
 
@@ -917,6 +937,7 @@ def _make_run_row(
     experiment_config_sha256: str,
     data_manifest_path: str,
     data_manifest_sha256: str,
+    data_content_digest: str,
 ) -> dict[str, Any]:
     resources = _resource_config(cfg, baseline)
     val_size = _env_int("VAL_SIZE", int(group_cfg.get("val_size", defaults["val_size"])))
@@ -937,6 +958,24 @@ def _make_run_row(
     data_files = files_for_pde(defaults.get("data_files", {}), pde)
     if defaults.get("data_files") and data_files is None:
         raise ValueError(f"data_files_config does not define required PDE {pde!r}")
+    method_config = load_config(config_path)
+    physics_metric_mode = str(method_config.get("physics_metric_mode", "per_sample"))
+    if physics_metric_mode not in {"per_sample", "per_batch"}:
+        raise ValueError(
+            "physics_metric_mode must be per_sample or per_batch, "
+            f"got {physics_metric_mode!r} in {config_path}"
+        )
+    effective_method_config = resolve_method_config(
+        method_config,
+        baseline=baseline,
+        pde=pde,
+        epochs=epochs,
+        steps=int(budget.get("steps", 0) or 0) or None,
+        refine_steps=int(budget.get("refine_steps", 0) or 0) or None,
+        particles=int(budget.get("particles", 0) or 0) or None,
+        device=str(defaults["device"]),
+        seed=seed,
+    )
     row: dict[str, Any] = {
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
         "summary_schema_version": SUMMARY_SCHEMA_VERSION,
@@ -988,6 +1027,7 @@ def _make_run_row(
         ),
         "noise_level": float(noise_level),
         "scalar_param_mode": scalar_param_mode,
+        "physics_metric_mode": physics_metric_mode,
         "data_loading_mode": defaults["data_loading_mode"],
         "num_workers": int(defaults["num_workers"]),
         "pin_memory": bool(defaults["pin_memory"]),
@@ -1003,7 +1043,10 @@ def _make_run_row(
         "commit_hash": commit_hash,
         "config": config_path,
         "config_content_sha256": sha256_file(config_path, root=ROOT),
+        "baseline_config_sha256": baseline_config_sha256(effective_method_config),
+        "baseline_code_sha256": baseline_code_sha256(baseline, root=ROOT),
         "experiment_config_sha256": experiment_config_sha256,
+        "data_content_sha256": data_content_digest,
         "checkpoint_path": "",
         "checkpoint_sha256": "",
         "output_dir": "",
@@ -1158,6 +1201,7 @@ def _skipped_matrix_row(
     experiment_config_sha256: str,
     data_manifest_path: str,
     data_manifest_sha256: str,
+    data_content_digest: str,
 ) -> dict[str, Any]:
     row = {field: "" for field in MATRIX_FIELDS}
     row.update(
@@ -1196,6 +1240,7 @@ def _skipped_matrix_row(
             "sensor_mode": skip["sensor_mode"],
             "noise_level": 0.0,
             "scalar_param_mode": "metadata",
+            "physics_metric_mode": "per_sample",
             "data_loading_mode": defaults["data_loading_mode"],
             "num_workers": int(defaults["num_workers"]),
             "pin_memory": bool(defaults["pin_memory"]),
@@ -1211,6 +1256,7 @@ def _skipped_matrix_row(
             "commit_hash": commit_hash,
             "config": defaults["config"],
             "config_content_sha256": "",
+            "data_content_sha256": data_content_digest,
             "experiment_config_sha256": experiment_config_sha256,
             "checkpoint_path": "",
             "checkpoint_sha256": "",
@@ -1251,6 +1297,7 @@ def _summary(
     experiment_config_sha256: str,
     data_manifest_path: str,
     data_manifest_sha256: str,
+    data_content_digest: str,
 ) -> dict[str, Any]:
     active_rows = [row for row in rows if not row.get("skip_reason")]
     by_group = Counter(row["task_group"] for row in active_rows)
@@ -1272,6 +1319,7 @@ def _summary(
         "comparison_track": comparison_track,
         "experiment_config_sha256": experiment_config_sha256,
         "data_manifest_sha256": data_manifest_sha256,
+        "data_content_sha256": data_content_digest,
         "data_manifest_path": data_manifest_path,
         "run_count": len(active_rows),
         "skipped_combo_count": len(skipped_rows),

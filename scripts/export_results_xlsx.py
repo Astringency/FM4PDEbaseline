@@ -51,6 +51,9 @@ PROVENANCE_COLUMNS = [
     "source_train_seed",
     "run_id",
     "run_fingerprint",
+    "baseline_config_sha256",
+    "baseline_code_sha256",
+    "data_content_sha256",
     "config_content_sha256",
     "experiment_config_sha256",
     "config_hash",
@@ -106,6 +109,7 @@ DESIGN_COLUMNS = [
     "noise_level",
     "scalar_param_mode",
     "scalar_param_mode_requested",
+    "metric_granularity",
     "data_loading_mode_requested",
     "effective_data_loading_mode",
     "num_workers",
@@ -316,6 +320,9 @@ def _quarantine_record(
         "error": error,
         "observed_run_id": summary.get("run_id"),
         "observed_run_fingerprint": summary.get("run_fingerprint"),
+        "observed_baseline_config_sha256": summary.get("baseline_config_sha256"),
+        "observed_baseline_code_sha256": summary.get("baseline_code_sha256"),
+        "observed_data_content_sha256": summary.get("data_content_sha256"),
         "observed_config_content_sha256": summary.get("config_content_sha256"),
         "observed_experiment_config_sha256": summary.get(
             "experiment_config_sha256"

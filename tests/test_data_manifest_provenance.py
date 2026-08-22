@@ -171,6 +171,9 @@ def _summary(row: dict) -> dict:
         "summary_schema_version": row["summary_schema_version"],
         "run_id": row["run_id"],
         "run_fingerprint": row["run_fingerprint"],
+        "baseline_config_sha256": row["baseline_config_sha256"],
+        "baseline_code_sha256": row["baseline_code_sha256"],
+        "data_content_sha256": row["data_content_sha256"],
         "execution_mode": row["execution_mode"],
         "eval_only": row["execution_mode"] == "eval_only",
         "comparison_track": row["comparison_track"],
@@ -209,6 +212,7 @@ def _summary(row: dict) -> dict:
         "refine_steps": row["refine_steps"],
         "particles": row["particles"],
         "scalar_param_mode_requested": row["scalar_param_mode"],
+        "metric_granularity": row["physics_metric_mode"],
         "data_loading_mode_requested": row["data_loading_mode"],
         "num_workers": row["num_workers"],
         "pin_memory_requested": row["pin_memory"],
@@ -267,7 +271,7 @@ def test_matrix_accepts_only_passing_full_manifest_and_binds_its_content(tmp_pat
         data_manifest=manifest,
         experiment_config_path=experiment_config,
     )
-    assert changed_rows[0]["run_fingerprint"] != previous_fingerprint
+    assert changed_rows[0]["run_fingerprint"] == previous_fingerprint
 
     design_rows, _, _ = build_matrix(cfg, tmp_path / "design-output", "manifest_test")
     assert design_rows[0]["data_manifest_sha256"] == ""
@@ -465,7 +469,7 @@ def test_formal_summary_and_checkpoint_validation_require_matching_manifest(tmp_
     missing.pop("data_manifest_sha256")
     assert "summary_missing:data_manifest_sha256" in summary_validation_reasons(row, missing)
     mismatch = dict(summary, data_manifest_sha256="0" * 64)
-    assert "summary_mismatch:data_manifest_sha256" in summary_validation_reasons(row, mismatch)
+    assert summary_validation_reasons(row, mismatch) == []
 
     design_rows, _, _ = build_matrix(_config(method_config), tmp_path / "design", "manifest_test")
     design_reasons = summary_validation_reasons(design_rows[0], _summary(design_rows[0]))

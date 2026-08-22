@@ -11,12 +11,17 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.experiments.provenance import (
     FINGERPRINT_FIELDS,
+    baseline_code_sha256,
+    baseline_config_sha256,
+    data_content_sha256,
     quarantine_output_artifacts,
     reject_historical_experiment_path,
     reject_historical_experiment_row,
@@ -27,6 +32,7 @@ from scripts.experiments.provenance import (
     summary_validation_reasons,
     validate_full_data_manifest,
 )
+from baselines.configuration import resolve_method_config
 
 FORBIDDEN_PAPER_FLAGS = {
     "--dry-run",
@@ -129,6 +135,8 @@ def build_command(row: dict[str, Any]) -> list[str]:
         str(values["prefetch_factor"]),
         "--scalar-param-mode",
         str(values["scalar_param_mode"]),
+        "--physics-metric-mode",
+        str(values["physics_metric_mode"]),
         "--output-dir",
         str(row["output_dir"]),
         "--experiment-kind",
@@ -157,8 +165,11 @@ def build_command(row: dict[str, Any]) -> list[str]:
         "--summary-schema-version": row.get("summary_schema_version"),
         "--run-fingerprint": row.get("run_fingerprint"),
         "--config-content-sha256": row.get("config_content_sha256"),
+        "--baseline-config-sha256": row.get("baseline_config_sha256"),
+        "--baseline-code-sha256": row.get("baseline_code_sha256"),
         "--experiment-config-sha256": row.get("experiment_config_sha256"),
         "--data-manifest-sha256": row.get("data_manifest_sha256"),
+        "--data-content-sha256": row.get("data_content_sha256"),
         "--data-manifest-path": row.get("data_manifest_path"),
         "--task-protocol-version": row.get("task_protocol_version"),
         "--sensor-protocol-version": row.get("sensor_protocol_version"),
@@ -231,8 +242,41 @@ def _validate_matrix_provenance(
             effective[field] = values[field]
     effective["device"] = os.environ.get("DEVICE", str(row["device"]))
     try:
-        effective["commit_hash"] = repository_revision(ROOT)
-        effective["config_content_sha256"] = sha256_file(str(values["config"]), root=ROOT)
+        observed_commit_hash = repository_revision(ROOT)
+        if observed_commit_hash != str(row.get("commit_hash", "")):
+            raise ValueError(
+                "repository revision no longer matches the matrix audit record: "
+                f"matrix={row.get('commit_hash', '')}, observed={observed_commit_hash}"
+            )
+        effective["commit_hash"] = observed_commit_hash
+        observed_config_content_sha256 = sha256_file(str(values["config"]), root=ROOT)
+        if observed_config_content_sha256 != str(row.get("config_content_sha256", "")):
+            raise ValueError(
+                "configuration file no longer matches the matrix audit record: "
+                f"matrix={row.get('config_content_sha256', '')}, observed={observed_config_content_sha256}"
+            )
+        effective["config_content_sha256"] = observed_config_content_sha256
+        config_path = Path(str(values["config"]))
+        if not config_path.is_absolute():
+            config_path = ROOT / config_path
+        method_file_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        effective_method_config = resolve_method_config(
+            method_file_config,
+            baseline=str(row["baseline"]),
+            pde=str(row["pde"]),
+            epochs=int(values["epochs"]),
+            steps=int(values["steps"] or 0) or None,
+            refine_steps=int(values["refine_steps"] or 0) or None,
+            particles=int(values["particles"] or 0) or None,
+            device=str(effective["device"]),
+            seed=int(row["seed"]),
+        )
+        effective["baseline_config_sha256"] = baseline_config_sha256(
+            effective_method_config
+        )
+        effective["baseline_code_sha256"] = baseline_code_sha256(
+            str(row["baseline"]), root=ROOT
+        )
         data_manifest_path = str(effective.get("data_manifest_path", "") or "")
         expected_data_manifest_hash = str(
             effective.get("data_manifest_sha256", "") or ""
@@ -267,6 +311,7 @@ def _validate_matrix_provenance(
                     f"data manifest SHA-256 {observed_data_manifest_hash} does not match matrix "
                     f"{expected_data_manifest_hash}"
                 )
+            effective["data_content_sha256"] = data_content_sha256(manifest)
         if effective.get("execution_mode") == "eval_only":
             checkpoint_path = str(effective.get("checkpoint_path", "") or "")
             observed_checkpoint_hash = sha256_file(checkpoint_path, root=ROOT)
@@ -298,6 +343,7 @@ def effective_command_values(row: dict[str, Any]) -> dict[str, Any]:
         "batch_size": row_value(row, "batch_size", "BATCH_SIZE", allow_override),
         "epochs": row_value(row, "epochs", "EPOCHS", allow_override),
         "scalar_param_mode": row_value(row, "scalar_param_mode", "SCALAR_PARAM_MODE", allow_override),
+        "physics_metric_mode": row.get("physics_metric_mode", "per_sample"),
         "data_loading_mode": row_value(row, "data_loading_mode", "DATA_LOADING_MODE", allow_override),
         "num_workers": row_value_default(row, "num_workers", 4, "NUM_WORKERS", allow_override),
         "pin_memory": row_value_default(row, "pin_memory", True, "PIN_MEMORY", allow_override),

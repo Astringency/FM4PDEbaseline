@@ -119,7 +119,7 @@ resources:
     device: cuda
   ifno:
     batch_size: 16
-    epochs: 500
+    epochs: 35
   pinn_sparse:
     batch_size: 1
     steps: 1000
