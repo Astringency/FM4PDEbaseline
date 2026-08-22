@@ -50,9 +50,9 @@ def test_supervised_baseline_configs_preserve_upstream_training_recipes():
         key: methods["ifno"][key]
         for key in ("ifno_pretrain_epochs", "vae_pretrain_epochs", "joint_epochs")
     } == {
-        "ifno_pretrain_epochs": 10,
-        "vae_pretrain_epochs": 18,
-        "joint_epochs": 7,
+        "ifno_pretrain_epochs": 50,
+        "vae_pretrain_epochs": 15,
+        "joint_epochs": 35,
     }
     assert {
         key: methods["ifno"][key]
@@ -76,13 +76,13 @@ def test_supervised_baseline_configs_preserve_upstream_training_recipes():
 
 def test_ifno_budget_records_all_three_stages_and_total():
     budget = _method_budget_fields(
-        {"ifno_pretrain_epochs": 10, "vae_pretrain_epochs": 18, "joint_epochs": 7},
+        {"ifno_pretrain_epochs": 50, "vae_pretrain_epochs": 15, "joint_epochs": 35},
         "ifno",
     )
 
-    assert budget["total_training_epochs"] == 35
+    assert budget["total_training_epochs"] == 100
     assert budget["method_budget_label"] == (
-        "ifno_pretrain_epochs=10,vae_pretrain_epochs=18,joint_epochs=7,total_epochs=35"
+        "ifno_pretrain_epochs=50,vae_pretrain_epochs=15,joint_epochs=35,total_epochs=100"
     )
 
 

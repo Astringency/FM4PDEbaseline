@@ -83,15 +83,11 @@ method_by_baseline:
     padding: 20
     rank: 24
     training_protocol: official_three_stage
-    # The official scripts train on only 200--900 operator pairs.  These
-    # budgets preserve the largest per-stage official sample-exposure budget
-    # after scaling it to the formal 45,000-sample training split:
-    #   iFNO: 900 * 500 / 45,000 = 10 epochs (NS)
-    #   VAE:  800 * 1000 / 45,000 ~= 18 epochs (Darcy curve; both use 4x aug.)
-    #   joint: 300 * 1000 / 45,000 ~= 7 epochs (wave-Z)
-    ifno_pretrain_epochs: 10
-    vae_pretrain_epochs: 18
-    joint_epochs: 7
+    # Formal 100-epoch three-stage budget: emphasize invertible-operator
+    # pretraining and joint refinement while keeping a bounded VAE warm-up.
+    ifno_pretrain_epochs: 50
+    vae_pretrain_epochs: 15
+    joint_epochs: 35
     lr_ifno: 0.00025
     lr_vae: 0.001
     lr_forward: 0.00005

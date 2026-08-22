@@ -55,7 +55,7 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
     assert helmholtz["data_files"]["test"] == [
         "helmholtz/helmholtz_test_10000-128-128.mat"
     ]
-    assert {row["epochs"] for row in rows if row["baseline"] == "ifno"} == {35}
+    assert {row["epochs"] for row in rows if row["baseline"] == "ifno"} == {100}
     assert set(summary["by_task_group"]) == {
         "full_forward_main",
         "full_inverse_main",

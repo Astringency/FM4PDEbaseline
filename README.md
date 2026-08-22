@@ -36,11 +36,11 @@ Important method budgets and adaptations:
 - iFNO records requested and completed budgets independently for operator
   pretraining, VAE pretraining, and joint training. Each stage monitors the
   5,000-sample validation split and restores its own best checkpoint. The
-  formal 45,000-sample split uses stage caps `10 / 18 / 7`, obtained by scaling
-  the largest official per-stage sample-exposure budgets (including the same
-  four-way VAE augmentation). Operator and VAE pretraining use patience 3 and
-  minimum budgets 3 and 4; joint training uses patience 2 and a minimum budget
-  of 2. Every stage uses minimum improvement `1e-4`. This validation stopping
+  formal 45,000-sample split uses a 100-epoch cap allocated as `50 / 15 / 35`
+  for iFNO pretraining, VAE pretraining, and joint training. VAE pretraining
+  retains the official four-way augmentation. Operator and VAE pretraining use
+  patience 3 and minimum budgets 3 and 4; joint training uses patience 2 and a
+  minimum budget of 2. Every stage uses minimum improvement `1e-4`. This validation stopping
   and sample-equivalent scaling are FM4PDE compute-budget adaptations on top of
   the official fixed-epoch three-stage recipe.
 - PINN-sparse runs at most 1,000 Adam iterations followed by 500 L-BFGS steps;
