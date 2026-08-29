@@ -1022,3 +1022,93 @@ def test_eval_only_has_its_own_fingerprint_and_links_verified_training_checkpoin
     assert command[command.index("--source-train-run-fingerprint") + 1] == train_row["run_fingerprint"]
     assert command[command.index("--source-train-seed") + 1] == str(train_row["seed"])
     assert command[command.index("--sensor-seed") + 1] == str(eval_row["sensor_seed"])
+
+
+def test_ifno_inverse_reuses_completed_forward_checkpoint_across_code_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    method_config = tmp_path / "method.yaml"
+    method_config.write_text("method:\n  width: 16\n", encoding="utf-8")
+    cfg = _config(method_config)
+    cfg["task_group_overrides"]["full_forward_main"]["baselines"] = ["ifno"]
+    cfg["task_groups"].append("full_inverse_main")
+    cfg["task_group_overrides"]["full_inverse_main"] = {
+        "task": "inverse",
+        "pdes": ["darcy"],
+        "baselines": ["ifno"],
+        "batch_size": 2,
+        "epochs": 3,
+    }
+    initial_rows, skipped, _summary = build_matrix(
+        cfg, tmp_path / "outputs", "ifno_reuse"
+    )
+    assert not skipped
+    forward = next(row for row in initial_rows if row["task"] == "forward")
+    old_forward = deepcopy(forward)
+    old_forward["baseline_code_sha256"] = (
+        "ee2c58e7d2737f6d3b520248c90a03164f1c4ab0fbc414a38a00936beaf5bcbf"
+    )
+    old_forward["run_fingerprint"] = run_fingerprint(old_forward)
+    old_forward["run_id"] = f"old_forward_{old_forward['run_fingerprint'][:12]}"
+    old_forward["output_dir"] = str(tmp_path / "completed-forward")
+    checkpoint = Path(old_forward["output_dir"]) / f"{old_forward['run_id']}.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"completed-forward-checkpoint")
+    checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    summary = _valid_summary(old_forward) | {
+        "checkpoint_path": str(checkpoint),
+        "checkpoint_sha256": checkpoint_sha256,
+    }
+    (checkpoint.parent / "summary.json").write_text(
+        json.dumps(summary), encoding="utf-8"
+    )
+
+    resumed_rows, skipped, _summary = build_matrix(
+        cfg,
+        tmp_path / "outputs",
+        "ifno_reuse",
+        resume_rows=[old_forward],
+    )
+
+    assert not skipped
+    resumed_forward = next(row for row in resumed_rows if row["task"] == "forward")
+    inverse = next(row for row in resumed_rows if row["task"] == "inverse")
+    assert resumed_forward["run_id"] == old_forward["run_id"]
+    assert resumed_forward["baseline_code_sha256"] == old_forward["baseline_code_sha256"]
+    assert inverse["execution_mode"] == "eval_only"
+    assert inverse["dependency_pending"] is False
+    assert inverse["source_train_run_id"] == old_forward["run_id"]
+    assert inverse["source_train_task"] == "forward"
+    assert (
+        inverse["source_train_baseline_code_sha256"]
+        == old_forward["baseline_code_sha256"]
+    )
+    assert inverse["checkpoint_path"] == str(checkpoint)
+    assert inverse["checkpoint_sha256"] == checkpoint_sha256
+    assert inverse["run_fingerprint"] == run_fingerprint(inverse)
+    data_root = tmp_path / "PDEdata"
+    data_root.mkdir()
+    monkeypatch.setenv("DATA_ROOT", str(data_root))
+    command = build_command(inverse)
+    assert "--eval-only" in command
+    assert command[command.index("--source-train-task") + 1] == "forward"
+    assert (
+        command[command.index("--source-train-baseline-code-sha256") + 1]
+        == old_forward["baseline_code_sha256"]
+    )
+
+    monkeypatch.setattr(
+        "scripts.experiments.build_matrix.baseline_code_sha256",
+        lambda _baseline, root=None: "f" * 64,
+    )
+    future_rows, skipped, _summary = build_matrix(
+        cfg,
+        tmp_path / "outputs",
+        "ifno_reuse",
+        resume_rows=[old_forward],
+    )
+    assert not skipped
+    future_forward = next(row for row in future_rows if row["task"] == "forward")
+    assert future_forward["run_id"] != old_forward["run_id"]
+    assert future_forward["baseline_code_sha256"] == "f" * 64

@@ -72,6 +72,18 @@ def test_main_results_counts_skips_and_unique_run_ids(tmp_path: Path, monkeypatc
     inverse_rows = [row for row in rows if row["task_group"] == "full_inverse_main"]
     assert {row["baseline"] for row in inverse_rows} == {"ifno"}
     assert {row["capability_status"] for row in inverse_rows} == {"adapted"}
+    assert {row["execution_mode"] for row in inverse_rows} == {"eval_only"}
+    assert all(row["dependency_pending"] for row in inverse_rows)
+    assert {row["source_train_task"] for row in inverse_rows} == {"forward"}
+    forward_ifno = {
+        (row["pde"], row["seed"]): row
+        for row in rows
+        if row["task_group"] == "full_forward_main" and row["baseline"] == "ifno"
+    }
+    assert all(
+        row["dependency_run_id"] == forward_ifno[(row["pde"], row["seed"])]["run_id"]
+        for row in inverse_rows
+    )
     assert not any(
         row["pde"] == "nsnonbounded" and row["baseline"] in {"pinn_sparse", "pde_opt", "pc_bnn"}
         for row in rows

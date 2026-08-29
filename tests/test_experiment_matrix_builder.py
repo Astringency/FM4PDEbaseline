@@ -62,6 +62,8 @@ def test_sanity_main_includes_main_table_ifno_inverse(tmp_path: Path):
     assert inverse_rows
     assert {row["baseline"] for row in inverse_rows} == {"ifno"}
     assert {row["task"] for row in inverse_rows} == {"inverse"}
+    assert {row["execution_mode"] for row in inverse_rows} == {"eval_only"}
+    assert all(row["dependency_pending"] for row in inverse_rows)
     assert all(not row.get("skip_reason") for row in inverse_rows)
     assert not any(row["task_group"] == "full_inverse_main" and row["baseline"] == "deeponet" for row in rows)
 

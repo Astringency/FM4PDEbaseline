@@ -84,6 +84,8 @@ def row_status(row: dict[str, Any]) -> str:
     output = Path(str(row.get("output_dir", "")))
     if row.get("skip_reason"):
         return "skipped"
+    if bool(row.get("dependency_pending", False)):
+        return "waiting"
     for status in ("done", "running", "failed"):
         if (output / f"run.{status}").exists():
             return status
@@ -188,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     selected: list[int] = []
     for index in indices:
         status = row_status(rows[index])
-        if status == "skipped":
+        if status in {"skipped", "waiting"}:
             continue
         if args.failed_only and status != "failed":
             continue

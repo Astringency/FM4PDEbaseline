@@ -175,6 +175,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Training fingerprint expected inside an eval-only checkpoint; distinct from the evaluation run fingerprint.",
     )
     parser.add_argument("--source-train-seed", type=int, default=None, help="Model-training seed expected in an eval-only checkpoint.")
+    parser.add_argument(
+        "--source-train-task",
+        default="",
+        help="Task recorded by the source training checkpoint when it differs from the evaluation task.",
+    )
+    parser.add_argument(
+        "--source-train-baseline-code-sha256",
+        default="",
+        help="Baseline-code digest recorded by the source training checkpoint.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--synthetic-data", action="store_true", help="Use deterministic synthetic data for smoke/debug tests.")
     parser.add_argument("--allow-synthetic-fallback", action="store_true", help="Fall back to synthetic data when requested real files are missing.")
@@ -602,10 +612,13 @@ def main(argv: list[str] | None = None) -> None:
             expected={
                 "baseline": args.baseline,
                 "pde": args.pde,
-                "task": args.task,
+                "task": args.source_train_task or args.task,
                 "run_fingerprint": args.source_train_run_fingerprint,
                 "baseline_config_sha256": args.baseline_config_sha256,
-                "baseline_code_sha256": args.baseline_code_sha256,
+                "baseline_code_sha256": (
+                    args.source_train_baseline_code_sha256
+                    or args.baseline_code_sha256
+                ),
                 "data_content_sha256": args.data_content_sha256,
                 "task_protocol_version": args.task_protocol_version,
                 "sensor_protocol_version": args.sensor_protocol_version,
@@ -1418,6 +1431,19 @@ def _evaluate_full_test_loader(
             checkpoint_provenance.get("run_id", args.run_id if not getattr(args, "eval_only", False) else "")
         ),
         "source_train_run_fingerprint": str(checkpoint_provenance.get("run_fingerprint", "")),
+        "source_train_task": str(
+            checkpoint_provenance.get(
+                "task",
+                getattr(args, "source_train_task", "") or args.task,
+            )
+        ),
+        "source_train_baseline_code_sha256": str(
+            checkpoint_provenance.get(
+                "baseline_code_sha256",
+                getattr(args, "source_train_baseline_code_sha256", "")
+                or getattr(args, "baseline_code_sha256", ""),
+            )
+        ),
         "source_train_seed": int(
             checkpoint_provenance.get(
                 "seed",
@@ -1819,6 +1845,10 @@ def _summarize_run(
         "comparison_track": str(getattr(args, "comparison_track", "unified_adapted")),
         "source_train_run_id": str(rows[0].get("source_train_run_id", "") if rows else ""),
         "source_train_run_fingerprint": str(rows[0].get("source_train_run_fingerprint", "") if rows else ""),
+        "source_train_task": str(rows[0].get("source_train_task", "") if rows else ""),
+        "source_train_baseline_code_sha256": str(
+            rows[0].get("source_train_baseline_code_sha256", "") if rows else ""
+        ),
         "source_train_seed": int(
             rows[0].get(
                 "source_train_seed",
@@ -2474,6 +2504,15 @@ def _validate_and_bind_run_fingerprint(
                 "checkpoint_sha256": str(args.checkpoint_sha256),
             }
         )
+        if args.source_train_task or args.source_train_baseline_code_sha256:
+            payload.update(
+                {
+                    "source_train_task": str(args.source_train_task),
+                    "source_train_baseline_code_sha256": str(
+                        args.source_train_baseline_code_sha256
+                    ),
+                }
+            )
     observed_fingerprint = run_fingerprint(payload)
     supplied_fingerprint = str(args.run_fingerprint or "")
     if supplied_fingerprint and supplied_fingerprint != observed_fingerprint:

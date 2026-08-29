@@ -178,6 +178,10 @@ def build_command(row: dict[str, Any]) -> list[str]:
         "--source-train-run-id": row.get("source_train_run_id"),
         "--source-train-run-fingerprint": row.get("source_train_run_fingerprint"),
         "--source-train-seed": row.get("source_train_seed"),
+        "--source-train-task": row.get("source_train_task"),
+        "--source-train-baseline-code-sha256": row.get(
+            "source_train_baseline_code_sha256"
+        ),
         "--commit-hash": row.get("commit_hash"),
         "--checkpoint-sha256": row.get("checkpoint_sha256"),
     }
@@ -791,6 +795,13 @@ def main(argv: list[str] | None = None) -> int:
         progress(
             f"[run skip] index={_index_text(index, total)} run_id={row.get('run_id', '')} "
             f"reason=row has skip_reason skip_reason={row['skip_reason']} output_dir={row.get('output_dir', '')}"
+        )
+        return 0
+    if _as_bool(row.get("dependency_pending", False)):
+        progress(
+            f"[run wait] index={_index_text(index, total)} run_id={row.get('run_id', '')} "
+            f"dependency_run_id={row.get('dependency_run_id', '')} "
+            f"reason={row.get('dependency_reason', 'source checkpoint unavailable')}"
         )
         return 0
     cmd = build_command(row)

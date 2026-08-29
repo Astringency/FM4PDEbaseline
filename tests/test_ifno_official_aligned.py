@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 import torch
@@ -8,6 +9,7 @@ from torch.utils.data import DataLoader
 
 from baselines.capabilities import paper_table_eligible, resolve_capability
 from baselines.common.data_adapter import PDEBatchDataset, build_default_registry, pde_collate
+from baselines.common.normalization import NormalizationStats
 from baselines.methods.ifno import (
     IFNOBaseline,
     _ifno_official_stage_order,
@@ -42,6 +44,53 @@ def test_ifno_official_training_adapter_forward_and_inverse_shapes_and_metadata(
         assert backend["official_reimplementation_success"] is True
         assert backend["official_alignment_level"] == "algorithm_training"
         assert paper_table_eligible(cap, backend_info=backend) is False
+
+
+@pytest.mark.parametrize(
+    ("task", "physical_input", "expected_normalized_input", "expected_output"),
+    [
+        ("forward", 14.0, 2.0, 115.0),
+        ("inverse", 110.0, 2.0, 16.0),
+    ],
+)
+def test_forward_trained_ifno_checkpoint_uses_task_aware_physical_normalization(
+    task,
+    physical_input,
+    expected_normalized_input,
+    expected_output,
+):
+    batch = replace(
+        _batch(task),
+        input_fields=torch.full_like(_batch(task).input_fields, physical_input),
+    )
+    model = IFNOBaseline()
+    model.data_spec = {"task": "forward"}
+    model.uses_normalization = True
+    model.normalization_stats = NormalizationStats(
+        input_mean=torch.tensor([10.0]),
+        input_std=torch.tensor([2.0]),
+        target_mean=torch.tensor([100.0]),
+        target_std=torch.tensor([5.0]),
+        input_shape=tuple(batch.input_fields.shape),
+        target_shape=tuple(batch.target_fields.shape),
+        num_batches=1,
+        num_samples=len(batch.input_fields),
+    )
+
+    def fake_predict(normalized_batch):
+        assert torch.allclose(
+            normalized_batch.input_fields,
+            torch.full_like(
+                normalized_batch.input_fields, expected_normalized_input
+            ),
+        )
+        return normalized_batch.input_fields + 1.0
+
+    model.predict = fake_predict
+
+    prediction = model.predict_physical(batch)
+
+    assert torch.allclose(prediction, torch.full_like(prediction, expected_output))
 
 
 def test_ifno_sparse_tasks_remain_unsupported():

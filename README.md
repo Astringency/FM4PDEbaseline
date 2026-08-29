@@ -43,6 +43,10 @@ Important method budgets and adaptations:
   minimum budget of 2. Every stage uses minimum improvement `1e-4`. This validation stopping
   and sample-equivalent scaling are FM4PDE compute-budget adaptations on top of
   the official fixed-epoch three-stage recipe.
+  Each PDE/seed trains this bidirectional model only once in the full-forward
+  row. The full-inverse row is eval-only and reuses that exact checkpoint,
+  including the trained VAE; task-aware normalization swaps the physical x/y
+  statistics for inverse inference.
 - PINN-sparse runs at most 1,000 Adam iterations followed by 500 L-BFGS steps;
   both phases and their combined budget are recorded separately.
 - Var4D performs at most 500 per-sample L-BFGS-B iterations over a
@@ -106,9 +110,11 @@ bash scripts/run_baseline.sh
 ```
 
 The script verifies data, builds the matrix, resumes unfinished experiments,
-collects results, renders PDFs in a separate process, and prints status when it
-finishes or is interrupted. It uses an output lock and will not restart a
-`run.running` row whose process is alive.
+rebuilds once to resolve checkpoint-dependent eval-only rows, collects results,
+renders PDFs in a separate process, and prints status when it finishes or is
+interrupted. It uses an output lock and will not restart a `run.running` row
+whose process is alive. An inverse iFNO row whose forward checkpoint is not yet
+complete remains in `waiting` state and is never launched as a training job.
 
 Resume identity is baseline-scoped. A completed row is reused when its resolved
 configuration for that baseline, relevant shared/baseline/vendored source code,
@@ -120,11 +126,12 @@ before these three semantic hashes were recorded cannot be upgraded safely from
 a dirty worktree and require one migration rerun; subsequent rebuilds resume by
 the baseline-scoped identity.
 
-After changing iFNO training code, only iFNO row identities change. Stop the
-old jobs and create an isolated recovery matrix instead. The following command launches
-only the eight full-field iFNO rows under a new matrix/output namespace, so all
-existing completed artifacts remain untouched. `JOBS_PER_GPU=1` is recommended
-for 24 GB GPUs because concurrent iFNO jobs can exhaust device memory.
+The inverse-checkpoint-reuse migration preserves validated completed rows from
+the immediately preceding cohort, including all four completed iFNO forward
+checkpoints. The following command selects the eight full-field iFNO rows, but
+only the four forward rows can train; the four inverse rows are eval-only and
+reference their corresponding forward checkpoints. `JOBS_PER_GPU=1` is
+recommended for 24 GB GPUs while any forward training remains.
 
 ```bash
 DATA_ROOT=/absolute/path/to/PDEdata \

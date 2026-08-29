@@ -188,6 +188,30 @@ def test_runner_dry_run_supports_first_and_index_ranges(tmp_path: Path, capsys: 
     assert [row["index"] for row in report["selected"]] == [1, 3]
 
 
+def test_runner_waits_for_unresolved_checkpoint_dependencies(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    rows = [
+        {
+            "run_id": "waiting",
+            "output_dir": str(tmp_path / "waiting"),
+            "dependency_pending": True,
+            "dependency_run_id": "forward",
+        },
+        {"run_id": "ready", "output_dir": str(tmp_path / "ready")},
+    ]
+    matrix = _write_matrix(tmp_path / "matrix.jsonl", rows)
+
+    rc = run_experiments.main(
+        [str(matrix), "--data-root", str(tmp_path), "--gpus", "0", "--dry-run"]
+    )
+
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["waiting"] == 1
+    assert [item["run_id"] for item in report["selected"]] == ["ready"]
+
+
 def test_collect_results_calls_aggregate_and_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     run_dir = tmp_path / "runs" / "r1"
     samples = run_dir / "samples"

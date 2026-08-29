@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -704,6 +705,37 @@ class IFNOBaseline(BaselineModel):
         x = batch.input_fields
         return self._forward_map(x)
 
+    def predict_physical(self, batch: PDEBatch) -> torch.Tensor:
+        """Run either direction with the normalization orientation used at training.
+
+        A single iFNO checkpoint represents both physical maps.  The generic
+        baseline normalization helper assumes that evaluation has the same
+        task direction as training, which is not true when a forward-trained
+        checkpoint is reused for inverse evaluation.  Resolve the physical
+        x/y statistics from the checkpoint's training task and apply the
+        appropriate pair for the requested inference direction.
+        """
+
+        if not self.uses_normalization or self.normalization_stats is None:
+            return self.predict(batch)
+        stats = self.normalization_stats.to(batch.input_fields.device)
+        trained_as_inverse = str(self.data_spec.get("task", "forward")) == "inverse"
+        if trained_as_inverse:
+            x_mean, x_std = stats.target_mean, stats.target_std
+            y_mean, y_std = stats.input_mean, stats.input_std
+        else:
+            x_mean, x_std = stats.input_mean, stats.input_std
+            y_mean, y_std = stats.target_mean, stats.target_std
+        inverse = batch.task == "inverse"
+        input_mean, input_std = (y_mean, y_std) if inverse else (x_mean, x_std)
+        output_mean, output_std = (x_mean, x_std) if inverse else (y_mean, y_std)
+        normalized = replace(
+            batch,
+            input_fields=_ifno_normalize_channels(batch.input_fields, input_mean, input_std),
+        )
+        prediction = self.predict(normalized)
+        return _ifno_denormalize_channels(prediction, output_mean, output_std)
+
     def _forward_map(self, x: torch.Tensor) -> torch.Tensor:
         if getattr(self, "official_aligned", False):
             pred, _ = self.operator.forward_map(x)
@@ -760,6 +792,35 @@ def _relative_l2_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.T
     difference = torch.linalg.vector_norm((prediction - target).reshape(prediction.shape[0], -1), dim=1)
     denominator = torch.linalg.vector_norm(target.reshape(target.shape[0], -1), dim=1).clamp_min(1e-12)
     return (difference / denominator).sum()
+
+
+def _ifno_normalize_channels(
+    field: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+) -> torch.Tensor:
+    channels = min(int(field.shape[1]), int(mean.numel()))
+    view = (1, channels, *([1] * (field.ndim - 2)))
+    normalized = field.clone()
+    normalized[:, :channels] = (
+        normalized[:, :channels] - mean[:channels].reshape(view)
+    ) / std[:channels].clamp_min(1e-12).reshape(view)
+    return normalized
+
+
+def _ifno_denormalize_channels(
+    field: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+) -> torch.Tensor:
+    channels = min(int(field.shape[1]), int(mean.numel()))
+    view = (1, channels, *([1] * (field.ndim - 2)))
+    denormalized = field.clone()
+    denormalized[:, :channels] = (
+        denormalized[:, :channels] * std[:channels].reshape(view)
+        + mean[:channels].reshape(view)
+    )
+    return denormalized
 
 
 def _ifno_official_stage_order(pde_name: str) -> list[str]:

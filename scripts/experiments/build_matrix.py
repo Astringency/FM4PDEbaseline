@@ -47,6 +47,7 @@ from scripts.experiments.provenance import (
     reject_historical_experiment_path,
     run_fingerprint,
     sha256_file,
+    summary_validation_reasons,
     validate_full_data_manifest,
 )
 
@@ -154,6 +155,39 @@ FACTOR_TO_VARIED_FIELDS = {
 # Public alias used by downstream tooling. The fingerprint list is defined in
 # one place alongside the summary validation contract.
 HASH_FIELDS = list(FINGERPRINT_FIELDS)
+DEPENDENCY_PENDING_SHA256 = "0" * 64
+RESUME_IDENTITY_FIELDS = tuple(
+    field for field in FINGERPRINT_FIELDS if field != "baseline_code_sha256"
+)
+# One-time compatibility bridge for the completed cohort produced immediately
+# before inverse evaluation was changed to reuse the bidirectional iFNO forward
+# checkpoint.  Those source files are the clean HEAD inputs to this migration;
+# limiting the exception to their exact digests ensures future training-code
+# changes still invalidate the affected rows normally.
+INVERSE_REUSE_MIGRATION_CODE_SHA256 = {
+    "4edf9ce579e62f0a8afd7616d064b272086daeb950c5e7590202a70940c7ca10":
+        "e4185f35320beeb0f210d1e9ae9301d04ef1510c775e34d1c1276fa94a112a9b",
+    "4a568785cd8658fab71db0845e6a3f2d9bb643475dc07e617ec2b9b733610e8e":
+        "4e66c4d070f282059838579a460cd16963590fd704559851b21871618bafe1b7",
+    "ee2c58e7d2737f6d3b520248c90a03164f1c4ab0fbc414a38a00936beaf5bcbf":
+        "e7ab63c7b3a26c7b2e3e20afc102f1faaad8235c27e0bde088081418bea5d525",
+    "3d8b8127c99eb40e043383e13e588f45c10396f8ae22a34991b18d063f8e210c":
+        "514375a8d32e97c7df542d82d05cd1cc9dd1de48170cd7c87807a7e93e53e30b",
+    "7866332069fe38fee9ca87fceca82762d1d4434de1bf633355f3456fe2e84226":
+        "a60d0df14c54a1786078c8b7e65a4bf8965cf55f6b3da3f4e5212a980c98a02d",
+    "9e8599e914d59497aab854245b65ef275532bd9f2f0217495c7bc6b20e5d97f4":
+        "e1d5f4fb8bfacb72c8964597e5870f3e2ec96e365a39b88b1343173b385da482",
+    "fefa36f8c90cec82103dd57a4f1afb7be7783cb55df3b0efc924da47556d75ef":
+        "abe71061bb24048e5649bfcc8fa048e5b236792c4b550ff9315dbb5c5f8ed752",
+    "54c8dbfe34973b008f7bfdf27e12acfd32a619a5a785528438177cfb6e07cb4b":
+        "5d828173a3e30fcf8d98b2000d5e6e2e0c1889431c0a6d5e4bb8866afe49e5f4",
+    "e53691458b57cbaa14d656769c59d43118a8a73ad833a333c7db1a147d138055":
+        "488a9f5753b3751eda2cc53e3d5978c9ac8479f304035a7a5f83296dd23d64f2",
+    "2cf7aca50f94bac68e5603c8205eb3e09b205c5dcb661ed1ce0595379315ca1c":
+        "4849bcda18c84356bff6812516ada404c593c7542010d71faffd051d5f7b6825",
+    "5da54a3181116a7f6834e262d7d1ff2630e0bd18e82b6ae22489feeb80885aff":
+        "88252df6d11dc6b0538f6671c31838b19f8db0855a0b9114f3379327c070952b",
+}
 
 MATRIX_FIELDS = [
     "matrix_schema_version",
@@ -164,6 +198,8 @@ MATRIX_FIELDS = [
     "execution_mode",
     "source_train_run_id",
     "source_train_run_fingerprint",
+    "source_train_task",
+    "source_train_baseline_code_sha256",
     "comparison_track",
     "experiment_kind",
     "ablation_factor",
@@ -215,6 +251,9 @@ MATRIX_FIELDS = [
     "data_content_sha256",
     "checkpoint_path",
     "checkpoint_sha256",
+    "dependency_run_id",
+    "dependency_pending",
+    "dependency_reason",
     "output_dir",
     "log_dir",
     "status_file",
@@ -302,6 +341,7 @@ def build_matrix(
     emit_progress: bool = False,
     data_manifest: str | Path | None = None,
     experiment_config_path: str | Path | None = None,
+    resume_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     output_root = Path(output_root)
     _reject_historical_matrix_target(output_root, matrix_name)
@@ -511,6 +551,9 @@ def build_matrix(
                                         )
                                         rows.append(row)
 
+    if resume_rows:
+        rows = _preserve_completed_rows(rows, resume_rows)
+    rows = _bind_eval_only_dependencies(rows, cfg, output_root, matrix_name)
     _ensure_unique_run_ids(rows)
     skipped_rows = list(skipped.values())
     summary = _summary(
@@ -526,6 +569,182 @@ def build_matrix(
         data_content_digest,
     )
     return rows, skipped_rows, summary
+
+
+def _preserve_completed_rows(
+    generated_rows: list[dict[str, Any]],
+    previous_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep completed semantic runs stable across orchestration-only code changes.
+
+    Baseline code remains part of a new run's identity.  A previously completed
+    row, however, is immutable evidence and should remain addressable when only
+    the surrounding orchestration/evaluation code changes.  Match every design
+    and data field except the code digest, then require the old summary and
+    checkpoint to pass their original provenance contract before preserving it.
+    """
+
+    previous_by_identity: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in previous_rows:
+        previous_by_identity.setdefault(_resume_identity(row), []).append(row)
+    preserved: list[dict[str, Any]] = []
+    for row in generated_rows:
+        replacement = None
+        for candidate in previous_by_identity.get(_resume_identity(row), []):
+            candidate = dict(candidate)
+            previous_code = str(candidate.get("baseline_code_sha256", ""))
+            current_code = str(row.get("baseline_code_sha256", ""))
+            if (
+                previous_code != current_code
+                and INVERSE_REUSE_MIGRATION_CODE_SHA256.get(previous_code)
+                != current_code
+            ):
+                continue
+            # The verifier report is regenerated on every workflow start and
+            # contains a timestamp, while data_content_sha256 is the stable
+            # identity already matched above.  Refresh only the audit binding;
+            # keep the completed run/checkpoint identity unchanged.
+            for field in (
+                "data_manifest_sha256",
+                "data_manifest_path",
+                "experiment_config_sha256",
+            ):
+                candidate[field] = row.get(field, candidate.get(field))
+            summary_path = Path(str(candidate.get("output_dir", ""))) / "summary.json"
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(summary, dict) and not summary_validation_reasons(candidate, summary):
+                replacement = dict(candidate)
+                break
+        preserved.append(replacement or row)
+    return preserved
+
+
+def _resume_identity(row: dict[str, Any]) -> tuple[Any, ...]:
+    values: list[Any] = []
+    for field in RESUME_IDENTITY_FIELDS:
+        value = row.get(field)
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        values.append(value)
+    if "data_files" in row:
+        values.append(
+            json.dumps(row.get("data_files"), sort_keys=True, separators=(",", ":"))
+        )
+    return tuple(values)
+
+
+def _bind_eval_only_dependencies(
+    rows: list[dict[str, Any]],
+    cfg: dict[str, Any],
+    output_root: Path,
+    matrix_name: str,
+) -> list[dict[str, Any]]:
+    """Bind eval-only rows to completed source checkpoints when available."""
+
+    group_configs = dict(cfg.get("task_group_overrides", {}) or {})
+    bound: list[dict[str, Any]] = []
+    for original in rows:
+        if original.get("execution_mode") != "eval_only":
+            bound.append(original)
+            continue
+        row = dict(original)
+        group_cfg = dict(group_configs.get(str(row["task_group"]), {}) or {})
+        reuse_ifno_forward = (
+            row.get("baseline") == "ifno"
+            and row.get("task_group") == "full_inverse_main"
+            and row.get("task") == "inverse"
+        )
+        source_group = str(
+            group_cfg.get(
+                "source_task_group",
+                "full_forward_main" if reuse_ifno_forward else "",
+            )
+        )
+        source_task = str(
+            group_cfg.get("source_task", "forward" if reuse_ifno_forward else "")
+        )
+        if not source_group or not source_task:
+            raise ValueError(
+                f"eval-only task group {row['task_group']!r} must define "
+                "source_task_group and source_task"
+            )
+        candidates = [
+            candidate
+            for candidate in rows
+            if candidate.get("execution_mode") == "train"
+            and candidate.get("task_group") == source_group
+            and candidate.get("task") == source_task
+            and candidate.get("baseline") == row.get("baseline")
+            and candidate.get("pde") == row.get("pde")
+            and candidate.get("seed") == row.get("seed")
+            and candidate.get("train_size") == row.get("train_size")
+            and candidate.get("val_size") == row.get("val_size")
+            and candidate.get("train_shards") == row.get("train_shards")
+            and candidate.get("batch_size") == row.get("batch_size")
+            and candidate.get("epochs") == row.get("epochs")
+            and candidate.get("baseline_config_sha256")
+            == row.get("baseline_config_sha256")
+            and candidate.get("data_content_sha256") == row.get("data_content_sha256")
+        ]
+        if len(candidates) != 1:
+            raise ValueError(
+                f"eval-only row {row['task_group']}/{row['baseline']}/{row['pde']}/seed={row['seed']} "
+                f"requires exactly one source row in {source_group!r}, found {len(candidates)}"
+            )
+        source = candidates[0]
+        checkpoint_path, checkpoint_sha256, reason = _validated_source_checkpoint(source)
+        if not checkpoint_path:
+            checkpoint_path = str(
+                Path(str(source["output_dir"])) / f"{source['run_id']}.pt"
+            )
+            checkpoint_sha256 = DEPENDENCY_PENDING_SHA256
+        row.update(
+            {
+                "source_train_run_id": source["run_id"],
+                "source_train_run_fingerprint": source["run_fingerprint"],
+                "source_train_task": source["task"],
+                "source_train_baseline_code_sha256": source[
+                    "baseline_code_sha256"
+                ],
+                "source_train_seed": source["seed"],
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_sha256": checkpoint_sha256,
+                "dependency_run_id": source["run_id"],
+                "dependency_pending": bool(reason),
+                "dependency_reason": reason,
+            }
+        )
+        row["run_fingerprint"] = run_fingerprint(row)
+        row["run_id"] = _run_id(row)
+        row["run_name"] = _run_name(row)
+        row["output_dir"] = str(_run_output_dir(output_root, matrix_name, row))
+        row["log_dir"] = str(_run_log_dir(output_root, matrix_name, row))
+        row["status_file"] = str(Path(row["output_dir"]) / "run.status.json")
+        bound.append(row)
+    return bound
+
+
+def _validated_source_checkpoint(
+    source: dict[str, Any],
+) -> tuple[str, str, str]:
+    summary_path = Path(str(source.get("output_dir", ""))) / "summary.json"
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "", "", "source summary is not available"
+    if not isinstance(summary, dict):
+        return "", "", "source summary is not an object"
+    reasons = summary_validation_reasons(source, summary)
+    if reasons:
+        return "", "", "source run is incomplete: " + ",".join(reasons)
+    checkpoint_path = str(summary.get("checkpoint_path", "") or "")
+    checkpoint_sha256 = str(summary.get("checkpoint_sha256", "") or "")
+    if not checkpoint_path or not checkpoint_sha256:
+        return "", "", "source summary has no checkpoint"
+    return checkpoint_path, checkpoint_sha256, ""
 
 
 def _validate_output_root_revision_safety(output_root: str | Path) -> None:
@@ -976,15 +1195,36 @@ def _make_run_row(
         device=str(defaults["device"]),
         seed=seed,
     )
+    reuse_ifno_forward = (
+        baseline == "ifno"
+        and task_group == "full_inverse_main"
+        and task == "inverse"
+    )
+    execution_mode = str(
+        group_cfg.get("execution_mode", "eval_only" if reuse_ifno_forward else "train")
+    )
+    if execution_mode not in {"train", "eval_only"}:
+        raise ValueError(
+            f"task group {task_group!r} has unsupported execution_mode={execution_mode!r}"
+        )
+    source_task = str(
+        group_cfg.get("source_task", "forward" if reuse_ifno_forward else "")
+    )
     row: dict[str, Any] = {
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
         "summary_schema_version": SUMMARY_SCHEMA_VERSION,
         "run_id": "",
         "run_fingerprint": "",
         "run_name": "",
-        "execution_mode": "train",
-        "source_train_run_id": "",
-        "source_train_run_fingerprint": "",
+        "execution_mode": execution_mode,
+        "source_train_run_id": "pending" if execution_mode == "eval_only" else "",
+        "source_train_run_fingerprint": DEPENDENCY_PENDING_SHA256 if execution_mode == "eval_only" else "",
+        "source_train_task": source_task if execution_mode == "eval_only" else "",
+        "source_train_baseline_code_sha256": (
+            baseline_code_sha256(baseline, root=ROOT)
+            if execution_mode == "eval_only"
+            else ""
+        ),
         "comparison_track": comparison_track,
         "experiment_kind": experiment_kind,
         "ablation_factor": ablation_factor,
@@ -1013,7 +1253,7 @@ def _make_run_row(
         "baseline": baseline,
         "seed": seed,
         "sensor_seed": _env_int("SENSOR_SEED", int(group_cfg.get("sensor_seed", cfg.get("sensor_seed", seed)))),
-        "source_train_seed": "",
+        "source_train_seed": seed if execution_mode == "eval_only" else "",
         "train_size": train_size,
         "val_size": val_size,
         "test_size": test_size,
@@ -1048,7 +1288,10 @@ def _make_run_row(
         "experiment_config_sha256": experiment_config_sha256,
         "data_content_sha256": data_content_digest,
         "checkpoint_path": "",
-        "checkpoint_sha256": "",
+        "checkpoint_sha256": DEPENDENCY_PENDING_SHA256 if execution_mode == "eval_only" else "",
+        "dependency_run_id": "",
+        "dependency_pending": execution_mode == "eval_only",
+        "dependency_reason": "source training checkpoint is not available" if execution_mode == "eval_only" else "",
         "output_dir": "",
         "log_dir": "",
         "status_file": "",
@@ -1482,6 +1725,8 @@ def main(argv: list[str] | None = None) -> None:
         f"comparison_track={cfg.get('comparison_track', 'unified_adapted')} "
         f"task_groups={_short_list(task_groups)}"
     )
+    existing_matrix_path = _output_paths(args.output_root, matrix_name)["jsonl"]
+    resume_rows = _read_jsonl(existing_matrix_path)
     rows, skipped, summary = build_matrix(
         cfg,
         args.output_root,
@@ -1490,6 +1735,7 @@ def main(argv: list[str] | None = None) -> None:
         emit_progress=True,
         data_manifest=args.data_manifest or None,
         experiment_config_path=args.config,
+        resume_rows=resume_rows,
     )
     write_outputs(rows, skipped, summary, args.output_root, matrix_name)
     output_paths = _output_paths(args.output_root, matrix_name)

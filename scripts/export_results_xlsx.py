@@ -48,6 +48,8 @@ PROVENANCE_COLUMNS = [
     "eval_only",
     "source_train_run_id",
     "source_train_run_fingerprint",
+    "source_train_task",
+    "source_train_baseline_code_sha256",
     "source_train_seed",
     "run_id",
     "run_fingerprint",

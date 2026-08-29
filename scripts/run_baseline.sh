@@ -124,7 +124,24 @@ runner_args=(
 if [ "$RERUN_RUNNING" = "1" ]; then
   runner_args+=(--rerun-running)
 fi
-run_cmd "${runner_args[@]}"
+runner_failed=0
+run_cmd "${runner_args[@]}" || runner_failed=1
+
+# A fresh matrix may contain eval-only rows waiting for their source training
+# checkpoints. Rebuild once after the training/resume pass so completed source
+# summaries are bound to those rows, then launch only the newly ready work.
+log "step 3/5: resolve checkpoint dependencies and resume eval-only rows"
+run_cmd "$PYTHON_BIN" scripts/build_experiment_matrix.py \
+  --config "$CONFIG" \
+  --matrix-name "$MATRIX_NAME" \
+  --output-root "$OUT_ROOT" \
+  --data-manifest "$DATA_REPORT"
+run_cmd "${runner_args[@]}" || runner_failed=1
+
+if [ "$runner_failed" = "1" ]; then
+  log "one or more experiment rows failed; completed rows and resolved evaluations were preserved"
+  exit 1
+fi
 
 log "step 4/5: collect complete results"
 collector_args=(

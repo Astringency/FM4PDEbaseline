@@ -21,8 +21,8 @@ task_groups:
   - sparse_inverse_main
 task_group_overrides:
   full_forward_main:
-    pdes: [darcy, helmholtz]
-    baselines: [fno]
+    pdes: [poisson, helmholtz]
+    baselines: [fno, ifno]
     num_sensors: 0
     sensor_mode: none
     noise_level: 0.0

@@ -75,6 +75,10 @@ EVAL_FINGERPRINT_FIELDS = (
     "source_train_seed",
     "checkpoint_sha256",
 )
+EVAL_SOURCE_IDENTITY_FIELDS = (
+    "source_train_task",
+    "source_train_baseline_code_sha256",
+)
 OPTIONAL_FINGERPRINT_FIELDS = ("data_files",)
 
 SUMMARY_IDENTITY_FIELDS = ("task_group", "task", "pde", "baseline", "seed")
@@ -726,9 +730,17 @@ def run_fingerprint(row: Mapping[str, Any]) -> str:
     fields.extend(field for field in OPTIONAL_FINGERPRINT_FIELDS if field in row)
     if row.get("execution_mode") == "eval_only":
         fields.extend(EVAL_FINGERPRINT_FIELDS)
+        if any(row.get(field) not in {None, ""} for field in EVAL_SOURCE_IDENTITY_FIELDS):
+            fields.extend(EVAL_SOURCE_IDENTITY_FIELDS)
     missing = [field for field in FINGERPRINT_FIELDS if field not in row]
     if row.get("execution_mode") == "eval_only":
         missing.extend(field for field in EVAL_FINGERPRINT_FIELDS if row.get(field) in {None, ""})
+        if any(row.get(field) not in {None, ""} for field in EVAL_SOURCE_IDENTITY_FIELDS):
+            missing.extend(
+                field
+                for field in EVAL_SOURCE_IDENTITY_FIELDS
+                if row.get(field) in {None, ""}
+            )
     if missing:
         raise ValueError(f"cannot fingerprint matrix row; missing fields: {missing}")
     return canonical_sha256({field: row[field] for field in fields})
@@ -882,6 +894,12 @@ def summary_validation_reasons(row: Mapping[str, Any], summary: Mapping[str, Any
                 reasons.append(f"summary_missing:{field}")
             elif row.get(field) not in {None, ""} and summary.get(field) != row.get(field):
                 reasons.append(f"summary_mismatch:{field}")
+        if any(row.get(field) not in {None, ""} for field in EVAL_SOURCE_IDENTITY_FIELDS):
+            for field in EVAL_SOURCE_IDENTITY_FIELDS:
+                if summary.get(field) in {None, ""}:
+                    reasons.append(f"summary_missing:{field}")
+                elif summary.get(field) != row.get(field):
+                    reasons.append(f"summary_mismatch:{field}")
     requires_training_checkpoint = bool(
         formal_data_contract
         and execution_mode == "train"
