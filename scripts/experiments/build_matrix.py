@@ -159,34 +159,55 @@ DEPENDENCY_PENDING_SHA256 = "0" * 64
 RESUME_IDENTITY_FIELDS = tuple(
     field for field in FINGERPRINT_FIELDS if field != "baseline_code_sha256"
 )
-# One-time compatibility bridge for the completed cohort produced immediately
-# before inverse evaluation was changed to reuse the bidirectional iFNO forward
-# checkpoint.  Those source files are the clean HEAD inputs to this migration;
-# limiting the exception to their exact digests ensures future training-code
-# changes still invalidate the affected rows normally.
+# Compatibility bridge for completed cohorts across the inverse-checkpoint and
+# evaluation-resume migrations. These changes affect orchestration/evaluation,
+# not fitted model state. Limiting the exception to exact before/after digests
+# ensures future training-code changes still invalidate affected rows normally.
 INVERSE_REUSE_MIGRATION_CODE_SHA256 = {
     "4edf9ce579e62f0a8afd7616d064b272086daeb950c5e7590202a70940c7ca10":
-        "e4185f35320beeb0f210d1e9ae9301d04ef1510c775e34d1c1276fa94a112a9b",
+        "8aecf00b56eb01dc0924fea0478350ff064d076116be726662e55f27087411aa",
+    "e4185f35320beeb0f210d1e9ae9301d04ef1510c775e34d1c1276fa94a112a9b":
+        "8aecf00b56eb01dc0924fea0478350ff064d076116be726662e55f27087411aa",
     "4a568785cd8658fab71db0845e6a3f2d9bb643475dc07e617ec2b9b733610e8e":
-        "4e66c4d070f282059838579a460cd16963590fd704559851b21871618bafe1b7",
+        "b68c154026fa03b73c9bb213207fb0a2c375daeda8439bfdb2be47a25ca78e58",
+    "4e66c4d070f282059838579a460cd16963590fd704559851b21871618bafe1b7":
+        "b68c154026fa03b73c9bb213207fb0a2c375daeda8439bfdb2be47a25ca78e58",
     "ee2c58e7d2737f6d3b520248c90a03164f1c4ab0fbc414a38a00936beaf5bcbf":
-        "e7ab63c7b3a26c7b2e3e20afc102f1faaad8235c27e0bde088081418bea5d525",
+        "6c2c1a769c6c4d8da4bbd4bbd4d0494cc931c73aff77f9b58158e74662081fe4",
+    "e7ab63c7b3a26c7b2e3e20afc102f1faaad8235c27e0bde088081418bea5d525":
+        "6c2c1a769c6c4d8da4bbd4bbd4d0494cc931c73aff77f9b58158e74662081fe4",
     "3d8b8127c99eb40e043383e13e588f45c10396f8ae22a34991b18d063f8e210c":
-        "514375a8d32e97c7df542d82d05cd1cc9dd1de48170cd7c87807a7e93e53e30b",
+        "c1fbde9489c8e5010217bf553243dba10cc63b014118b2ed3d441ac3a0328541",
+    "514375a8d32e97c7df542d82d05cd1cc9dd1de48170cd7c87807a7e93e53e30b":
+        "c1fbde9489c8e5010217bf553243dba10cc63b014118b2ed3d441ac3a0328541",
     "7866332069fe38fee9ca87fceca82762d1d4434de1bf633355f3456fe2e84226":
-        "a60d0df14c54a1786078c8b7e65a4bf8965cf55f6b3da3f4e5212a980c98a02d",
+        "9da5d1e68cf462ce253e5ab31878166846d2325c7297c8b2c5e339c81ea7c4f9",
+    "a60d0df14c54a1786078c8b7e65a4bf8965cf55f6b3da3f4e5212a980c98a02d":
+        "9da5d1e68cf462ce253e5ab31878166846d2325c7297c8b2c5e339c81ea7c4f9",
     "9e8599e914d59497aab854245b65ef275532bd9f2f0217495c7bc6b20e5d97f4":
-        "e1d5f4fb8bfacb72c8964597e5870f3e2ec96e365a39b88b1343173b385da482",
+        "c14dea4277e6bf38a52c64ab70de3a2bc040d481d38b88d8241fa5200b7c7743",
+    "e1d5f4fb8bfacb72c8964597e5870f3e2ec96e365a39b88b1343173b385da482":
+        "c14dea4277e6bf38a52c64ab70de3a2bc040d481d38b88d8241fa5200b7c7743",
     "fefa36f8c90cec82103dd57a4f1afb7be7783cb55df3b0efc924da47556d75ef":
-        "abe71061bb24048e5649bfcc8fa048e5b236792c4b550ff9315dbb5c5f8ed752",
+        "d7404e8d8e83d78b438dc8c61d8f66e48a0c06ec736cb6512bd0a68496f68767",
+    "abe71061bb24048e5649bfcc8fa048e5b236792c4b550ff9315dbb5c5f8ed752":
+        "d7404e8d8e83d78b438dc8c61d8f66e48a0c06ec736cb6512bd0a68496f68767",
     "54c8dbfe34973b008f7bfdf27e12acfd32a619a5a785528438177cfb6e07cb4b":
-        "5d828173a3e30fcf8d98b2000d5e6e2e0c1889431c0a6d5e4bb8866afe49e5f4",
+        "b67878c254cb8cb42eb7a1fc439c9e66d410303c0e2527261b34960bdb11244a",
+    "5d828173a3e30fcf8d98b2000d5e6e2e0c1889431c0a6d5e4bb8866afe49e5f4":
+        "b67878c254cb8cb42eb7a1fc439c9e66d410303c0e2527261b34960bdb11244a",
     "e53691458b57cbaa14d656769c59d43118a8a73ad833a333c7db1a147d138055":
-        "488a9f5753b3751eda2cc53e3d5978c9ac8479f304035a7a5f83296dd23d64f2",
+        "f4485388d8962eb4422ad0fa3bfbdbb882c9f09898b41850cd46cb300acad0d2",
+    "488a9f5753b3751eda2cc53e3d5978c9ac8479f304035a7a5f83296dd23d64f2":
+        "f4485388d8962eb4422ad0fa3bfbdbb882c9f09898b41850cd46cb300acad0d2",
     "2cf7aca50f94bac68e5603c8205eb3e09b205c5dcb661ed1ce0595379315ca1c":
-        "4849bcda18c84356bff6812516ada404c593c7542010d71faffd051d5f7b6825",
+        "e8a1197a8baa166f72d4482ec18b557ddbe52a981cc8ee3c971ae7bccb9042a1",
+    "4849bcda18c84356bff6812516ada404c593c7542010d71faffd051d5f7b6825":
+        "e8a1197a8baa166f72d4482ec18b557ddbe52a981cc8ee3c971ae7bccb9042a1",
     "5da54a3181116a7f6834e262d7d1ff2630e0bd18e82b6ae22489feeb80885aff":
-        "88252df6d11dc6b0538f6671c31838b19f8db0855a0b9114f3379327c070952b",
+        "260daa268f8d8ddab72d15eb7814e12514838de83e7a380ada890702316e481c",
+    "88252df6d11dc6b0538f6671c31838b19f8db0855a0b9114f3379327c070952b":
+        "260daa268f8d8ddab72d15eb7814e12514838de83e7a380ada890702316e481c",
 }
 
 MATRIX_FIELDS = [

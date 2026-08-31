@@ -237,6 +237,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_false",
         help="Disable per-sample artifacts in non-paper diagnostic runs.",
     )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume-eval",
+        dest="resume_eval",
+        action="store_true",
+        help="Resume an incomplete test evaluation from its committed results_raw.jsonl batch prefix.",
+    )
+    resume_group.add_argument(
+        "--no-resume-eval",
+        dest="resume_eval",
+        action="store_false",
+        help="Discard incomplete evaluation outputs and evaluate the test split from the beginning (default).",
+    )
+    parser.set_defaults(resume_eval=False)
     return parser.parse_args(argv)
 
 
@@ -430,6 +444,8 @@ def main(argv: list[str] | None = None) -> None:
     method_cfg["run_prefix"] = run_prefix
     method_cfg["train_history_json_path"] = str(out_dir / f"{run_prefix}_train_history.json")
     method_cfg["train_history_jsonl_path"] = str(out_dir / f"{run_prefix}_train_history.jsonl")
+    if not args.resume_eval:
+        _reset_evaluation_outputs(out_dir, args)
     capability = resolve_capability(
         args.baseline,
         args.pde,
@@ -1359,6 +1375,197 @@ def _make_split_dataset(
     )
 
 
+def _evaluation_artifact_dir(out_dir: Path, args: argparse.Namespace) -> Path:
+    artifact_name = f"{_run_file_prefix(args)}_samples" if str(getattr(args, "run_id", "")) else "samples"
+    return out_dir / artifact_name
+
+
+def _reset_evaluation_outputs(out_dir: Path, args: argparse.Namespace) -> None:
+    """Remove only evaluation products when a clean (non-resume) run is requested."""
+    run_prefix = _run_file_prefix(args)
+    if args.run_id:
+        _remove_jsonl_run_rows(out_dir / "results_raw.jsonl", str(args.run_id))
+        _remove_jsonl_run_rows(out_dir / "results_summary.jsonl", str(args.run_id))
+        _remove_csv_run_rows(out_dir / "results_summary.csv", str(args.run_id))
+        paths = [
+            out_dir / "summary.json",
+            out_dir / f"{run_prefix}_summary.json",
+            out_dir / f"{run_prefix}_results_summary_latest.csv",
+        ]
+    else:
+        paths = [
+            out_dir / "results_raw.jsonl",
+            out_dir / "results_summary.jsonl",
+            out_dir / "results_summary.csv",
+            out_dir / "summary.json",
+            out_dir / "results_summary_latest.csv",
+        ]
+    for path in paths:
+        path.unlink(missing_ok=True)
+    artifact_dir = _evaluation_artifact_dir(out_dir, args)
+    if artifact_dir.is_dir():
+        shutil.rmtree(artifact_dir)
+
+
+def _remove_jsonl_run_rows(path: Path, run_id: str) -> None:
+    if not path.is_file():
+        return
+    retained: list[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                _run_stage("eval_reset", "trimmed_invalid_tail", path=path, line=line_number)
+                break
+            if not isinstance(row, dict) or str(row.get("run_id", "")) != run_id:
+                retained.append(line if line.endswith("\n") else line + "\n")
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text("".join(retained), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _remove_csv_run_rows(path: Path, run_id: str) -> None:
+    if not path.is_file():
+        return
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        retained = [row for row in reader if str(row.get("run_id", "")) != run_id]
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as handle:
+        if fieldnames:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(retained)
+    temporary.replace(path)
+
+
+def _rewrite_result_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    payload = "".join(json.dumps(_json_safe(row), sort_keys=True) + "\n" for row in rows)
+    temporary.write_text(payload, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _resume_identity_error(
+    row: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    test_size: int,
+    checkpoint_sha256: str,
+) -> str:
+    expected = {
+        "baseline": str(args.baseline),
+        "pde": str(args.pde),
+        "task": str(args.task),
+        "seed": int(args.seed),
+        "sensor_seed": int(getattr(args, "sensor_seed", args.seed)),
+        "run_id": str(getattr(args, "run_id", "")),
+        "execution_mode": str(getattr(args, "execution_mode", "")),
+        "eval_only": bool(getattr(args, "eval_only", False)),
+        "test_size": int(test_size),
+        "test_requested_size": int(args.test_size),
+        "batch_size": int(args.batch_size),
+        "metric_granularity": str(args.physics_metric_mode),
+        "checkpoint_sha256": str(checkpoint_sha256),
+        "config_content_sha256": str(getattr(args, "config_content_sha256", "")),
+        "baseline_config_sha256": str(getattr(args, "baseline_config_sha256", "")),
+        "baseline_code_sha256": str(getattr(args, "baseline_code_sha256", "")),
+        "data_content_sha256": str(getattr(args, "data_content_sha256", "")),
+    }
+    for field, value in expected.items():
+        if row.get(field) != value:
+            return f"{field}: stored={row.get(field)!r}, requested={value!r}"
+    try:
+        stored_data_files = json.loads(str(row.get("data_files_json", "")))
+    except json.JSONDecodeError:
+        return "data_files_json is invalid"
+    if stored_data_files != (getattr(args, "data_files", None) or {}):
+        return "data_files_json does not match the requested train/test files"
+    return ""
+
+
+def _load_evaluation_resume_rows(
+    raw_path: Path,
+    args: argparse.Namespace,
+    *,
+    test_size: int,
+    checkpoint_sha256: str,
+) -> list[dict[str, Any]]:
+    if not bool(getattr(args, "resume_eval", False)) or not raw_path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    prefix_was_trimmed = False
+    with raw_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                prefix_was_trimmed = True
+                break
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                prefix_was_trimmed = True
+                break
+            if not isinstance(row, dict):
+                prefix_was_trimmed = True
+                break
+            expected_batch_index = len(rows)
+            if row.get("batch_index") != expected_batch_index:
+                # Old interrupted reruns appended a second 0..N prefix. Keep the
+                # first committed prefix and discard everything after it.
+                prefix_was_trimmed = True
+                break
+            mismatch = _resume_identity_error(
+                row,
+                args,
+                test_size=test_size,
+                checkpoint_sha256=checkpoint_sha256,
+            )
+            if mismatch:
+                raise ValueError(
+                    f"Cannot resume evaluation from {raw_path} line {line_number}: {mismatch}. "
+                    "Use --no-resume-eval for a clean restart."
+                )
+            sample_count = int(row.get("sample_count", 0) or 0)
+            if sample_count <= 0:
+                prefix_was_trimmed = True
+                break
+            try:
+                sample_ids = json.loads(str(row.get("global_sample_ids", "")))
+            except json.JSONDecodeError:
+                prefix_was_trimmed = True
+                break
+            if not isinstance(sample_ids, list) or len(sample_ids) != sample_count:
+                prefix_was_trimmed = True
+                break
+            rows.append(row)
+    if prefix_was_trimmed:
+        _rewrite_result_jsonl(raw_path, rows)
+        _run_stage("eval_resume", "trimmed_invalid_tail", retained_batches=len(rows))
+    return rows
+
+
+def _resumed_sample_ids(rows: list[dict[str, Any]]) -> list[Any]:
+    sample_ids: list[Any] = []
+    for row in rows:
+        sample_ids.extend(json.loads(str(row["global_sample_ids"])))
+    return sample_ids
+
+
+def _validate_resumed_batch(row: dict[str, Any], batch: PDEBatch, batch_index: int) -> None:
+    stored_ids = json.loads(str(row["global_sample_ids"]))
+    current_ids = _json_safe(list(batch.global_sample_ids))
+    if int(row["sample_count"]) != int(batch.target_fields.shape[0]) or stored_ids != current_ids:
+        raise ValueError(
+            "Cannot resume evaluation because the current test loader does not match "
+            f"the committed batch {batch_index}. Use --no-resume-eval for a clean restart."
+        )
+
+
 def _evaluate_full_test_loader(
     model,
     loader,
@@ -1383,9 +1590,6 @@ def _evaluate_full_test_loader(
     model.eval()
     sensor_seed = int(getattr(args, "sensor_seed", args.seed))
     source_train_seed = int(getattr(args, "source_train_seed", args.seed))
-    rows: list[dict[str, Any]] = []
-    inference_time_total = 0.0
-    inference_optimization_time_total = 0.0
     raw_path = out_dir / "results_raw.jsonl"
     grad_enabled = args.baseline in {"pinn_sparse", "pc_bnn", "pde_opt", "var4d", "vivid"}
     per_instance = bool(split_info.get("per_instance_baseline", False))
@@ -1393,11 +1597,34 @@ def _evaluate_full_test_loader(
     reported_train_size = int(split_info["effective_train_size"]) if amortized_training else 0
     checkpoint_sha256 = _file_sha256(Path(checkpoint_path)) if checkpoint_path else ""
     checkpoint_provenance = dict(getattr(model, "provenance", {}) or {})
+    rows = _load_evaluation_resume_rows(
+        raw_path,
+        args,
+        test_size=len(test_dataset),
+        checkpoint_sha256=checkpoint_sha256,
+    )
+    resumed_batch_count = len(rows)
+    resumed_sample_ids = _resumed_sample_ids(rows)
+    inference_time_total = sum(float(row.get("inference_time", 0.0) or 0.0) for row in rows)
+    inference_optimization_time_total = sum(
+        float(row.get("inference_optimization_time", 0.0) or 0.0) for row in rows
+    )
+    if resumed_batch_count:
+        _run_stage(
+            "eval_resume",
+            "loaded",
+            batches=resumed_batch_count,
+            samples=len(resumed_sample_ids),
+        )
+    if resumed_batch_count > len(loader):
+        raise ValueError(
+            f"Cannot resume evaluation: results_raw.jsonl has {resumed_batch_count} batches, "
+            f"but the current test loader has only {len(loader)}. Use --no-resume-eval for a clean restart."
+        )
     artifact_writer: EvaluationArtifactWriter | None = None
     if bool(getattr(args, "save_sample_artifacts", True)):
-        artifact_name = f"{_run_file_prefix(args)}_samples" if str(getattr(args, "run_id", "")) else "samples"
         artifact_writer = EvaluationArtifactWriter(
-            out_dir / artifact_name,
+            _evaluation_artifact_dir(out_dir, args),
             run_metadata={
                 "run_id": str(getattr(args, "run_id", "")),
                 "run_fingerprint": str(getattr(args, "run_fingerprint", "")),
@@ -1407,6 +1634,7 @@ def _evaluate_full_test_loader(
                 "seed": int(args.seed),
                 "sensor_seed": sensor_seed,
             },
+            resume_sample_ids=resumed_sample_ids,
         )
     provenance_fields = {
         "matrix_schema_version": int(getattr(args, "matrix_schema_version", MATRIX_SCHEMA_VERSION)),
@@ -1453,6 +1681,9 @@ def _evaluate_full_test_loader(
         "checkpoint_sha256": checkpoint_sha256,
     }
     for batch_index, batch in enumerate(loader):
+        if batch_index < resumed_batch_count:
+            _validate_resumed_batch(rows[batch_index], batch, batch_index)
+            continue
         _synchronize_device(args.device)
         start = time.perf_counter()
         eval_batch = _to_device_batch_for_eval(_make_inference_batch(batch), args.device)
@@ -1672,6 +1903,12 @@ def _evaluate_full_test_loader(
         append_result_jsonl(raw_path, _json_safe(row))
         inference_time_total += elapsed
         inference_optimization_time_total += inf_opt
+    evaluated_sample_count = sum(int(row.get("sample_count", 0) or 0) for row in rows)
+    if evaluated_sample_count != len(test_dataset):
+        raise RuntimeError(
+            f"Evaluation produced {evaluated_sample_count} sample results for a test dataset of "
+            f"size {len(test_dataset)}"
+        )
     artifact_fields: dict[str, Any] = {}
     if artifact_writer is not None:
         artifact_writer.finalize()
@@ -1679,6 +1916,9 @@ def _evaluate_full_test_loader(
     return rows, {
         "inference_time_total": inference_time_total,
         "inference_optimization_time_total": inference_optimization_time_total,
+        "evaluation_resumed": bool(resumed_batch_count),
+        "resumed_batch_count": resumed_batch_count,
+        "resumed_sample_count": len(resumed_sample_ids),
         **artifact_fields,
     }
 
@@ -1934,6 +2174,9 @@ def _summarize_run(
         "inference_time_per_sample": eval_totals["inference_time_total"] / max(len(test_dataset), 1),
         "inference_optimization_time_total": eval_totals["inference_optimization_time_total"],
         "inference_optimization_time_per_sample": eval_totals["inference_optimization_time_total"] / max(len(test_dataset), 1),
+        "evaluation_resumed": bool(eval_totals.get("evaluation_resumed", False)),
+        "resumed_batch_count": int(eval_totals.get("resumed_batch_count", 0) or 0),
+        "resumed_sample_count": int(eval_totals.get("resumed_sample_count", 0) or 0),
         "optimization_steps_completed_total": int(sum(int(row.get("optimization_steps_completed", 0) or 0) for row in rows)),
         "optimization_function_evaluations_total": int(
             sum(int(row.get("optimization_function_evaluations", 0) or 0) for row in rows)

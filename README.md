@@ -189,7 +189,11 @@ bash scripts/run_eval.sh --distribution rough --no-save-samples
 explicit replacement file remains supported with `--pde NAME --test-file
 PATH`. The default test size is 1000, matching the main matrix. Evaluation
 outputs are kept under `runs/evaluations/<distribution-or-tag>` and completed
-rows are skipped on resume.
+rows are skipped on resume. Resume is enabled by default (`RESUME=1`): an
+incomplete row validates `results_raw.jsonl` and the saved-sample manifest,
+skips their committed batch prefix, and evaluates only the remaining samples.
+Use `RESUME=0` or `--no-resume` to discard partial evaluation products and
+restart each selected row cleanly.
 
 The commands below show the equivalent manual workflow.
 

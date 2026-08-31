@@ -29,6 +29,7 @@ class EvaluationArtifactWriter:
         artifact_dir: str | Path,
         *,
         run_metadata: Mapping[str, Any],
+        resume_sample_ids: Sequence[Any] | None = None,
     ) -> None:
         self.artifact_dir = Path(artifact_dir)
         self.manifest_path = self.artifact_dir / "manifest.jsonl"
@@ -36,7 +37,55 @@ class EvaluationArtifactWriter:
         self._sample_count = 0
         self._finalized = False
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text("", encoding="utf-8")
+        if resume_sample_ids:
+            self._resume_manifest(resume_sample_ids)
+        else:
+            self.manifest_path.write_text("", encoding="utf-8")
+
+    def _resume_manifest(self, sample_ids: Sequence[Any]) -> None:
+        """Restore a committed manifest prefix for batch-level evaluation resume."""
+        expected_ids = [_safe_value(value) for value in sample_ids]
+        if not self.manifest_path.is_file():
+            raise ValueError(
+                f"Cannot resume {len(expected_ids)} saved samples: manifest is missing: "
+                f"{self.manifest_path}"
+            )
+        records: list[dict[str, Any]] = []
+        with self.manifest_path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if len(records) >= len(expected_ids):
+                    break
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Cannot resume sample artifacts: invalid manifest line {line_number}"
+                    ) from exc
+                ordinal = len(records)
+                if int(record.get("sample_ordinal", -1)) != ordinal:
+                    raise ValueError(
+                        "Cannot resume sample artifacts: manifest ordinals are not contiguous "
+                        f"at line {line_number}"
+                    )
+                if _safe_value(record.get("global_sample_id")) != expected_ids[ordinal]:
+                    raise ValueError(
+                        "Cannot resume sample artifacts: global sample IDs do not match "
+                        f"at ordinal {ordinal}"
+                    )
+                artifact_path = Path(str(record.get("artifact_path", "")))
+                if not artifact_path.is_file():
+                    raise ValueError(
+                        f"Cannot resume sample artifacts: artifact is missing: {artifact_path}"
+                    )
+                records.append(record)
+        if len(records) != len(expected_ids):
+            raise ValueError(
+                "Cannot resume sample artifacts: manifest contains "
+                f"{len(records)} committed samples, expected {len(expected_ids)}"
+            )
+        payload = "".join(json.dumps(record, sort_keys=True) + "\n" for record in records)
+        self.manifest_path.write_text(payload, encoding="utf-8")
+        self._sample_count = len(records)
 
     def __enter__(self) -> "EvaluationArtifactWriter":
         return self

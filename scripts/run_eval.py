@@ -250,6 +250,7 @@ def build_evaluation_run(
     device: str,
     save_samples: bool,
     train_root: Path,
+    resume: bool = True,
 ) -> EvaluationRun:
     baseline = str(row["baseline"])
     pde = str(row["pde"])
@@ -382,6 +383,7 @@ def build_evaluation_run(
         "--ablation-factor",
         "replacement_test",
         "--no-save-checkpoint",
+        "--resume-eval" if resume else "--no-resume-eval",
     ]
 
     if task.startswith("sparse"):
@@ -537,8 +539,60 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     sample_group.add_argument("--save-samples", dest="save_samples", action="store_true")
     sample_group.add_argument("--no-save-samples", dest="save_samples", action="store_false")
     parser.set_defaults(save_samples=env_bool("SAVE_SAMPLES", True))
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument("--resume", dest="resume", action="store_true")
+    resume_group.add_argument("--no-resume", dest="resume", action="store_false")
+    parser.set_defaults(resume=env_bool("RESUME", True))
     parser.add_argument("--dry-run", action="store_true", default=env_bool("DRY_RUN", False))
     return parser.parse_args(argv)
+
+
+def command_value(command: Sequence[str], flag: str) -> str:
+    try:
+        return command[command.index(flag) + 1]
+    except (ValueError, IndexError) as exc:
+        raise ValueError(f"evaluation command is missing {flag}") from exc
+
+
+def successful_summary(path: Path, evaluation: EvaluationRun) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(summary, dict) or summary.get("status") != "success":
+        return False
+    command = evaluation.command
+    expected = {
+        "baseline": command_value(command, "--baseline"),
+        "pde": command_value(command, "--pde"),
+        "task": command_value(command, "--task"),
+        "run_id": command_value(command, "--run-id"),
+        "seed": int(command_value(command, "--seed")),
+        "test_size": int(command_value(command, "--test-size")),
+        "test_requested_size": int(command_value(command, "--test-size")),
+        "batch_size": int(command_value(command, "--batch-size")),
+        "metric_granularity": command_value(command, "--physics-metric-mode"),
+        "execution_mode": command_value(command, "--execution-mode"),
+        "eval_only": "--eval-only" in command,
+    }
+    if any(summary.get(field) != value for field, value in expected.items()):
+        return False
+    try:
+        stored_data_files = json.loads(str(summary.get("data_files_json", "")))
+        requested_data_files = json.loads(command_value(command, "--data-files-json"))
+    except json.JSONDecodeError:
+        return False
+    if stored_data_files != requested_data_files:
+        return False
+    if "--save-sample-artifacts" in command:
+        manifest_path = Path(str(summary.get("sample_manifest_path", "")))
+        if int(summary.get("sample_artifact_count", 0) or 0) != expected["test_size"]:
+            return False
+        if not manifest_path.is_file():
+            return False
+    return True
 
 
 def validate_selection(requested: Sequence[str], available: Sequence[str], label: str) -> None:
@@ -671,7 +725,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     log(f"TEST_SIZE={args.test_size} TEST_FILES={json.dumps(test_files, sort_keys=True)}")
     log(
         f"EVAL_ROOT={eval_root} DEVICE={args.device} "
-        f"SAVE_SAMPLES={int(args.save_samples)} DRY_RUN={int(args.dry_run)}"
+        f"SAVE_SAMPLES={int(args.save_samples)} RESUME={int(args.resume)} "
+        f"DRY_RUN={int(args.dry_run)}"
     )
 
     lock_handle = None
@@ -706,12 +761,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 device=args.device,
                 save_samples=args.save_samples,
                 train_root=train_root,
+                resume=args.resume,
             )
         except (FileNotFoundError, ValueError) as exc:
             log(f"PENDING [{index}/{len(selected)}] {identity}: {exc}")
             pending += 1
             continue
-        if (evaluation.output_dir / "summary.json").is_file():
+        if args.resume and successful_summary(evaluation.output_dir / "summary.json", evaluation):
             log(f"SKIP completed [{index}/{len(selected)}] {identity}")
             completed += 1
             continue

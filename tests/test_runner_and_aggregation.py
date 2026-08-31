@@ -61,6 +61,100 @@ def test_runner_synthetic_full_test_loader_outputs_raw_and_summary(tmp_path: Pat
     assert summary["sample_manifest_path"] == str(sample_manifest)
     assert summary["sample_pdf_path"] == ""
 
+    # The default non-resume mode is a clean rerun, not an append into stale files.
+    subprocess.run(cmd, check=True, cwd=Path(__file__).resolve().parents[1])
+    assert len(raw_path.read_text(encoding="utf-8").splitlines()) == 2
+    assert len(summary_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_runner_resumes_committed_batches_without_duplicate_raw_rows(tmp_path: Path):
+    out = tmp_path / "resume"
+    cmd = [
+        sys.executable,
+        "-m",
+        "baselines.run",
+        "--baseline",
+        "fno",
+        "--pde",
+        "heat",
+        "--task",
+        "forward",
+        "--experiment-mode",
+        "smoke",
+        "--dry-run",
+        "--synthetic-data",
+        "--test-size",
+        "4",
+        "--train-size",
+        "8",
+        "--val-size",
+        "0",
+        "--batch-size",
+        "2",
+        "--output-dir",
+        str(out),
+        "--resume-eval",
+    ]
+    root = Path(__file__).resolve().parents[1]
+    subprocess.run(cmd, check=True, cwd=root, capture_output=True, text=True)
+
+    raw_path = out / "results_raw.jsonl"
+    first_batch = raw_path.read_text(encoding="utf-8").splitlines()[0]
+    raw_path.write_text(first_batch + "\n{\"truncated\":", encoding="utf-8")
+    for path in (
+        out / "summary.json",
+        out / "results_summary.jsonl",
+        out / "results_summary.csv",
+        out / "results_summary_latest.csv",
+    ):
+        path.unlink(missing_ok=True)
+
+    resumed = subprocess.run(cmd, check=True, cwd=root, capture_output=True, text=True)
+    raw_rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    manifest_rows = (out / "samples" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+
+    assert [row["batch_index"] for row in raw_rows] == [0, 1]
+    assert len(manifest_rows) == 4
+    assert summary["relative_l2_solution_n"] == 4
+    assert summary["evaluation_resumed"] is True
+    assert summary["resumed_batch_count"] == 1
+    assert summary["resumed_sample_count"] == 2
+    assert "eval_resume trimmed_invalid_tail retained_batches=1" in resumed.stderr
+    assert "eval_resume loaded batches=1 samples=2" in resumed.stderr
+
+
+def test_runner_resumes_when_sample_artifacts_are_disabled(tmp_path: Path):
+    out = tmp_path / "resume-no-samples"
+    cmd = [
+        sys.executable, "-m", "baselines.run",
+        "--baseline", "fno", "--pde", "heat", "--task", "forward",
+        "--experiment-mode", "smoke", "--dry-run", "--synthetic-data",
+        "--test-size", "3", "--train-size", "4", "--val-size", "0",
+        "--batch-size", "1", "--output-dir", str(out),
+        "--no-save-sample-artifacts", "--resume-eval",
+    ]
+    root = Path(__file__).resolve().parents[1]
+    subprocess.run(cmd, check=True, cwd=root, capture_output=True, text=True)
+    raw_path = out / "results_raw.jsonl"
+    first_row = raw_path.read_text(encoding="utf-8").splitlines()[0]
+    raw_path.write_text(first_row + "\n", encoding="utf-8")
+    for path in (
+        out / "summary.json",
+        out / "results_summary.jsonl",
+        out / "results_summary.csv",
+        out / "results_summary_latest.csv",
+    ):
+        path.unlink(missing_ok=True)
+
+    subprocess.run(cmd, check=True, cwd=root, capture_output=True, text=True)
+    rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert [row["batch_index"] for row in rows] == [0, 1, 2]
+    assert summary["relative_l2_solution_n"] == 3
+    assert summary["resumed_batch_count"] == 1
+    assert summary["sample_artifact_count"] == 0
+
 
 def test_aggregate_results_mean_std_ci_nan_and_residual_counts():
     rows = [

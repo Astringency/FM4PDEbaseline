@@ -8,6 +8,7 @@ from scripts.run_eval import (
     build_evaluation_run,
     filter_rows,
     split_selection,
+    successful_summary,
 )
 
 
@@ -111,6 +112,7 @@ def test_checkpoint_row_builds_eval_only_command(tmp_path: Path):
     assert _command_value(evaluation.command, "--checkpoint") == str(checkpoint)
     assert _command_value(evaluation.command, "--source-train-task") == "sparse_forward"
     assert "--eval-only" in evaluation.command
+    assert "--resume-eval" in evaluation.command
     assert "--no-save-sample-artifacts" in evaluation.command
     data_files = json.loads(_command_value(evaluation.command, "--data-files-json"))
     assert data_files == {
@@ -187,3 +189,45 @@ def test_ifno_inverse_uses_forward_checkpoint_identity(tmp_path: Path):
 
     assert _command_value(evaluation.command, "--source-train-run-id") == "forward-run"
     assert _command_value(evaluation.command, "--source-train-task") == "forward"
+
+
+def test_completed_summary_must_match_requested_evaluation(tmp_path: Path):
+    row = _row(baseline="pc_bnn", task="sparse_inverse", task_group="sparse_inverse_main")
+    evaluation = build_evaluation_run(
+        row,
+        {"status": "success", "checkpoint_path": ""},
+        tmp_path,
+        test_file="poisson/id.mat",
+        test_size=1000,
+        eval_root=tmp_path / "evaluations",
+        eval_tag="id",
+        data_root=tmp_path,
+        config=tmp_path / "paper.yaml",
+        python_bin="python",
+        device="cuda",
+        save_samples=False,
+        train_root=tmp_path,
+    )
+    summary_path = evaluation.output_dir / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary = {
+        "status": "success",
+        "baseline": "pc_bnn",
+        "pde": "poisson",
+        "task": "sparse_inverse",
+        "run_id": _command_value(evaluation.command, "--run-id"),
+        "seed": 1,
+        "test_size": 1000,
+        "test_requested_size": 1000,
+        "batch_size": 16,
+        "metric_granularity": "per_sample",
+        "execution_mode": "train",
+        "eval_only": False,
+        "data_files_json": _command_value(evaluation.command, "--data-files-json"),
+    }
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    assert successful_summary(summary_path, evaluation)
+
+    summary["test_size"] = 999
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    assert not successful_summary(summary_path, evaluation)
