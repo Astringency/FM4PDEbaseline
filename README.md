@@ -161,6 +161,36 @@ to render every evaluated sample, or set `PLOT_SAMPLES=0` to skip plotting. Use
 expensive because their L-BFGS-B optimization is performed separately for every
 test sample; `JOBS_PER_GPU=1` is the conservative starting point.
 
+### Evaluate alternate test distributions
+
+`scripts/run_eval.sh` reads the completed `main_results.jsonl` matrix, so it
+can select any of the 80 configured rows without guessing runs from directory
+names. `--distribution id|smooth|rough` resolves the matching test file for
+each selected PDE. Rows with reusable model state run in checkpoint-backed
+eval-only mode; PINN-Sparse, PDE-Opt, PC-BNN, Var4D, and VIVID rerun their
+original per-instance/training procedure with the same matrix budget.
+
+Preview all 80 rough-distribution evaluations without launching them:
+
+```bash
+DATA_ROOT=/absolute/path/to/PDEdata \
+FM_OUTPUT_ROOT=/absolute/path/to/outputs/FM4PDEbaseline \
+bash scripts/run_eval.sh --distribution rough --dry-run --no-save-samples
+```
+
+Use `BASELINE_LIST` (comma- or space-separated) to evaluate selected methods:
+
+```bash
+BASELINE_LIST=fno,ifno,recfno \
+bash scripts/run_eval.sh --distribution rough --no-save-samples
+```
+
+`PDE_LIST`, `TASKS`, and `TASK_GROUPS` provide additional filters. A single
+explicit replacement file remains supported with `--pde NAME --test-file
+PATH`. The default test size is 1000, matching the main matrix. Evaluation
+outputs are kept under `runs/evaluations/<distribution-or-tag>` and completed
+rows are skipped on resume.
+
 The commands below show the equivalent manual workflow.
 
 Set the data and output paths:
