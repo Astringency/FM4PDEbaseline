@@ -477,6 +477,8 @@ def build_evaluation_run(
             first_value(
                 row.get("source_train_baseline_code_sha256"),
                 summary.get("source_train_baseline_code_sha256"),
+                row.get("baseline_code_sha256"),
+                summary.get("baseline_code_sha256"),
             )
         )
         if source_code_sha256:

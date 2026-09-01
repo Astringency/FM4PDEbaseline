@@ -90,6 +90,7 @@ def test_checkpoint_row_builds_eval_only_command(tmp_path: Path):
         "status": "success",
         "checkpoint_path": str(checkpoint),
         "checkpoint_sha256": "b" * 64,
+        "baseline_code_sha256": "c" * 64,
     }
     evaluation = build_evaluation_run(
         row,
@@ -111,6 +112,10 @@ def test_checkpoint_row_builds_eval_only_command(tmp_path: Path):
     assert _command_value(evaluation.command, "--execution-mode") == "eval_only"
     assert _command_value(evaluation.command, "--checkpoint") == str(checkpoint)
     assert _command_value(evaluation.command, "--source-train-task") == "sparse_forward"
+    assert (
+        _command_value(evaluation.command, "--source-train-baseline-code-sha256")
+        == "c" * 64
+    )
     assert "--eval-only" in evaluation.command
     assert "--resume-eval" in evaluation.command
     assert "--no-save-sample-artifacts" in evaluation.command
@@ -167,6 +172,8 @@ def test_ifno_inverse_uses_forward_checkpoint_identity(tmp_path: Path):
         source_train_run_fingerprint="c" * 64,
         source_train_seed=1,
         source_train_task="forward",
+        source_train_baseline_code_sha256="d" * 64,
+        baseline_code_sha256="e" * 64,
         checkpoint_path=str(checkpoint),
         num_sensors=0,
         sensor_mode="none",
@@ -189,6 +196,10 @@ def test_ifno_inverse_uses_forward_checkpoint_identity(tmp_path: Path):
 
     assert _command_value(evaluation.command, "--source-train-run-id") == "forward-run"
     assert _command_value(evaluation.command, "--source-train-task") == "forward"
+    assert (
+        _command_value(evaluation.command, "--source-train-baseline-code-sha256")
+        == "d" * 64
+    )
 
 
 def test_completed_summary_must_match_requested_evaluation(tmp_path: Path):
