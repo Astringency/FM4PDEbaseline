@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+from openpyxl import load_workbook
 
 from scripts import build_experiment_matrix, collect_results, plot_results, run_experiments
 
@@ -212,40 +213,79 @@ def test_runner_waits_for_unresolved_checkpoint_dependencies(
     assert [item["run_id"] for item in report["selected"]] == ["ready"]
 
 
-def test_collect_results_calls_aggregate_and_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    run_dir = tmp_path / "runs" / "r1"
-    samples = run_dir / "samples"
-    samples.mkdir(parents=True)
-    (run_dir / "results_raw.jsonl").write_text("{}\n", encoding="utf-8")
-    manifest = samples / "manifest.jsonl"
-    manifest.write_text("{}\n", encoding="utf-8")
-    (run_dir / "summary.json").write_text(
-        json.dumps({"sample_manifest_path": str(manifest), "sample_pdf_path": ""}),
-        encoding="utf-8",
-    )
+def test_collect_results_writes_compact_summary_and_allows_execution_cohorts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    run_dirs = [tmp_path / "runs" / "train", tmp_path / "runs" / "eval"]
+    for run_dir, mode, rel_a, rel_u in (
+        (run_dirs[0], "train", None, 0.1),
+        (run_dirs[1], "eval_only", 0.2, None),
+    ):
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.json").write_text(
+            json.dumps(
+                {
+                    "task_group": "full_forward_main" if mode == "train" else "full_inverse_main",
+                    "pde": "poisson",
+                    "task": "forward" if mode == "train" else "inverse",
+                    "baseline": "ifno",
+                    "seed": 1,
+                    "execution_mode": mode,
+                    "test_size": 1000,
+                    "relative_l2_input_or_coeff_mean": rel_a,
+                    "relative_l2_input_or_coeff_std": 0.01 if rel_a is not None else None,
+                    "relative_l2_input_or_coeff_ci95": 0.001 if rel_a is not None else None,
+                    "relative_l2_input_or_coeff_n": 1000 if rel_a is not None else 0,
+                    "relative_l2_solution_mean": rel_u,
+                    "relative_l2_solution_std": 0.01 if rel_u is not None else None,
+                    "relative_l2_solution_ci95": 0.001 if rel_u is not None else None,
+                    "relative_l2_solution_n": 1000 if rel_u is not None else 0,
+                }
+            ),
+            encoding="utf-8",
+        )
     matrix = _write_matrix(
         tmp_path / "matrices" / "main_results.jsonl",
-        [{"run_id": "r1", "output_dir": str(run_dir)}],
+        [
+            {"run_id": "train", "output_dir": str(run_dirs[0])},
+            {"run_id": "eval", "output_dir": str(run_dirs[1])},
+        ],
     )
-    aggregate_calls: list[list[str]] = []
-    export_calls: list[dict] = []
-    monkeypatch.setattr(collect_results, "aggregate_main", lambda argv: aggregate_calls.append(argv))
     monkeypatch.setattr(
         collect_results,
         "collect_validated_results",
-        lambda rows: SimpleNamespace(records=rows, quarantine=[], missing_run_ids=[]),
-    )
-    monkeypatch.setattr(collect_results, "require_single_cohort", lambda _records: "cohort")
-    monkeypatch.setattr(
-        collect_results,
-        "export_results",
-        lambda rows, **kwargs: export_calls.append({"rows": rows, **kwargs}) or {"rows": 1},
+        lambda _rows: SimpleNamespace(
+            records=[
+                {"run_id": "train", "cohort_id": "training"},
+                {"run_id": "eval", "cohort_id": "evaluation"},
+            ],
+            quarantine=[],
+            missing_run_ids=[],
+        ),
     )
     out = tmp_path / "collected"
-    assert collect_results.main([str(matrix), "--output-dir", str(out)]) == 0
+    assert collect_results.main(
+        [str(matrix), "--output-dir", str(out), "--latex"]
+    ) == 0
 
-    assert aggregate_calls == [[str(run_dir / "results_raw.jsonl"), "--output-dir", str(out)]]
-    assert export_calls[0]["output"] == out / "results.xlsx"
+    rows = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert len(rows) == 2
+    assert list(rows[0]) == collect_results.COMPACT_COLUMNS
+    forward = next(row for row in rows if row["execution_mode"] == "train")
+    inverse = next(row for row in rows if row["execution_mode"] == "eval_only")
+    assert forward["relative_l2_a_mean"] == ""
+    assert forward["relative_l2_u_mean"] == pytest.approx(0.1)
+    assert inverse["relative_l2_a_mean"] == pytest.approx(0.2)
+    assert inverse["relative_l2_u_mean"] == ""
+    assert (out / "summary.csv").is_file()
+    assert (out / "latex_table.tex").is_file()
+    workbook = load_workbook(out / "results.xlsx", read_only=True, data_only=True)
+    assert workbook.sheetnames == ["results", "manifest"]
+    assert workbook["results"].max_row == 3
+    assert workbook["results"].max_column == len(collect_results.COMPACT_COLUMNS)
+    report = json.loads(capsys.readouterr().out)
+    assert report["cohort_count"] == 2
+    assert report["cohort_counts"] == {"evaluation": 1, "training": 1}
 
 
 def test_plot_results_renders_from_matrix_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -313,11 +353,7 @@ def test_collect_results_refuses_incomplete_matrix_before_writing_tables(
         tmp_path / "matrices" / "main_results.jsonl",
         [{"run_id": "missing", "output_dir": str(run_dir)}],
     )
-    aggregate_calls: list[list[str]] = []
-    monkeypatch.setattr(collect_results, "aggregate_main", lambda argv: aggregate_calls.append(argv))
-
     assert collect_results.main([str(matrix), "--output-dir", str(tmp_path / "aggregate")]) == 2
-    assert aggregate_calls == []
     assert not (tmp_path / "aggregate").exists()
 
 
