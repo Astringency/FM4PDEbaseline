@@ -31,6 +31,7 @@ from baselines.common.metrics import (
     obs_mse,
     physics_loss_metric,
 )
+from baselines.common.sensors import validate_condition_probabilities
 from baselines.common.sample_artifacts import EvaluationArtifactWriter
 from baselines.methods.deeponet import DeepONetBaseline
 from baselines.methods.fno import FNOBaseline
@@ -167,7 +168,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--execution-mode", choices=["train", "eval_only"], default=None)
     parser.add_argument("--task-protocol-version", default=DEFAULT_TASK_PROTOCOL_VERSION)
     parser.add_argument("--sensor-protocol-version", default=DEFAULT_SENSOR_PROTOCOL_VERSION)
-    parser.add_argument("--comparison-track", choices=["unified_adapted", "official_native"], default="unified_adapted")
+    parser.add_argument(
+        "--comparison-track",
+        choices=["unified_adapted", "official_native", "sparse_solution_multicondition"],
+        default="unified_adapted",
+    )
+    parser.add_argument(
+        "--condition-mode",
+        choices=["mixed", "a_only", "u_only", "both"],
+        default="mixed",
+        help="Modality view for sparse_solution_multicondition; training must use mixed.",
+    )
+    parser.add_argument(
+        "--condition-probabilities-json",
+        default="",
+        help="JSON mapping with a_only/u_only/both training probabilities.",
+    )
+    parser.add_argument(
+        "--train-only",
+        action="store_true",
+        help="For sparse_solution_multicondition phase A, save one checkpoint without test evaluation.",
+    )
     parser.add_argument("--source-train-run-id", default="", help="Training run identifier expected for eval-only checkpoints.")
     parser.add_argument(
         "--source-train-run-fingerprint",
@@ -259,6 +280,48 @@ def load_yaml(path: str | None) -> dict[str, Any]:
         return {}
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def _parse_condition_probabilities(value: str) -> dict[str, float]:
+    text = str(value or "").strip()
+    if not text:
+        return validate_condition_probabilities(None)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--condition-probabilities-json must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("--condition-probabilities-json must decode to an object")
+    return validate_condition_probabilities(payload)
+
+
+def _validate_multicondition_request(args: argparse.Namespace) -> None:
+    if args.task != "sparse_solution_multicondition":
+        if args.train_only:
+            raise ValueError("--train-only is reserved for sparse_solution_multicondition phase A")
+        return
+    if str(args.pde).lower() == "burger":
+        raise ValueError(
+            "sparse_solution_multicondition does not support Burgers trajectory semantics"
+        )
+    if str(args.pde).lower() not in {"poisson", "helmholtz", "darcy", "nsnonbounded"}:
+        raise ValueError(
+            "sparse_solution_multicondition supports only poisson, helmholtz, darcy, and nsnonbounded"
+        )
+    if args.baseline not in {"recfno", "senseiver", "voronoicnn"}:
+        raise ValueError(
+            "sparse_solution_multicondition supports only recfno, senseiver, and voronoicnn"
+        )
+    if args.eval_only and args.condition_mode == "mixed":
+        raise ValueError(
+            "sparse_solution_multicondition eval-only runs require condition_mode=a_only, u_only, or both"
+        )
+    if not args.eval_only and args.condition_mode != "mixed":
+        raise ValueError(
+            "sparse_solution_multicondition training must use condition_mode=mixed so one checkpoint supports all conditions"
+        )
+    if args.train_only and not args.save_checkpoint:
+        raise ValueError("sparse_solution_multicondition --train-only requires --save-checkpoint")
 
 
 def load_baseline_checkpoint(
@@ -370,6 +433,10 @@ def build_data_spec(batch: PDEBatch) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    args.condition_probabilities = _parse_condition_probabilities(
+        args.condition_probabilities_json
+    )
+    _validate_multicondition_request(args)
     args.data_files = _parse_data_files_json(args.data_files_json, args.pde)
     reject_historical_experiment_path(args.output_dir, field="--output-dir")
     _validate_mode(args)
@@ -656,7 +723,13 @@ def main(argv: list[str] | None = None) -> None:
         train_time = 0.0
         train_history = {}
         normalization_stats_path = ""
-        normalization_fields = {}
+        normalization_fields = (
+            _normalization_fields(model)
+            if args.task == "sparse_solution_multicondition"
+            else {}
+        )
+        if args.task == "sparse_solution_multicondition":
+            normalization_fields["normalization_stats_sha256"] = _normalization_stats_sha256(model)
         checkpoint_provenance = dict(getattr(model, "provenance", {}) or {})
         config_snapshot = str(checkpoint_provenance.get("config_path", ""))
         config_hash = str(checkpoint_provenance.get("config_hash", ""))
@@ -682,6 +755,8 @@ def main(argv: list[str] | None = None) -> None:
 
         normalization_stats_path = _write_normalization_stats(out_dir, run_prefix, model)
         normalization_fields = _normalization_fields(model, normalization_stats_path)
+        if args.task == "sparse_solution_multicondition":
+            normalization_fields["normalization_stats_sha256"] = _normalization_stats_sha256(model)
         config_snapshot = _write_config_snapshot(out_dir, args, cfg, method_cfg, data_spec, backend_info, method_budget_fields, capability_info, normalization_fields, memory_fields)
         config_hash = _file_sha1(config_snapshot)
         model.provenance = {
@@ -715,6 +790,18 @@ def main(argv: list[str] | None = None) -> None:
             "sensor_seed": int(args.sensor_seed),
             "num_sensors": int(args.num_sensors if use_sensors else 0),
         }
+        if args.task == "sparse_solution_multicondition":
+            model.provenance.update(
+                {
+                    "condition_mode": args.condition_mode,
+                    "condition_probabilities": dict(args.condition_probabilities),
+                    "normalization_stats_sha256": normalization_fields.get(
+                        "normalization_stats_sha256", ""
+                    ),
+                    "task_adapter": "sparse_solution_multicondition",
+                    "official_native_task": False,
+                }
+            )
         train_history_path = out_dir / f"{run_prefix}_train_history.json"
         train_history_payload = _json_safe(train_history)
         if isinstance(train_history_payload, dict):
@@ -725,6 +812,70 @@ def main(argv: list[str] | None = None) -> None:
             ckpt = out_dir / f"{run_prefix}.pt"
             model.save(ckpt)
             checkpoint_path = str(ckpt)
+
+    if args.train_only:
+        summary = _summarize_run(
+            [],
+            {"inference_time_total": 0.0, "inference_optimization_time_total": 0.0},
+            args,
+            train_dataset_for_fit,
+            spec_dataset,
+            val_dataset,
+            test_dataset,
+            backend_info,
+            capability_info,
+            split_info,
+            method_budget_fields,
+            normalization_fields,
+            memory_fields,
+            config_hash,
+        )
+        summary.update(
+            {
+                "train_time": train_time,
+                "num_params": int(model.parameter_count() if hasattr(model, "parameter_count") else num_parameters(model)),
+                "num_params_storage": int(
+                    model.parameter_storage_count()
+                    if hasattr(model, "parameter_storage_count")
+                    else sum(p.numel() for p in model.parameters() if p.requires_grad)
+                ),
+                "parameter_count_convention": "real_scalar_dof_complex_counts_as_two",
+                "config_path": str(config_snapshot),
+                "config_hash": config_hash,
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_sha256": _file_sha256(Path(checkpoint_path)) if checkpoint_path else "",
+                "train_run_fingerprint": args.run_fingerprint,
+                "condition_mode": args.condition_mode,
+                "evaluation_condition_mode": "",
+                "train_only": True,
+                "train_history_path": str(train_history_path),
+                "commit_hash": args.commit_hash,
+                "dry_run": bool(args.dry_run),
+                "synthetic_data": bool(args.synthetic_data),
+                "experiment_mode": args.experiment_mode,
+                "run_id": args.run_id,
+                "run_name": args.run_name,
+                "effective_data_loading_mode": getattr(args, "effective_data_loading_mode", "eager"),
+                **_dataloader_fields(args),
+                **memory_fields,
+                "epoch_log_path": str(out_dir / f"{run_prefix}_train_history.jsonl"),
+                "train_history_jsonl_path": str(out_dir / f"{run_prefix}_train_history.jsonl"),
+                "train_history": json.dumps(_json_safe(train_history)),
+                **normalization_fields,
+            }
+        )
+        append_result_jsonl(out_dir / "results_summary.jsonl", _json_safe(summary))
+        append_result_csv(out_dir / "results_summary.csv", _json_safe(summary))
+        (out_dir / "summary.json").write_text(
+            json.dumps(_json_safe(summary), indent=2, sort_keys=True), encoding="utf-8"
+        )
+        if args.run_id:
+            (out_dir / f"{run_prefix}_summary.json").write_text(
+                json.dumps(_json_safe(summary), indent=2, sort_keys=True), encoding="utf-8"
+            )
+        _run_stage("write_summary", "done", output_dir=out_dir)
+        print(json.dumps(_json_safe(summary), indent=2, sort_keys=True))
+        return
 
     _run_stage("eval", "start", baseline=args.baseline, pde=args.pde, task=args.task)
     raw_rows, eval_totals = _evaluate_full_test_loader(
@@ -1211,11 +1362,23 @@ def _method_budget_fields(method_cfg: dict[str, Any], baseline: str) -> dict[str
 
 
 def _experiment_fields(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+    fields = {
         "experiment_kind": args.experiment_kind,
         "ablation_factor": args.ablation_factor,
         "task_group": args.task_group,
     }
+    if args.task == "sparse_solution_multicondition":
+        fields.update(
+            {
+                "condition_mode": args.condition_mode,
+                "evaluation_condition_mode": args.condition_mode if args.eval_only else "",
+                "condition_probabilities": json.dumps(
+                    args.condition_probabilities, sort_keys=True, separators=(",", ":")
+                ),
+                "train_only": bool(args.train_only),
+            }
+        )
+    return fields
 
 
 def _split_load_full_trajectory(args: argparse.Namespace, split: str) -> bool:
@@ -1341,6 +1504,8 @@ def _make_split_dataset(
             seed=args.sensor_seed,
             experiment_mode=args.experiment_mode,
             build_voronoi_grid=args.baseline in {"recfno", "voronoicnn", "var4d", "vivid"},
+            condition_mode=args.condition_mode,
+            condition_probabilities=args.condition_probabilities,
         )
         return PDEBatchDataset(batch)
     return registry.make_dataset(
@@ -1372,6 +1537,8 @@ def _make_split_dataset(
             else bool(strict_size_override)
         ),
         data_files=args.data_files,
+        condition_mode=args.condition_mode,
+        condition_probabilities=args.condition_probabilities,
     )
 
 
@@ -1680,6 +1847,16 @@ def _evaluate_full_test_loader(
         ),
         "checkpoint_sha256": checkpoint_sha256,
     }
+    if args.task == "sparse_solution_multicondition":
+        provenance_fields.update(
+            {
+                "train_run_fingerprint": str(
+                    checkpoint_provenance.get("run_fingerprint", "")
+                ),
+                "normalization_stats_sha256": _normalization_stats_sha256(model),
+                "evaluation_condition_mode": args.condition_mode,
+            }
+        )
     for batch_index, batch in enumerate(loader):
         if batch_index < resumed_batch_count:
             _validate_resumed_batch(rows[batch_index], batch, batch_index)
@@ -1711,6 +1888,11 @@ def _evaluate_full_test_loader(
         mse_values = _mse_values(pred_cpu, target)
         mae_values = _mae_values(pred_cpu, target)
         metric_payload = _batch_metric_payload(pred_cpu, target, batch, args)
+        multicondition_metrics = (
+            _multicondition_metrics(pred_cpu, target, batch)
+            if args.task == "sparse_solution_multicondition"
+            else {}
+        )
         artifact_metric_payload = (
             _batch_metric_payload(pred_cpu, target, batch, args, force_per_sample=True)
             if artifact_writer is not None and args.physics_metric_mode == "per_batch"
@@ -1851,7 +2033,22 @@ def _evaluate_full_test_loader(
             "train_history": json.dumps(_json_safe(train_history)),
             **_train_history_fields(train_history),
             **normalization_fields,
+            **multicondition_metrics,
         }
+        if args.task == "sparse_solution_multicondition":
+            row.update(
+                {
+                    "condition_mode": args.condition_mode,
+                    "evaluation_condition_mode": args.condition_mode,
+                    "num_sensor_locations": int(batch.metadata.get("num_sensor_locations", 0) or 0),
+                    "num_scalar_observations_a": int(batch.metadata.get("num_scalar_observations_a", 0) or 0),
+                    "num_scalar_observations_u": int(batch.metadata.get("num_scalar_observations_u", 0) or 0),
+                    "num_scalar_observations_total": int(batch.metadata.get("num_scalar_observations_total", 0) or 0),
+                    "base_mask_id": str(batch.metadata.get("base_mask_id", "")),
+                    "base_mask_ids": json.dumps(batch.metadata.get("base_mask_ids", [])),
+                    "test_sample_set_sha256": _sample_set_sha256(batch.global_sample_ids),
+                }
+            )
         for key in ("obs_mse", "obs_mse_clean", "obs_mse_noisy", "pde_residual", "bc_residual", "ic_residual", "physics_loss"):
             values_key = f"{key}_values"
             if values_key in metric_payload:
@@ -1883,6 +2080,16 @@ def _evaluate_full_test_loader(
                         else artifact_metric_payload.get(key, float("nan"))
                     )
                 sample_metrics.append(values)
+                if args.task == "sparse_solution_multicondition":
+                    for key in (
+                        "rel_l2_a",
+                        "rel_l2_u",
+                        "joint_rel_l2",
+                        "observed_mse_a",
+                        "observed_mse_u",
+                    ):
+                        metric_values = multicondition_metrics.get(f"{key}_values", [])
+                        values[key] = metric_values[item]
             artifact_writer.write_batch(
                 batch,
                 pred_cpu,
@@ -2208,6 +2415,47 @@ def _summarize_run(
         stats = _metric_stats(values)
         for suffix, value in stats.items():
             summary[f"{key}_{suffix}"] = value
+    if args.task == "sparse_solution_multicondition":
+        for key in (
+            "rel_l2_a",
+            "rel_l2_u",
+            "joint_rel_l2",
+            "observed_mse_a",
+            "observed_mse_u",
+        ):
+            values = _metric_values_from_rows(rows, key)
+            for suffix, value in _multicondition_metric_stats(values).items():
+                summary[f"{key}_{suffix}"] = value
+        all_sample_ids = [
+            sample_id
+            for row in rows
+            for sample_id in json.loads(str(row.get("global_sample_ids", "[]")))
+        ]
+        all_base_mask_ids = [
+            mask_id
+            for row in rows
+            for mask_id in json.loads(str(row.get("base_mask_ids", "[]")))
+        ]
+        summary.update(
+            {
+                "condition_mode": args.condition_mode,
+                "evaluation_condition_mode": args.condition_mode if args.eval_only else "",
+                "train_run_fingerprint": str(
+                    rows[0].get("train_run_fingerprint", args.run_fingerprint) if rows else args.run_fingerprint
+                ),
+                "normalization_stats_sha256": str(
+                    normalization_fields.get("normalization_stats_sha256", "")
+                ),
+                "num_sensor_locations": int(rows[0].get("num_sensor_locations", 0) if rows else 0),
+                "num_scalar_observations_a": int(rows[0].get("num_scalar_observations_a", 0) if rows else 0),
+                "num_scalar_observations_u": int(rows[0].get("num_scalar_observations_u", 0) if rows else 0),
+                "num_scalar_observations_total": int(rows[0].get("num_scalar_observations_total", 0) if rows else 0),
+                "test_sample_set_sha256": _sample_set_sha256(all_sample_ids),
+                "base_mask_manifest_sha256": _sample_set_sha256(all_base_mask_ids),
+                "base_mask_id": _sample_set_sha256(all_base_mask_ids),
+                "base_mask_ids": json.dumps(all_base_mask_ids),
+            }
+        )
     return summary
 
 
@@ -2378,6 +2626,54 @@ def _relative_l2_values(pred: torch.Tensor, target: torch.Tensor, eps: float = 1
     return [float(x) for x in (diff / denom).detach().cpu()]
 
 
+def _multicondition_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    batch: PDEBatch,
+) -> dict[str, Any]:
+    input_channels = int(batch.metadata.get("joint_input_channels", 1) or 1)
+    if input_channels <= 0 or input_channels >= int(target.shape[1]):
+        raise ValueError("multicondition evaluation requires a non-empty a/u channel split")
+    values: dict[str, list[float]] = {
+        "rel_l2_a": _relative_l2_values(
+            pred[:, :input_channels], target[:, :input_channels]
+        ),
+        "rel_l2_u": _relative_l2_values(
+            pred[:, input_channels:], target[:, input_channels:]
+        ),
+        "joint_rel_l2": _relative_l2_values(pred, target),
+        "observed_mse_a": [],
+        "observed_mse_u": [],
+    }
+    if batch.mask is None:
+        raise ValueError("multicondition evaluation requires an active modality mask")
+    mask = batch.mask.detach().cpu()
+    if tuple(mask.shape) == tuple(target.shape[1:]):
+        mask = mask.unsqueeze(0).expand(target.shape[0], *mask.shape)
+    if tuple(mask.shape) != tuple(target.shape):
+        raise ValueError(
+            f"multicondition metric mask {tuple(mask.shape)} must match target {tuple(target.shape)}"
+        )
+    for sample_index in range(int(target.shape[0])):
+        for key, channel_slice in (
+            ("observed_mse_a", slice(0, input_channels)),
+            ("observed_mse_u", slice(input_channels, target.shape[1])),
+        ):
+            sample_mask = mask[sample_index, channel_slice].bool()
+            if not bool(sample_mask.any()):
+                values[key].append(float("nan"))
+                continue
+            difference = (
+                pred[sample_index, channel_slice] - target[sample_index, channel_slice]
+            ).square()
+            values[key].append(float(difference[sample_mask].mean().detach().cpu()))
+    payload: dict[str, Any] = {}
+    for key, metric_values in values.items():
+        payload[key] = _mean_list(metric_values)
+        payload[f"{key}_values"] = metric_values
+    return payload
+
+
 def _relative_l2_input_or_coeff_values(task: str, pred: torch.Tensor, target: torch.Tensor) -> list[float]:
     if task in {"inverse", "sparse_inverse"}:
         return _relative_l2_values(pred, target)
@@ -2501,6 +2797,38 @@ def _metric_stats(values: list[float]) -> dict[str, float | int]:
     return {"mean": mean, "std": std, "sem": sem, "ci95": 1.96 * sem, "n": n, "nan_count": nan_count}
 
 
+def _multicondition_metric_stats(values: list[float]) -> dict[str, float | int]:
+    stats = _metric_stats(values)
+    cleaned = sorted(float(value) for value in values if not _is_nan(value))
+    if not cleaned:
+        return {**stats, "median": float("nan"), "p90": float("nan")}
+    tensor = torch.tensor(cleaned, dtype=torch.float64)
+    return {
+        **stats,
+        "median": float(torch.quantile(tensor, 0.5).item()),
+        "p90": float(torch.quantile(tensor, 0.9).item()),
+    }
+
+
+def _metric_values_from_rows(rows: list[dict[str, Any]], key: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        raw = row.get(f"{key}_values", [])
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = []
+        if isinstance(raw, list):
+            values.extend(float(value) for value in raw)
+    return values
+
+
+def _sample_set_sha256(values: list[Any]) -> str:
+    encoded = json.dumps(_json_safe(values), separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _mean_list(values: list[float]) -> float:
     finite = [v for v in values if not _is_nan(v)]
     return sum(finite) / len(finite) if finite else float("nan")
@@ -2567,6 +2895,16 @@ def _normalization_fields(model, stats_path: str = "") -> dict[str, Any]:
         }
     )
     return fields
+
+
+def _normalization_stats_sha256(model) -> str:
+    stats = getattr(model, "normalization_stats", None)
+    if stats is None:
+        return ""
+    payload = json.dumps(
+        _json_safe(stats.json_summary()), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _file_sha1(path: Path) -> str:
@@ -2736,6 +3074,14 @@ def _validate_and_bind_run_fingerprint(
         "data_manifest_sha256": str(args.data_manifest_sha256),
         "commit_hash": str(args.commit_hash),
     }
+    if args.task == "sparse_solution_multicondition":
+        payload.update(
+            {
+                "condition_mode": str(args.condition_mode),
+                "condition_probabilities": dict(args.condition_probabilities),
+                "train_only": bool(args.train_only),
+            }
+        )
     if args.data_files is not None:
         payload["data_files"] = args.data_files
     if args.execution_mode == "eval_only":

@@ -67,6 +67,7 @@ class RecFNOBaseline(BaselineModel):
                     adapter_status="official_training_flow_adapter",
                     **official_source_info("recfno"),
                 )
+                self._mark_multicondition_adapter()
                 return self
             except Exception as exc:
                 exc = wrap_official_adapter_error("RecFNO", exc)
@@ -98,7 +99,19 @@ class RecFNOBaseline(BaselineModel):
             ),
             adapter_status="local_adapted" if requested_local else "fallback_adapted",
         )
+        self._mark_multicondition_adapter()
         return self
+
+    def _mark_multicondition_adapter(self) -> None:
+        if self.data_spec.get("task") != "sparse_solution_multicondition":
+            return
+        self.implementation_source += "_multicondition_task_adapter"
+        self.adapter_status = "multicondition_task_adapter"
+        self.official_alignment_notes = (
+            self.official_alignment_notes
+            + " The [V_a,V_u,M_a,M_u,x,y] joint-field protocol is an FM4PDE "
+            "multicondition task adapter, not an official-native RecFNO task."
+        ).strip()
 
     def fit(self, train_loader, val_loader=None):
         return run_supervised_fit(self, train_loader, val_loader)

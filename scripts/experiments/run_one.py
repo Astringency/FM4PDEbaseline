@@ -203,6 +203,21 @@ def build_command(row: dict[str, Any]) -> list[str]:
                 str(values["noise_level"]),
             ]
         )
+    if row.get("task") == "sparse_solution_multicondition":
+        cmd.extend(
+            [
+                "--condition-mode",
+                str(row.get("condition_mode", "mixed")),
+                "--condition-probabilities-json",
+                json.dumps(
+                    row.get("condition_probabilities", {}),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
+        if _as_bool(row.get("train_only", False)):
+            cmd.append("--train-only")
     if _as_bool(row.get("load_full_trajectory", False)):
         cmd.append("--load-full-trajectory")
     execution_mode = str(row.get("execution_mode", "train"))

@@ -81,6 +81,7 @@ GROUP_TO_TASK = {
     "runtime_budget_pcbnn": "sparse_solution",
     "time_varying_da_runtime_budget": "sparse_solution",
     "train_size_ablation": "sparse_solution",
+    "sparse_solution_multicondition_train": "sparse_solution_multicondition",
 }
 
 DEFAULT_BASELINES_BY_GROUP = {
@@ -104,10 +105,15 @@ DEFAULT_BASELINES_BY_GROUP = {
     "runtime_budget_pcbnn": ["pc_bnn"],
     "time_varying_da_runtime_budget": ["var4d", "vivid"],
     "train_size_ablation": ["recfno", "senseiver", "voronoicnn"],
+    "sparse_solution_multicondition_train": ["recfno", "senseiver", "voronoicnn"],
 }
 
 VALID_EXPERIMENT_KINDS = {"main", "ablation"}
-VALID_COMPARISON_TRACKS = {"unified_adapted", "official_native"}
+VALID_COMPARISON_TRACKS = {
+    "unified_adapted",
+    "official_native",
+    "sparse_solution_multicondition",
+}
 VALID_ABLATION_FACTORS = {
     "sensor_count",
     "noise_level",
@@ -115,6 +121,7 @@ VALID_ABLATION_FACTORS = {
     "time_varying_sensor_count",
     "runtime_budget",
     "train_size",
+    "sparse_solution_multicondition",
 }
 FORMAL_DESIGN_OVERRIDE_ENV = (
     "SEEDS",
@@ -150,6 +157,7 @@ FACTOR_TO_VARIED_FIELDS = {
     "time_varying_sensor_count": {"num_sensors"},
     "runtime_budget": {"steps", "refine_steps", "particles"},
     "train_size": {"train_size"},
+    "sparse_solution_multicondition": set(),
 }
 
 # Public alias used by downstream tooling. The fingerprint list is defined in
@@ -173,7 +181,7 @@ INVERSE_REUSE_MIGRATION_CODE_SHA256 = {
     "4e66c4d070f282059838579a460cd16963590fd704559851b21871618bafe1b7":
         "b68c154026fa03b73c9bb213207fb0a2c375daeda8439bfdb2be47a25ca78e58",
     "ee2c58e7d2737f6d3b520248c90a03164f1c4ab0fbc414a38a00936beaf5bcbf":
-        "6c2c1a769c6c4d8da4bbd4bbd4d0494cc931c73aff77f9b58158e74662081fe4",
+        "df279b550811cbaaead3cb4ec732bbcca38413d24aeb03a6c6a92628fdaaf01f",
     "e7ab63c7b3a26c7b2e3e20afc102f1faaad8235c27e0bde088081418bea5d525":
         "6c2c1a769c6c4d8da4bbd4bbd4d0494cc931c73aff77f9b58158e74662081fe4",
     "3d8b8127c99eb40e043383e13e588f45c10396f8ae22a34991b18d063f8e210c":
@@ -249,6 +257,10 @@ MATRIX_FIELDS = [
     "sensor_mode",
     "sensor_budget_mode",
     "noise_level",
+    "condition_mode",
+    "condition_probabilities",
+    "evaluation_condition_modes",
+    "train_only",
     "scalar_param_mode",
     "physics_metric_mode",
     "data_loading_mode",
@@ -428,6 +440,22 @@ def build_matrix(
         )
         pdes = _resolve_pdes(cfg, group_cfg, experiment_kind, ablation_factor)
         baselines = _resolve_baselines(cfg, task_group, task, group_cfg, experiment_kind, ablation_factor)
+        if task == "sparse_solution_multicondition":
+            invalid_pdes = sorted(set(pdes) - {"poisson", "helmholtz", "darcy", "nsnonbounded"})
+            if invalid_pdes:
+                if "burger" in invalid_pdes:
+                    raise ValueError(
+                        "sparse_solution_multicondition does not support Burgers trajectory semantics"
+                    )
+                raise ValueError(
+                    f"sparse_solution_multicondition contains unsupported PDEs: {invalid_pdes}"
+                )
+            invalid_baselines = sorted(set(baselines) - {"recfno", "senseiver", "voronoicnn"})
+            if invalid_baselines:
+                raise ValueError(
+                    "sparse_solution_multicondition supports only recfno, senseiver, and voronoicnn; "
+                    f"got {invalid_baselines}"
+                )
         extra_skip_baselines = list(group_cfg.get("extra_skip_baselines", []) or [])
         candidate_baselines = list(baselines)
         seeds = _env_list("SEEDS", group_cfg.get("seeds", global_defaults["seeds"]), int)
@@ -572,6 +600,10 @@ def build_matrix(
                                         )
                                         rows.append(row)
 
+    if any(row.get("task") == "sparse_solution_multicondition" for row in rows):
+        rows = _expand_multicondition_evaluation_rows(
+            rows, cfg, output_root, matrix_name
+        )
     if resume_rows:
         rows = _preserve_completed_rows(rows, resume_rows)
     rows = _bind_eval_only_dependencies(rows, cfg, output_root, matrix_name)
@@ -590,6 +622,76 @@ def build_matrix(
         data_content_digest,
     )
     return rows, skipped_rows, summary
+
+
+def _expand_multicondition_evaluation_rows(
+    rows: list[dict[str, Any]],
+    cfg: dict[str, Any],
+    output_root: Path,
+    matrix_name: str,
+) -> list[dict[str, Any]]:
+    modes = [str(value) for value in cfg.get("evaluation_condition_modes", ["a_only", "u_only", "both"])]
+    if modes != ["a_only", "u_only", "both"]:
+        raise ValueError(
+            "sparse_solution_multicondition evaluation_condition_modes must be exactly "
+            "[a_only, u_only, both]"
+        )
+    expanded = list(rows)
+    for source in rows:
+        if source.get("task") != "sparse_solution_multicondition":
+            continue
+        if source.get("execution_mode") != "train":
+            raise ValueError("multicondition source rows must be training rows")
+        for condition_mode in modes:
+            row = dict(source)
+            row.update(
+                {
+                    "task_group": f"sparse_solution_multicondition_eval_{condition_mode}",
+                    "execution_mode": "eval_only",
+                    "condition_mode": condition_mode,
+                    "train_only": False,
+                    "source_train_run_id": source["run_id"],
+                    "source_train_run_fingerprint": source["run_fingerprint"],
+                    "source_train_task": source["task"],
+                    "source_train_baseline_code_sha256": source["baseline_code_sha256"],
+                    "source_train_seed": source["seed"],
+                    "checkpoint_path": str(
+                        Path(str(source["output_dir"])) / f"{source['run_id']}.pt"
+                    ),
+                    "checkpoint_sha256": DEPENDENCY_PENDING_SHA256,
+                    "dependency_run_id": source["run_id"],
+                    "dependency_pending": True,
+                    "dependency_reason": "source training checkpoint is not available",
+                }
+            )
+            row["run_fingerprint"] = run_fingerprint(row)
+            row["run_id"] = _run_id(row)
+            row["run_name"] = _run_name(row)
+            row["output_dir"] = str(_run_output_dir(output_root, matrix_name, row))
+            row["log_dir"] = str(_run_log_dir(output_root, matrix_name, row))
+            row["status_file"] = str(Path(row["output_dir"]) / "run.status.json")
+            expanded.append(row)
+    return expanded
+
+
+def _validate_condition_probabilities_config(value: Any) -> dict[str, float]:
+    if value is None:
+        value = {
+            "a_only": 0.3333333333,
+            "u_only": 0.3333333333,
+            "both": 0.3333333334,
+        }
+    if not isinstance(value, dict) or set(value) != {"a_only", "u_only", "both"}:
+        raise ValueError(
+            "condition_probabilities must define exactly a_only, u_only, and both"
+        )
+    probabilities = {key: float(value[key]) for key in ("a_only", "u_only", "both")}
+    if any(probability < 0.0 for probability in probabilities.values()):
+        raise ValueError("condition_probabilities must all be non-negative")
+    total = sum(probabilities.values())
+    if abs(total - 1.0) > 1e-8:
+        raise ValueError(f"condition_probabilities must sum to 1, got {total:.12g}")
+    return probabilities
 
 
 def _preserve_completed_rows(
@@ -681,11 +783,24 @@ def _bind_eval_only_dependencies(
         source_group = str(
             group_cfg.get(
                 "source_task_group",
-                "full_forward_main" if reuse_ifno_forward else "",
+                (
+                    "full_forward_main"
+                    if reuse_ifno_forward
+                    else "sparse_solution_multicondition_train"
+                    if row.get("task") == "sparse_solution_multicondition"
+                    else ""
+                ),
             )
         )
         source_task = str(
-            group_cfg.get("source_task", "forward" if reuse_ifno_forward else "")
+            group_cfg.get(
+                "source_task",
+                "forward"
+                if reuse_ifno_forward
+                else "sparse_solution_multicondition"
+                if row.get("task") == "sparse_solution_multicondition"
+                else "",
+            )
         )
         if not source_group or not source_task:
             raise ValueError(
@@ -1051,6 +1166,12 @@ def _validate_group_design(
     allow_multi: bool,
 ) -> None:
     expansion = _group_expansion(cfg, group_cfg, defaults, task_group, task)
+    if task == "sparse_solution_multicondition":
+        if experiment_kind != "ablation" or ablation_factor != "sparse_solution_multicondition":
+            raise ValueError(
+                "sparse_solution_multicondition must use its independent ablation experiment kind/factor"
+            )
+        return
     lengths = {
         "num_sensors": len(set(expansion["sensor_counts"])),
         "sensor_mode": len(set(expansion["sensor_modes"])),
@@ -1318,6 +1439,27 @@ def _make_run_row(
         "status_file": "",
         "skip_reason": "",
     }
+    if task == "sparse_solution_multicondition":
+        probabilities = _validate_condition_probabilities_config(
+            group_cfg.get(
+                "condition_probabilities", cfg.get("condition_probabilities")
+            )
+        )
+        condition_mode = str(group_cfg.get("condition_mode", cfg.get("condition_mode", "mixed")))
+        if execution_mode == "train" and condition_mode != "mixed":
+            raise ValueError(
+                "sparse_solution_multicondition training rows must use condition_mode=mixed"
+            )
+        row.update(
+            {
+                "condition_mode": condition_mode,
+                "condition_probabilities": probabilities,
+                "evaluation_condition_modes": list(
+                    cfg.get("evaluation_condition_modes", ["a_only", "u_only", "both"])
+                ),
+                "train_only": execution_mode == "train",
+            }
+        )
     if data_files is not None:
         row["data_files"] = data_files
     row["run_fingerprint"] = run_fingerprint(row)
@@ -1381,6 +1523,8 @@ def _run_name(row: dict[str, Any]) -> str:
     base = f"{row['task_group']}/{row['baseline']}/{row['pde']}/seed={row['seed']}"
     if row["task"].startswith("sparse"):
         base += f"/sensors={row['num_sensors']}/{row['sensor_mode']}/noise={row['noise_level']}"
+    if row["task"] == "sparse_solution_multicondition":
+        base += f"/condition={row.get('condition_mode', 'mixed')}"
     if row["ablation_factor"] == "train_size":
         base += f"/train_size={row['train_size']}"
     if row["ablation_factor"] == "runtime_budget":
@@ -1414,6 +1558,8 @@ def _run_output_dir(output_root: Path, matrix_name: str, row: dict[str, Any]) ->
         f"mode={_safe_name(row['sensor_mode'])}",
         f"noise={_safe_float(row['noise_level'])}",
     ]
+    if row["task"] == "sparse_solution_multicondition":
+        parts.append(f"condition={_safe_name(row.get('condition_mode', 'mixed'))}")
     if row["ablation_factor"] == "train_size":
         parts.append(f"train_size={row['train_size']}")
     if row["ablation_factor"] == "runtime_budget":
@@ -1439,6 +1585,7 @@ def _ablation_dir_name(ablation_factor: str, matrix_name: str) -> str:
         "time_varying_sensor_count": "time_varying",
         "runtime_budget": "runtime_budget",
         "train_size": "train_size",
+        "sparse_solution_multicondition": "sparse_solution_multicondition",
     }.get(ablation_factor, matrix_name)
 
 

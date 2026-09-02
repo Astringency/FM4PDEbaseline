@@ -14,7 +14,14 @@ import torch
 from torch.utils.data import Dataset
 
 from .data_files import resolve_split_files
-from .sensors import build_observation_tensors, make_coordinate_grid
+from .sensors import (
+    MULTICONDITION_MODES,
+    build_multicondition_observation_tensors,
+    build_observation_tensors,
+    deterministic_condition_mode,
+    make_coordinate_grid,
+    validate_condition_probabilities,
+)
 
 
 @dataclass
@@ -414,8 +421,25 @@ class PDEDataRegistry:
         seed: int = 0,
         experiment_mode: str = "debug",
         build_voronoi_grid: bool = True,
+        condition_mode: str = "mixed",
+        condition_probabilities: dict[str, float] | None = None,
     ) -> PDEBatch:
         spec = self.get(pde_name)
+        if task == "sparse_solution_multicondition":
+            if spec.name == "burger":
+                raise ValueError(
+                    "sparse_solution_multicondition does not support Burgers trajectory semantics"
+                )
+            if spec.name not in {"poisson", "helmholtz", "darcy", "nsnonbounded"}:
+                raise ValueError(
+                    "sparse_solution_multicondition supports only poisson, helmholtz, darcy, and nsnonbounded"
+                )
+            if condition_mode not in {"mixed", *MULTICONDITION_MODES}:
+                raise ValueError(
+                    "condition_mode must be mixed, a_only, u_only, or both for "
+                    "sparse_solution_multicondition"
+                )
+            condition_probabilities = validate_condition_probabilities(condition_probabilities)
         canonical = (
             raw_or_canonical
             if "full_tensor" in raw_or_canonical and "metadata" in raw_or_canonical
@@ -441,7 +465,7 @@ class PDEDataRegistry:
                 target_names = trajectory_names
         original_input_fields = input_fields
         joint_static_or_terminal = (
-            task in {"sparse_solution", "sparse_reconstruction"}
+            task in {"sparse_solution", "sparse_reconstruction", "sparse_solution_multicondition"}
             and spec.name in {"poisson", "helmholtz", "darcy", "nsnonbounded"}
             and input_fields.ndim == target_fields.ndim
         )
@@ -463,11 +487,154 @@ class PDEDataRegistry:
             metadata["joint_split_axis"] = 2
             metadata["joint_input_extent"] = 1
             metadata["joint_solution_extent"] = int(target_fields.shape[2] - 1)
-        metadata["original_input_fields"] = original_input_fields
-        metadata["background_fields"] = _background_fields_for_task(full, spec, metadata, original_input_fields)
+        if task != "sparse_solution_multicondition":
+            metadata["original_input_fields"] = original_input_fields
+            metadata["background_fields"] = _background_fields_for_task(full, spec, metadata, original_input_fields)
+        else:
+            # Keep complete truth exclusively in ``target_fields`` for
+            # supervision/sensor simulation.  No duplicate truth tensor may
+            # survive in model-visible metadata for this task.
+            for private_truth_key in (
+                "full_tensor",
+                "full_trajectory",
+                "original_input_fields",
+                "observed_solution_fields",
+                "observation_source_fields",
+                "background_fields",
+                "solution_fields",
+                "source_fields",
+                "coeff_fields",
+                "initial_1d",
+            ):
+                metadata.pop(private_truth_key, None)
         mask = obs_values = obs_coords = None
         deferred_dynamic_sensors = False
-        if task.startswith("sparse") or num_sensors:
+        if task == "sparse_solution_multicondition":
+            requested_sensor_mode = sensor_mode
+            effective_sensor_mode = sensor_mode
+            if requested_sensor_mode == "random":
+                message = (
+                    "sensor_mode='random' is ambiguous; sparse_solution_multicondition requires "
+                    "'fixed' or 'random_per_sample' explicitly"
+                )
+                if experiment_mode == "paper":
+                    raise ValueError(message)
+                warnings.warn(message + ". Using the legacy fixed layout for this debug run.", RuntimeWarning, stacklevel=2)
+                effective_sensor_mode = "fixed"
+            if effective_sensor_mode not in {"random_per_sample", "fixed", "grid"}:
+                raise ValueError(
+                    "sparse_solution_multicondition sensor_mode must be random_per_sample, fixed, or grid"
+                )
+            sensor_count = int(num_sensors or 500)
+            split_name = str(canonical.get("split", metadata.get("split", "")))
+            sample_ids = _canonical_sample_ids(canonical, int(target_fields.shape[0]))
+            probabilities = validate_condition_probabilities(condition_probabilities)
+            if condition_mode == "mixed":
+                initial_conditions = [
+                    deterministic_condition_mode(seed, split_name, sample_id, 0, probabilities)
+                    for sample_id in sample_ids
+                ]
+            else:
+                initial_conditions = [condition_mode] * int(target_fields.shape[0])
+            deferred_dynamic_sensors = effective_sensor_mode == "random_per_sample" and _should_defer_dynamic_sensors(
+                target_fields,
+                experiment_mode=experiment_mode,
+            )
+            base_mask_ids = _deferred_sensor_layout_ids(
+                canonical,
+                target_fields,
+                num_sensors=sensor_count,
+                seed=seed,
+                split=split_name,
+                sensor_budget_mode=sensor_budget_mode,
+                sensor_mode=effective_sensor_mode,
+            )
+            metadata.update(
+                {
+                    "requested_sensor_mode": requested_sensor_mode,
+                    "effective_sensor_mode": effective_sensor_mode,
+                    "sensor_mode": effective_sensor_mode,
+                    "time_varying_sensor_valid": True,
+                    "num_sensors": sensor_count,
+                    "num_sensor_locations": min(sensor_count, int(np.prod(target_fields.shape[2:]))),
+                    "sensor_budget_mode": str(sensor_budget_mode),
+                    "noise_level": float(noise_level),
+                    "sensor_seed": int(seed),
+                    "sensor_protocol_version": "fm4pde-sparse-solution-multicondition-v1",
+                    "condition_mode": condition_mode,
+                    "condition_modes": initial_conditions,
+                    "condition_probabilities": probabilities,
+                    "evaluation_condition_mode": condition_mode if condition_mode != "mixed" else "",
+                    "base_mask_id": _aggregate_layout_id(base_mask_ids),
+                    "base_mask_ids": base_mask_ids,
+                    "mask_id_kind": "deterministic_sensor_spec",
+                    "deferred_dynamic_sensors": bool(deferred_dynamic_sensors),
+                    "build_voronoi_grid": bool(build_voronoi_grid),
+                    "normalization_order": "full_joint_field_then_active_mask",
+                    "task_adapter": "sparse_solution_multicondition",
+                }
+            )
+            if deferred_dynamic_sensors:
+                # A broadcast zero view preserves the declared [N,2,H,W]
+                # shape without allocating another full 50k-sample tensor.
+                # Every item is replaced by its materialized sparse view in
+                # ``PDEBatchDataset.__getitem__`` before a model can see it.
+                input_fields = torch.zeros(
+                    (1, *target_fields.shape[1:]),
+                    dtype=target_fields.dtype,
+                    device=target_fields.device,
+                ).expand_as(target_fields)
+                input_names = list(target_names)
+                metadata.update(
+                    {
+                        "mask_id": "",
+                        "mask_ids": [],
+                        "num_observations_total": 0,
+                        "num_scalar_observations_a": 0,
+                        "num_scalar_observations_u": 0,
+                        "num_scalar_observations_total": 0,
+                        "num_sensors_per_time": metadata["num_sensor_locations"],
+                    }
+                )
+            else:
+                obs = build_multicondition_observation_tensors(
+                    target_fields,
+                    num_sensors=sensor_count,
+                    mode=effective_sensor_mode,
+                    seed=seed,
+                    condition_modes=initial_conditions,
+                    noise_level=noise_level,
+                    sensor_budget_mode=sensor_budget_mode,
+                    sample_ids=sample_ids,
+                    split=split_name,
+                    epoch=0,
+                    build_voronoi_grid=build_voronoi_grid,
+                )
+                mask = obs["mask"]
+                obs_values = obs["obs_values"]
+                obs_coords = obs["obs_coords"]
+                input_fields = obs["masked_grid"].float()
+                input_names = list(target_names)
+                metadata.update(
+                    {
+                        "masked_grid": obs["masked_grid"],
+                        "sensor_presence": obs["obs_presence"],
+                        "base_mask": obs["base_mask"],
+                        "mask_id": obs["mask_id"],
+                        "mask_ids": obs["mask_ids"],
+                        "base_mask_id": obs["base_mask_id"],
+                        "base_mask_ids": obs["base_mask_ids"],
+                        "num_sensor_locations": obs["num_sensor_locations"],
+                        "num_scalar_observations_a": obs["num_scalar_observations_a"],
+                        "num_scalar_observations_u": obs["num_scalar_observations_u"],
+                        "num_scalar_observations_total": obs["num_scalar_observations_total"],
+                        "num_observations_total": max(obs["num_scalar_observations_total"]),
+                        "num_sensors_per_time": obs["num_sensor_locations"],
+                    }
+                )
+                if isinstance(obs.get("voronoi_grid"), torch.Tensor):
+                    metadata["voronoi_grid"] = obs["voronoi_grid"]
+        elif task.startswith("sparse") or num_sensors:
             requested_sensor_mode = sensor_mode
             effective_sensor_mode = sensor_mode
             if requested_sensor_mode == "random":
@@ -672,6 +839,8 @@ class PDEDataRegistry:
         strict_size: bool = False,
         build_voronoi_grid: bool = True,
         data_files: Mapping[str, list[str]] | None = None,
+        condition_mode: str = "mixed",
+        condition_probabilities: dict[str, float] | None = None,
     ) -> Dataset:
         if data_loading_mode not in {"eager", "lazy"}:
             raise ValueError(f"data_loading_mode must be eager or lazy, got {data_loading_mode!r}")
@@ -711,6 +880,8 @@ class PDEDataRegistry:
             seed=seed,
             experiment_mode=experiment_mode,
             build_voronoi_grid=build_voronoi_grid,
+            condition_mode=condition_mode,
+            condition_probabilities=condition_probabilities,
         )
         return PDEBatchDataset(batch)
 
@@ -1029,8 +1200,11 @@ class PDEBatchDataset(Dataset):
         # a normal Python integer would stay frozen in each worker copy after
         # the first epoch.
         self._epoch_state = torch.zeros((), dtype=torch.int64).share_memory_()
+        self._condition_state = torch.full((), -1, dtype=torch.int64).share_memory_()
         self._dynamic_observation_source: torch.Tensor | None = None
-        if batch.metadata.get("effective_sensor_mode") in {"random_per_sample", "time_slices_per_sample"}:
+        if batch.task == "sparse_solution_multicondition":
+            self._dynamic_observation_source = batch.target_fields
+        elif batch.metadata.get("effective_sensor_mode") in {"random_per_sample", "time_slices_per_sample"}:
             if batch.task in {"sparse_inverse", "sparse_forward"}:
                 source = batch.metadata.get("observation_source_fields")
                 if not isinstance(source, torch.Tensor):
@@ -1050,6 +1224,15 @@ class PDEBatchDataset(Dataset):
     def epoch(self) -> int:
         return int(self._epoch_state.item())
 
+    def set_condition_mode(self, condition_mode: str | None) -> None:
+        """Force a fixed validation/evaluation view across DataLoader workers."""
+        if condition_mode is None or condition_mode == "mixed":
+            self._condition_state.fill_(-1)
+            return
+        if condition_mode not in MULTICONDITION_MODES:
+            raise ValueError(f"Unknown multicondition mode {condition_mode!r}")
+        self._condition_state.fill_(MULTICONDITION_MODES.index(condition_mode))
+
     def __len__(self) -> int:
         return int(self.batch.input_fields.shape[0])
 
@@ -1066,6 +1249,69 @@ class PDEBatchDataset(Dataset):
         else:
             sample_id = index
         mode = str(item.metadata.get("effective_sensor_mode", "random_per_sample"))
+        if item.task == "sparse_solution_multicondition":
+            forced_index = int(self._condition_state.item())
+            configured_condition = str(item.metadata.get("condition_mode", "mixed"))
+            if forced_index >= 0:
+                item_condition = MULTICONDITION_MODES[forced_index]
+            elif configured_condition in MULTICONDITION_MODES:
+                item_condition = configured_condition
+            else:
+                item_condition = deterministic_condition_mode(
+                    int(item.metadata.get("sensor_seed", 0)),
+                    item.split,
+                    sample_id,
+                    self.epoch,
+                    item.metadata.get("condition_probabilities"),
+                )
+            obs = build_multicondition_observation_tensors(
+                source,
+                num_sensors=int(item.metadata.get("num_sensors", 500)),
+                mode=mode,
+                seed=int(item.metadata.get("sensor_seed", 0)),
+                condition_modes=[item_condition],
+                noise_level=float(item.metadata.get("noise_level", 0.0)),
+                sensor_budget_mode=str(item.metadata.get("sensor_budget_mode", "total")),
+                sample_ids=[sample_id],
+                split=item.split,
+                epoch=self.epoch,
+                build_voronoi_grid=bool(item.metadata.get("build_voronoi_grid", True)),
+            )
+            item.mask = obs["mask"]
+            item.obs_values = obs["obs_values"]
+            item.obs_coords = _coordinates_for_grid_layout(
+                obs["obs_coords"],
+                tuple(int(size) for size in source.shape[2:]),
+                str(item.metadata.get("grid_layout", "nodal_endpoint_included")),
+            )
+            item.input_fields = obs["masked_grid"].float()
+            item.metadata.update(
+                {
+                    "masked_grid": obs["masked_grid"],
+                    "sensor_presence": obs["obs_presence"],
+                    "base_mask": obs["base_mask"],
+                    "mask_id": obs["mask_ids"][0],
+                    "mask_ids": obs["mask_ids"],
+                    "base_mask_id": obs["base_mask_ids"][0],
+                    "base_mask_ids": obs["base_mask_ids"],
+                    "num_sensor_locations": int(obs["num_sensor_locations"]),
+                    "num_scalar_observations_a": int(obs["num_scalar_observations_a"][0]),
+                    "num_scalar_observations_u": int(obs["num_scalar_observations_u"][0]),
+                    "num_scalar_observations_total": int(obs["num_scalar_observations_total"][0]),
+                    "num_observations_total": int(obs["num_scalar_observations_total"][0]),
+                    "num_sensors_per_time": int(obs["num_sensor_locations"]),
+                    "condition_mode": item_condition,
+                    "condition_modes": [item_condition],
+                    "evaluation_condition_mode": item_condition if item.split != "train" else "",
+                    "input_shape": tuple(item.input_fields.shape),
+                    "sensor_epoch": self.epoch if item.split == "train" else 0,
+                }
+            )
+            if isinstance(obs.get("voronoi_grid"), torch.Tensor):
+                item.metadata["voronoi_grid"] = obs["voronoi_grid"]
+            else:
+                item.metadata.pop("voronoi_grid", None)
+            return item
         obs = build_observation_tensors(
             source,
             num_sensors=int(item.metadata.get("num_sensors", 500)),
@@ -1165,6 +1411,31 @@ def pde_collate(items: list[PDEBatch]) -> PDEBatch:
         else:
             coords = first.coords
     metadata = _collate_metadata([b.metadata for b in items], first.full_tensor.shape[0])
+    if first.task == "sparse_solution_multicondition":
+        condition_modes = [str(batch.metadata.get("condition_mode", "")) for batch in items]
+        metadata["condition_modes"] = condition_modes
+        metadata["condition_mode"] = condition_modes[0] if len(set(condition_modes)) == 1 else "mixed"
+        metadata["condition_mode_counts"] = {
+            mode: condition_modes.count(mode) for mode in MULTICONDITION_MODES
+        }
+        base_ids: list[str] = []
+        for batch in items:
+            raw_ids = batch.metadata.get(
+                "base_mask_ids", [batch.metadata.get("base_mask_id", "")]
+            )
+            if not isinstance(raw_ids, list):
+                raw_ids = [raw_ids]
+            base_ids.extend(str(value) for value in raw_ids if value)
+        metadata["base_mask_ids"] = base_ids
+        for key in (
+            "num_scalar_observations_a",
+            "num_scalar_observations_u",
+            "num_scalar_observations_total",
+        ):
+            counts = [int(batch.metadata.get(key, 0) or 0) for batch in items]
+            metadata[f"{key}_per_sample"] = counts
+            metadata[key] = counts[0] if len(set(counts)) == 1 else -1
+        metadata["base_mask_id"] = _aggregate_layout_id(base_ids)
     pde_params = _collate_metadata([b.pde_params for b in items], first.full_tensor.shape[0])
     sample_indices = None
     if first.sample_indices is not None:

@@ -125,6 +125,8 @@ def task_family_for(task: str, sensor_mode: str = "", task_group: str = "") -> s
         return "full_forward"
     if task == "inverse":
         return "full_inverse"
+    if task == "sparse_solution_multicondition":
+        return "sparse_solution_multicondition"
     if task in {"sparse_solution", "sparse_reconstruction"}:
         return "sparse_reconstruction"
     if task == "sparse_inverse":
@@ -188,6 +190,55 @@ def resolve_capability(
         return _cap(baseline, pde, task, sensor_mode, "unsupported", "unsupported", family, f"unknown PDE '{pde}'")
     if baseline not in set(ALL_BASELINES):
         return _cap(baseline, pde, task, sensor_mode, "unsupported", "unsupported", family, f"unknown baseline '{baseline}'")
+
+    if task == "sparse_solution_multicondition":
+        if pde == "burger":
+            return _cap(
+                baseline,
+                pde,
+                task,
+                sensor_mode,
+                "unsupported",
+                "unsupported",
+                family,
+                "sparse_solution_multicondition does not support Burgers trajectory semantics",
+            )
+        if pde not in {"poisson", "helmholtz", "darcy", "nsnonbounded"}:
+            return _cap(
+                baseline,
+                pde,
+                task,
+                sensor_mode,
+                "unsupported",
+                "unsupported",
+                family,
+                "sparse_solution_multicondition is scoped to Poisson, Helmholtz, Darcy, and NSnonbounded",
+            )
+        if baseline not in {"recfno", "senseiver", "voronoicnn"}:
+            return _cap(
+                baseline,
+                pde,
+                task,
+                sensor_mode,
+                "unsupported",
+                "unsupported",
+                family,
+                "sparse_solution_multicondition is defined only for RecFNO, Senseiver, and VoronoiCNN",
+            )
+        return _cap(
+            baseline,
+            pde,
+            task,
+            sensor_mode,
+            "adapted",
+            "adapted_allowed",
+            family,
+            "FM4PDE supplies a modality-presence multicondition adapter around the baseline reconstruction backbone",
+            "This is an independent multicondition task adapter and must not be described as an official-native task protocol.",
+            eligible=False,
+            unified_comparison_eligible=False,
+            official_native_eligible=False,
+        )
 
     if pde == "burger" and task == "sparse_inverse":
         return _cap(

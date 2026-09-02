@@ -1,0 +1,56 @@
+name: sparse_solution_multicondition_ablation
+experiment_kind: ablation
+ablation_factor: sparse_solution_multicondition
+comparison_track: sparse_solution_multicondition
+task_protocol_version: fm4pde-sparse-solution-multicondition-v1
+sensor_protocol_version: fm4pde-sensor-contract-v3
+
+config: baselines/configs/paper.yaml
+data_files_config: configs/data_files/formal_128.yaml
+
+pdes:
+  - poisson
+  - helmholtz
+  - darcy
+  - nsnonbounded
+
+baselines:
+  - recfno
+  - senseiver
+  - voronoicnn
+
+seeds: [1]
+task: sparse_solution_multicondition
+task_groups: [sparse_solution_multicondition_train]
+
+num_sensors: 500
+sensor_mode: random_per_sample
+sensor_budget_mode: total
+noise_level: 0.0
+
+condition_mode: mixed
+condition_probabilities:
+  a_only: 0.3333333333
+  u_only: 0.3333333333
+  both: 0.3333333334
+evaluation_condition_modes:
+  - a_only
+  - u_only
+  - both
+
+train_size: 50000
+val_size: 5000
+test_size: 1000
+train_shards: 5
+data_loading_mode: eager
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
+device: cuda
+
+resources:
+  amortized_default:
+    batch_size: 16
+    epochs: 200
+    device: cuda

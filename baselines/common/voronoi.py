@@ -65,3 +65,34 @@ def voronoi_fill(masked_grid: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         values = masked_grid[b].reshape(masked_grid.shape[1], -1)
         out[b] = values[:, nearest].reshape_as(masked_grid[b])
     return out
+
+
+def voronoi_fill_per_channel(masked_grid: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Fill each value channel using only that channel's observed locations.
+
+    Unlike :func:`voronoi_fill`, this helper intentionally permits different
+    masks for different channels.  A completely absent channel stays exactly
+    zero, which is the missing-modality contract used only by
+    ``sparse_solution_multicondition``.
+    """
+    if masked_grid.ndim < 4:
+        raise ValueError(f"Expected masked_grid [B,C,*grid], got {tuple(masked_grid.shape)}")
+    shared = tuple(mask.shape) == tuple(masked_grid.shape[1:])
+    batched = tuple(mask.shape) == tuple(masked_grid.shape)
+    if not shared and not batched:
+        raise ValueError(
+            f"Mask shape {tuple(mask.shape)} must match grid with or without batch: "
+            f"{tuple(masked_grid.shape)} or {tuple(masked_grid.shape[1:])}"
+        )
+    out = torch.zeros_like(masked_grid)
+    for batch_index in range(masked_grid.shape[0]):
+        sample_mask = mask if shared else mask[batch_index]
+        for channel_index in range(masked_grid.shape[1]):
+            nearest = _nearest_flat_indices(sample_mask[channel_index])
+            if nearest is None:
+                continue
+            values = masked_grid[batch_index, channel_index].reshape(-1)
+            out[batch_index, channel_index] = values[nearest].reshape_as(
+                masked_grid[batch_index, channel_index]
+            )
+    return out

@@ -21,7 +21,11 @@ MATRIX_SCHEMA_VERSION = 2
 SUMMARY_SCHEMA_VERSION = 2
 DEFAULT_TASK_PROTOCOL_VERSION = "fm4pde-task-contract-v3"
 DEFAULT_SENSOR_PROTOCOL_VERSION = "fm4pde-sensor-contract-v3"
-FORMAL_TASK_PROTOCOL_VERSIONS = {"fm4pde-task-contract-v2", DEFAULT_TASK_PROTOCOL_VERSION}
+FORMAL_TASK_PROTOCOL_VERSIONS = {
+    "fm4pde-task-contract-v2",
+    DEFAULT_TASK_PROTOCOL_VERSION,
+    "fm4pde-sparse-solution-multicondition-v1",
+}
 DATA_MANIFEST_REPORT_SCHEMA_VERSION = "fm4pde-data-protocol-report-v1"
 DATA_MANIFEST_CONTENT_HASH_CONTRACT = "full_tensor+sample_indexed_physical_metadata-v1"
 
@@ -79,7 +83,12 @@ EVAL_SOURCE_IDENTITY_FIELDS = (
     "source_train_task",
     "source_train_baseline_code_sha256",
 )
-OPTIONAL_FINGERPRINT_FIELDS = ("data_files",)
+OPTIONAL_FINGERPRINT_FIELDS = (
+    "data_files",
+    "condition_mode",
+    "condition_probabilities",
+    "train_only",
+)
 
 SUMMARY_IDENTITY_FIELDS = ("task_group", "task", "pde", "baseline", "seed")
 AMORTIZED_CHECKPOINT_BASELINES = {
@@ -817,6 +826,11 @@ def summary_validation_reasons(row: Mapping[str, Any], summary: Mapping[str, Any
             reasons.append(f"summary_missing:{field}")
         elif expected not in {None, ""} and observed != expected:
             reasons.append(f"summary_mismatch:{field}")
+
+    if row.get("task") == "sparse_solution_multicondition":
+        for field in ("condition_mode", "train_only"):
+            if summary.get(field) != row.get(field):
+                reasons.append(f"summary_mismatch:{field}")
 
     required_summary_audit_fields = ("config_content_sha256", "commit_hash")
     if formal_data_contract:

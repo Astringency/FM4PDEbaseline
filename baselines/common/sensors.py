@@ -17,6 +17,12 @@ SensorMode = Literal[
     "time_slices_per_sample",
 ]
 SensorBudgetMode = Literal["per_time", "total"]
+MULTICONDITION_MODES = ("a_only", "u_only", "both")
+DEFAULT_CONDITION_PROBABILITIES = {
+    "a_only": 0.3333333333,
+    "u_only": 0.3333333333,
+    "both": 0.3333333334,
+}
 
 
 def make_coordinate_grid(shape: tuple[int, ...], batch_size: int | None = None, device=None) -> torch.Tensor:
@@ -290,6 +296,151 @@ def build_observation_tensors(
         "mask_ids": mask_ids,
         "num_observations_total": num_observations_total,
         "num_sensors_per_time": num_sensors_per_time,
+        "sensor_budget_mode": sensor_budget_mode,
+    }
+
+
+def validate_condition_probabilities(
+    probabilities: dict[str, float] | None,
+    *,
+    tolerance: float = 1e-8,
+) -> dict[str, float]:
+    """Validate and canonicalize the three multicondition probabilities."""
+    values = dict(DEFAULT_CONDITION_PROBABILITIES if probabilities is None else probabilities)
+    if set(values) != set(MULTICONDITION_MODES):
+        raise ValueError(
+            "condition_probabilities must define exactly a_only, u_only, and both"
+        )
+    normalized = {mode: float(values[mode]) for mode in MULTICONDITION_MODES}
+    if any(value < 0.0 for value in normalized.values()):
+        raise ValueError("condition_probabilities must all be non-negative")
+    total = sum(normalized.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=float(tolerance)):
+        raise ValueError(
+            f"condition_probabilities must sum to 1 within {tolerance:g}, got {total:.12g}"
+        )
+    return normalized
+
+
+def deterministic_condition_mode(
+    base_seed: int,
+    split: str,
+    sample_id: str | int,
+    epoch: int,
+    probabilities: dict[str, float] | None = None,
+) -> str:
+    """Choose a reproducible per-sample training condition with a stable hash."""
+    probabilities = validate_condition_probabilities(probabilities)
+    effective_epoch = int(epoch) if str(split).lower() == "train" else 0
+    payload = (
+        f"condition|{int(base_seed)}|{str(split).lower()}|{sample_id}|{effective_epoch}"
+    ).encode("utf-8")
+    integer = int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+    draw = integer / float(2**64)
+    cumulative = 0.0
+    for mode in MULTICONDITION_MODES:
+        cumulative += probabilities[mode]
+        if draw < cumulative:
+            return mode
+    return MULTICONDITION_MODES[-1]
+
+
+def build_multicondition_observation_tensors(
+    joint_fields: torch.Tensor,
+    num_sensors: int,
+    mode: SensorMode,
+    seed: int,
+    condition_modes: Sequence[str],
+    noise_level: float = 0.0,
+    sensor_budget_mode: SensorBudgetMode = "total",
+    sample_ids: Sequence[str | int] | None = None,
+    split: str = "",
+    epoch: int = 0,
+    build_voronoi_grid: bool = True,
+) -> dict[str, Any]:
+    """Build value, presence, and base-mask views for the two-field task.
+
+    ``num_sensors`` always counts spatial locations.  Both modalities reuse the
+    same base locations; ``condition_modes`` only changes which modality masks
+    and values are active.
+    """
+    if joint_fields.ndim != 4 or int(joint_fields.shape[1]) != 2:
+        raise ValueError(
+            "sparse_solution_multicondition requires joint fields shaped [B,2,H,W], "
+            f"got {tuple(joint_fields.shape)}"
+        )
+    if len(condition_modes) != int(joint_fields.shape[0]):
+        raise ValueError(
+            f"condition_modes length {len(condition_modes)} does not match batch size {joint_fields.shape[0]}"
+        )
+    invalid = sorted(set(str(value) for value in condition_modes) - set(MULTICONDITION_MODES))
+    if invalid:
+        raise ValueError(f"Unknown multicondition modes: {invalid}")
+
+    base = build_observation_tensors(
+        joint_fields,
+        num_sensors=num_sensors,
+        mode=mode,
+        seed=seed,
+        noise_level=noise_level,
+        sensor_budget_mode=sensor_budget_mode,
+        sample_ids=sample_ids,
+        split=split,
+        epoch=epoch,
+        build_voronoi_grid=False,
+    )
+    base_mask = base["mask"]
+    if base_mask.ndim == joint_fields.ndim - 1:
+        base_mask_batched = base_mask.unsqueeze(0).expand(
+            joint_fields.shape[0], *base_mask.shape
+        )
+    else:
+        base_mask_batched = base_mask
+    modality_presence = torch.tensor(
+        [
+            [1.0, 0.0] if condition == "a_only" else [0.0, 1.0] if condition == "u_only" else [1.0, 1.0]
+            for condition in condition_modes
+        ],
+        dtype=joint_fields.dtype,
+        device=joint_fields.device,
+    )
+    presence_grid = modality_presence.reshape(-1, 2, 1, 1)
+    active_mask = base_mask_batched.to(joint_fields.dtype) * presence_grid
+    # base['masked_grid'] contains only noisy or clean observations at the base
+    # locations. Multiplication by the presence grid cannot reveal an inactive
+    # modality or an unobserved spatial value.
+    masked_grid = base["masked_grid"] * presence_grid
+    sensor_presence = modality_presence.unsqueeze(1).expand(
+        -1, int(base["obs_values"].shape[1]), -1
+    )
+    obs_values = base["obs_values"] * sensor_presence
+    voronoi_grid = None
+    if build_voronoi_grid:
+        from .voronoi import voronoi_fill_per_channel
+
+        voronoi_grid = voronoi_fill_per_channel(masked_grid, active_mask)
+
+    location_count = int(base["num_observations_total"])
+    count_a = [location_count if mode_name in {"a_only", "both"} else 0 for mode_name in condition_modes]
+    count_u = [location_count if mode_name in {"u_only", "both"} else 0 for mode_name in condition_modes]
+    active_mask_ids = [_mask_id(active_mask[index]) for index in range(active_mask.shape[0])]
+    return {
+        "mask": active_mask,
+        "base_mask": base_mask_batched,
+        "obs_values": obs_values,
+        "obs_presence": sensor_presence,
+        "obs_coords": base["obs_coords"],
+        "masked_grid": masked_grid,
+        "voronoi_grid": voronoi_grid,
+        "mask_id": _mask_id(active_mask),
+        "mask_ids": active_mask_ids,
+        "base_mask_id": base["mask_id"],
+        "base_mask_ids": list(base.get("mask_ids", [])),
+        "num_sensor_locations": location_count,
+        "num_scalar_observations_a": count_a,
+        "num_scalar_observations_u": count_u,
+        "num_scalar_observations_total": [a + u for a, u in zip(count_a, count_u)],
+        "condition_modes": [str(value) for value in condition_modes],
         "sensor_budget_mode": sensor_budget_mode,
     }
 

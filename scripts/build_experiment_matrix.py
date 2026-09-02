@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.experiments.build_matrix import main as build_main
+from scripts.experiments.provenance import requires_full_data_manifest
 
 
 DEFAULT_CONFIG = "configs/experiments/main_results.yaml"
@@ -26,7 +27,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--matrix-name", default="")
     parser.add_argument("--data-manifest", default=os.environ.get("DATA_MANIFEST", ""))
     parser.add_argument("--include-skipped", action="store_true")
-    parser.add_argument("--comparison-track", choices=["unified_adapted", "official_native"], default="")
+    parser.add_argument(
+        "--comparison-track",
+        choices=["unified_adapted", "official_native", "sparse_solution_multicondition"],
+        default="",
+    )
     return parser.parse_args(argv)
 
 
@@ -34,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8")) or {}
     protocol = str(config.get("task_protocol_version", ""))
-    if protocol.startswith("fm4pde-task-contract-") and not args.data_manifest:
+    if requires_full_data_manifest(protocol) and not args.data_manifest:
         raise ValueError(
             "--data-manifest is required for a formal FM4PDE matrix; run "
             "scripts/verify_data_protocol.py --full first"

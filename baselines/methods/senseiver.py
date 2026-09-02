@@ -21,6 +21,8 @@ class SenseiverBaseline(BaselineModel):
         self.out_shape = tuple(data_spec["target_shape"][1:])
         self.in_channels = int(data_spec["input_channels"])
         self.out_channels = int(data_spec["target_channels"])
+        self.multicondition_adapter = data_spec.get("task") == "sparse_solution_multicondition"
+        self.sensor_feature_channels = self.in_channels * (2 if self.multicondition_adapter else 1)
         self.spatial_shape = tuple(int(size) for size in self.out_shape[1:])
         coord_dim = len(self.spatial_shape)
         self.space_bands = int(self.config.get("space_bands", 32))
@@ -78,7 +80,7 @@ class SenseiverBaseline(BaselineModel):
             try:
                 encoder_cls, decoder_cls = get_senseiver_classes()
                 self.official_encoder = encoder_cls(
-                    input_ch=self.position_channels + self.in_channels,
+                    input_ch=self.position_channels + self.sensor_feature_channels,
                     preproc_ch=enc_preproc_ch,
                     num_latents=num_latents,
                     num_latent_channels=latent_channels,
@@ -116,6 +118,7 @@ class SenseiverBaseline(BaselineModel):
                     adapter_status="official_training_flow_adapter",
                     **official_source_info("senseiver"),
                 )
+                self._mark_multicondition_adapter()
                 return self
             except Exception as exc:
                 exc = wrap_official_adapter_error("Senseiver", exc)
@@ -126,7 +129,7 @@ class SenseiverBaseline(BaselineModel):
             raise OfficialImportError(fallback_reason)
         local_channels = latent_channels
         self.sensor_proj = MLP(
-            self.position_channels + self.in_channels,
+            self.position_channels + self.sensor_feature_channels,
             local_channels,
             hidden=max(enc_preproc_ch, local_channels),
             depth=2,
@@ -154,7 +157,19 @@ class SenseiverBaseline(BaselineModel):
             ),
             adapter_status="local_adapted" if requested_local else "fallback_adapted",
         )
+        self._mark_multicondition_adapter()
         return self
+
+    def _mark_multicondition_adapter(self) -> None:
+        if not self.multicondition_adapter:
+            return
+        self.implementation_source += "_multicondition_presence_token_adapter"
+        self.adapter_status = "multicondition_task_adapter"
+        self.official_alignment_notes = (
+            self.official_alignment_notes
+            + " The [PE(x),v_a,v_u,p_a,p_u] token protocol is an FM4PDE "
+            "multicondition task adapter, not an official-native Senseiver task."
+        ).strip()
 
     def fit(self, train_loader, val_loader=None):
         return run_supervised_fit(self, train_loader, val_loader)
@@ -175,9 +190,19 @@ class SenseiverBaseline(BaselineModel):
         else:
             values = batch.obs_values.to(batch.input_fields.device, batch.input_fields.dtype)
             coords = batch.obs_coords.to(batch.input_fields.device, batch.input_fields.dtype)
-        if values.shape[-1] != self.in_channels:
+        if self.multicondition_adapter:
+            presence = batch.metadata.get("sensor_presence")
+            if not isinstance(presence, torch.Tensor):
+                raise ValueError("multicondition Senseiver requires per-token sensor_presence")
+            presence = presence.to(values.device, values.dtype)
+            if tuple(presence.shape) != tuple(values.shape):
+                raise ValueError(
+                    f"Senseiver sensor_presence shape {tuple(presence.shape)} must match values {tuple(values.shape)}"
+                )
+            values = torch.cat([values, presence], dim=-1)
+        if values.shape[-1] != self.sensor_feature_channels:
             raise ValueError(
-                f"Senseiver observations have {values.shape[-1]} channels, expected {self.in_channels}; "
+                f"Senseiver observations have {values.shape[-1]} feature channels, expected {self.sensor_feature_channels}; "
                 "input and target channels must not be truncated or broadcast"
             )
         b = values.shape[0]
@@ -196,11 +221,16 @@ class SenseiverBaseline(BaselineModel):
     ) -> torch.Tensor:
         sensor_positions = senseiver_fourier_features(coords, self.spatial_shape, self.space_bands)
         query_positions = senseiver_fourier_features(query, self.spatial_shape, self.space_bands)
+        encoder_tokens = (
+            torch.cat([sensor_positions, values], dim=-1)
+            if self.multicondition_adapter
+            else torch.cat([values, sensor_positions], dim=-1)
+        )
         if self.official_encoder is not None and self.official_decoder is not None:
-            latents = self.official_encoder(torch.cat([values, sensor_positions], dim=-1))
+            latents = self.official_encoder(encoder_tokens)
             decoded = self.official_decoder(latents, query_positions)
             return decoded.permute(0, 2, 1)
-        tokens = self.sensor_proj(torch.cat([values, sensor_positions], dim=-1))
+        tokens = self.sensor_proj(encoder_tokens)
         b = values.shape[0]
         latents = self.latents.unsqueeze(0).repeat(b, 1, 1)
         latents = latents + self.enc_attn(latents, tokens, tokens)[0]

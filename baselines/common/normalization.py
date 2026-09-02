@@ -87,8 +87,15 @@ def estimate_normalization_stats(loader, max_batches: int | None = None, eps: fl
         for step, batch in enumerate(loader):
             if max_batches is not None and step >= int(max_batches):
                 break
-            x = batch.input_fields.detach().float().cpu()
             y = batch.target_fields.detach().float().cpu()
+            # The multicondition input is deliberately sparse and changes by
+            # epoch. Its one shared normalization contract is estimated only
+            # from complete training [a,u] targets, never from masked values.
+            x = (
+                y
+                if batch.task == "sparse_solution_multicondition"
+                else batch.input_fields.detach().float().cpu()
+            )
             if x.ndim < 2 or y.ndim < 2:
                 raise ValueError(f"Expected input/target tensors with channel dimension, got {tuple(x.shape)} and {tuple(y.shape)}")
             input_shape = tuple(x.shape)
@@ -127,6 +134,8 @@ def estimate_normalization_stats(loader, max_batches: int | None = None, eps: fl
 
 
 def normalize_batch_input_target(batch: PDEBatch, stats: NormalizationStats) -> PDEBatch:
+    if batch.task == "sparse_solution_multicondition":
+        return _normalize_multicondition_batch(batch, stats)
     stats = stats.to(batch.input_fields.device)
     input_fields = _normalize_channels(batch.input_fields, stats.input_mean, stats.input_std)
     target_fields = _normalize_channels(batch.target_fields, stats.target_mean.to(batch.target_fields.device), stats.target_std.to(batch.target_fields.device))
@@ -161,6 +170,79 @@ def normalize_batch_input_target(batch: PDEBatch, stats: NormalizationStats) -> 
         target_fields=target_fields,
         coords=batch.coords,
         mask=batch.mask,
+        obs_values=obs_values,
+        obs_coords=batch.obs_coords,
+        channel_names=batch.channel_names,
+        input_channel_names=batch.input_channel_names,
+        target_channel_names=batch.target_channel_names,
+        metadata=metadata,
+        pde_params=batch.pde_params,
+        split=batch.split,
+        sample_indices=batch.sample_indices,
+        global_sample_ids=list(batch.global_sample_ids),
+        file_paths=list(batch.file_paths),
+    )
+
+
+def _normalize_multicondition_batch(batch: PDEBatch, stats: NormalizationStats) -> PDEBatch:
+    """Normalize complete fields before applying per-modality presence masks."""
+    stats = stats.to(batch.input_fields.device)
+    if int(batch.input_fields.shape[1]) != int(stats.target_mean.numel()):
+        raise ValueError(
+            "sparse_solution_multicondition normalization requires one statistic per joint field channel"
+        )
+    if batch.mask is None:
+        raise ValueError("sparse_solution_multicondition requires an active modality mask")
+    mask = batch.mask.to(batch.input_fields.device, batch.input_fields.dtype)
+    if tuple(mask.shape) == tuple(batch.input_fields.shape[1:]):
+        mask = mask.unsqueeze(0).expand(batch.input_fields.shape[0], *mask.shape)
+    if tuple(mask.shape) != tuple(batch.input_fields.shape):
+        raise ValueError(
+            f"multicondition mask shape {tuple(mask.shape)} must match input {tuple(batch.input_fields.shape)}"
+        )
+    mean = _channel_view(stats.target_mean, batch.input_fields.ndim)
+    std = _channel_view(stats.target_std.clamp_min(1e-12), batch.input_fields.ndim)
+    # Subtract means only at observed entries. Missing entries therefore remain
+    # exact zero placeholders in standardized space instead of -mean/std.
+    input_fields = ((batch.input_fields - mean * mask) / std) * mask
+    target_fields = _normalize_channels(
+        batch.target_fields,
+        stats.target_mean.to(batch.target_fields.device),
+        stats.target_std.to(batch.target_fields.device),
+    )
+    metadata = dict(batch.metadata)
+    metadata["masked_grid"] = input_fields
+    metadata["normalization_applied"] = True
+    metadata["normalization_scale"] = "mean_std"
+    metadata["normalization_order"] = "full_joint_field_then_active_mask"
+    metadata["normalization_statistics_source"] = "complete_training_joint_fields"
+    metadata["normalization_metadata_sources"] = {"masked_grid": "target_then_mask"}
+    if isinstance(metadata.get("voronoi_grid"), torch.Tensor):
+        from baselines.common.voronoi import voronoi_fill_per_channel
+
+        metadata["voronoi_grid"] = voronoi_fill_per_channel(input_fields, mask)
+
+    obs_values = batch.obs_values
+    presence = metadata.get("sensor_presence")
+    if isinstance(obs_values, torch.Tensor):
+        if not isinstance(presence, torch.Tensor) or tuple(presence.shape) != tuple(obs_values.shape):
+            raise ValueError(
+                "sparse_solution_multicondition observations require sensor_presence matching obs_values"
+            )
+        presence = presence.to(obs_values.device, obs_values.dtype)
+        obs_mean = stats.target_mean.to(obs_values.device).reshape(1, 1, -1)
+        obs_std = stats.target_std.to(obs_values.device).clamp_min(1e-12).reshape(1, 1, -1)
+        obs_values = ((obs_values - obs_mean * presence) / obs_std) * presence
+        metadata["sensor_presence"] = presence
+        metadata["normalization_metadata_sources"]["obs_values"] = "target_then_presence"
+    return PDEBatch(
+        pde_name=batch.pde_name,
+        task=batch.task,
+        full_tensor=batch.full_tensor,
+        input_fields=input_fields,
+        target_fields=target_fields,
+        coords=batch.coords,
+        mask=mask,
         obs_values=obs_values,
         obs_coords=batch.obs_coords,
         channel_names=batch.channel_names,

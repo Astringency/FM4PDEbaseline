@@ -489,6 +489,7 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
     if grad_clip_norm is not None:
         grad_clip_norm = float(grad_clip_norm)
     loss_name = str(model.config.get("training_loss", "mse")).lower()
+    multicondition = model.data_spec.get("task") == "sparse_solution_multicondition"
     history = {
         "train_loss": [],
         "val_loss": [],
@@ -506,6 +507,20 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         "optimizer": str(model.config.get("optimizer", "adam")).lower(),
         "lr_scheduler": str(model.config.get("lr_scheduler", "none")).lower(),
     }
+    if multicondition:
+        history.update(
+            {
+                "train_loss_a": [],
+                "train_loss_u": [],
+                "train_loss_joint": [],
+                "val_loss_a": [],
+                "val_loss_u": [],
+                "val_loss_joint": [],
+                "val_loss_by_condition": [],
+                "train_condition_mode_counts": [],
+                "validation_condition_modes": ["a_only", "u_only", "both"],
+            }
+        )
     best_state = None
     best_val = None
     best_train = None
@@ -522,6 +537,8 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         count = 0
         train_batches = 0
         train_samples = 0
+        train_field_totals = {"a": 0.0, "u": 0.0, "joint": 0.0}
+        train_condition_counts = {"a_only": 0, "u_only": 0, "both": 0}
         for step, batch in enumerate(train_loader):
             if max_steps is not None and step >= int(max_steps):
                 break
@@ -538,6 +555,16 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
                 pred, target = model.supervised_training_pair(batch)
                 _require_exact_shape(pred, target, model.name, "train")
                 optimization_loss, reported_loss = _supervised_losses(model, pred, target)
+                if multicondition:
+                    field_values = _multicondition_report_losses(model, pred, target)
+                    for field, values in field_values.items():
+                        train_field_totals[field] += float(values.sum().detach().cpu())
+                    modes = batch.metadata.get("condition_modes", [])
+                    if not isinstance(modes, list) or len(modes) != int(target.shape[0]):
+                        modes = [str(batch.metadata.get("condition_mode", "mixed"))] * int(target.shape[0])
+                    for condition in modes:
+                        if condition in train_condition_counts:
+                            train_condition_counts[condition] += 1
                 _raise_if_nonfinite_loss(optimization_loss, model, epoch + 1, train_batches + 1, "train_loss")
                 optimization_loss.backward()
                 if grad_clip_norm is not None:
@@ -562,6 +589,10 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         train_loss = total / max(count, 1)
         _raise_if_nonfinite_scalar(train_loss, model, epoch + 1, count, "train_loss")
         history["train_loss"].append(train_loss)
+        if multicondition:
+            for field in ("a", "u", "joint"):
+                history[f"train_loss_{field}"].append(train_field_totals[field] / max(count, 1))
+            history["train_condition_mode_counts"].append(train_condition_counts)
         if val_loader is None and (best_train is None or train_loss < best_train):
             best_train = train_loss
         val_loss = None
@@ -570,24 +601,52 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
         if val_loader is not None:
             model.eval()
             val_total = 0.0
+            val_field_totals = {"a": 0.0, "u": 0.0, "joint": 0.0}
+            val_mode_totals = {
+                mode: {"total": 0.0, "count": 0} for mode in ("a_only", "u_only", "both")
+            }
             with torch.no_grad():
-                for step, batch in enumerate(val_loader):
-                    if max_val_steps is not None and step >= int(max_val_steps):
-                        break
-                    batch = _to_device_batch(batch, device)
-                    if model.uses_normalization and model.normalization_stats is not None:
-                        batch = normalize_batch_input_target(batch, model.normalization_stats)
-                    pred = model.predict(batch)
-                    _require_exact_shape(pred, batch.target_fields, model.name, "validation")
-                    _optimization_loss, reported_loss = _supervised_losses(model, pred, batch.target_fields)
-                    _raise_if_nonfinite_loss(reported_loss, model, epoch + 1, step + 1, "val_loss")
-                    batch_samples = int(batch.target_fields.shape[0])
-                    val_total += float(reported_loss.detach().cpu()) * batch_samples
-                    val_count += batch_samples
-                    val_batches += 1
+                validation_modes = ("a_only", "u_only", "both") if multicondition else (None,)
+                for validation_mode in validation_modes:
+                    if multicondition:
+                        _set_dataset_condition_mode(val_loader, validation_mode)
+                    for step, batch in enumerate(val_loader):
+                        if max_val_steps is not None and step >= int(max_val_steps):
+                            break
+                        batch = _to_device_batch(batch, device)
+                        if model.uses_normalization and model.normalization_stats is not None:
+                            batch = normalize_batch_input_target(batch, model.normalization_stats)
+                        pred = model.predict(batch)
+                        _require_exact_shape(pred, batch.target_fields, model.name, "validation")
+                        _optimization_loss, reported_loss = _supervised_losses(model, pred, batch.target_fields)
+                        _raise_if_nonfinite_loss(reported_loss, model, epoch + 1, step + 1, "val_loss")
+                        batch_samples = int(batch.target_fields.shape[0])
+                        val_total += float(reported_loss.detach().cpu()) * batch_samples
+                        val_count += batch_samples
+                        val_batches += 1
+                        if multicondition:
+                            field_values = _multicondition_report_losses(model, pred, batch.target_fields)
+                            for field, values in field_values.items():
+                                val_field_totals[field] += float(values.sum().detach().cpu())
+                            assert validation_mode is not None
+                            val_mode_totals[validation_mode]["total"] += float(
+                                field_values["joint"].sum().detach().cpu()
+                            )
+                            val_mode_totals[validation_mode]["count"] += batch_samples
+                if multicondition:
+                    _set_dataset_condition_mode(val_loader, None)
             val_loss = val_total / max(val_count, 1)
             _raise_if_nonfinite_scalar(val_loss, model, epoch + 1, val_count, "val_loss")
             history["val_loss"].append(val_loss)
+            if multicondition:
+                for field in ("a", "u", "joint"):
+                    history[f"val_loss_{field}"].append(val_field_totals[field] / max(val_count, 1))
+                history["val_loss_by_condition"].append(
+                    {
+                        mode: values["total"] / max(int(values["count"]), 1)
+                        for mode, values in val_mode_totals.items()
+                    }
+                )
             if best_val is None or val_loss < best_val:
                 best_val = val_loss
                 history["best_epoch"] = epoch + 1
@@ -630,6 +689,14 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
                 f"(patience={early_stopping_patience}, min_delta={early_stopping_min_delta})"
             )
         _write_incremental_history(model.config, history, epoch + 1)
+        multicondition_log = ""
+        if multicondition:
+            multicondition_log = (
+                f" loss_a={history['train_loss_a'][-1]:.6g}"
+                f" loss_u={history['train_loss_u'][-1]:.6g}"
+                f" loss_joint={history['train_loss_joint'][-1]:.6g}"
+                f" condition_mode=mixed condition_counts={train_condition_counts}"
+            )
         print(
             f"[fit epoch] baseline={model.name} pde={model.data_spec.get('pde', '')} "
             f"task={model.data_spec.get('task', '')} epoch={epoch + 1}/{epochs} "
@@ -639,7 +706,8 @@ def run_supervised_fit(model: BaselineModel, train_loader, val_loader=None):
             f"no_improve_epochs={no_improve_epochs} early_stopping_patience={early_stopping_patience} "
             f"epoch_time_sec={epoch_time:.3f} cumulative_train_time_sec={cumulative_train_time:.3f} "
             f"train_steps={train_batches} val_steps={val_batches} samples_per_sec={samples_per_sec:.3f} "
-            f"lr={opt.param_groups[0]['lr']:.3e} device={device}{_cuda_mem_text(device)}",
+            f"lr={opt.param_groups[0]['lr']:.3e} device={device}{_cuda_mem_text(device)}"
+            f"{multicondition_log}",
             file=sys.stderr,
             flush=True,
         )
@@ -656,6 +724,12 @@ def _set_dataset_epoch(loader, epoch: int) -> None:
     dataset = getattr(loader, "dataset", None)
     if dataset is not None and hasattr(dataset, "set_epoch"):
         dataset.set_epoch(int(epoch))
+
+
+def _set_dataset_condition_mode(loader, condition_mode: str | None) -> None:
+    dataset = getattr(loader, "dataset", None)
+    if dataset is not None and hasattr(dataset, "set_condition_mode"):
+        dataset.set_condition_mode(condition_mode)
 
 
 def _require_exact_shape(pred: torch.Tensor, target: torch.Tensor, baseline: str, stage: str) -> None:
@@ -740,6 +814,34 @@ def _supervised_losses(
     raise ValueError(
         f"Unsupported training_loss={loss_name!r}; supported values: mse, sum_mse, l1, relative_l2"
     )
+
+
+def _multicondition_report_losses(
+    model: BaselineModel,
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Per-sample field losses using each baseline's L1-vs-MSE convention."""
+    input_channels = int(model.data_spec.get("metadata", {}).get("joint_input_channels", 1) or 1)
+    if input_channels <= 0 or input_channels >= int(target.shape[1]):
+        raise ValueError(
+            "sparse_solution_multicondition requires a non-empty a/u channel split"
+        )
+    loss_name = str(model.config.get("training_loss", "mse")).lower()
+
+    def per_sample(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+        difference = lhs - rhs
+        if loss_name in {"l1", "mae"}:
+            values = difference.abs()
+        else:
+            values = difference.square()
+        return values.reshape(values.shape[0], -1).mean(dim=1)
+
+    return {
+        "a": per_sample(prediction[:, :input_channels], target[:, :input_channels]),
+        "u": per_sample(prediction[:, input_channels:], target[:, input_channels:]),
+        "joint": per_sample(prediction, target),
+    }
 
 
 def _scheduler_monitor_name(config: dict[str, Any], val_loader=None) -> str:
