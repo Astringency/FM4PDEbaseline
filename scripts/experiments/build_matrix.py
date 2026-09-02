@@ -955,7 +955,43 @@ def _configured_manifest_pdes(cfg: dict[str, Any]) -> list[str]:
             add(group.get("pdes"))
     if not pdes:
         raise ValueError("formal experiment config must declare an explicit PDE cohort")
+    if _is_multicondition_config(cfg):
+        return _restrict_multicondition_pdes(pdes)
     return pdes
+
+
+def _is_multicondition_config(cfg: dict[str, Any]) -> bool:
+    return bool(
+        str(cfg.get("task", "")) == "sparse_solution_multicondition"
+        or "sparse_solution_multicondition_train" in cfg.get("task_groups", [])
+    )
+
+
+def _restrict_multicondition_pdes(configured: list[str]) -> list[str]:
+    """Apply the launcher's optional PDE cohort selector to this ablation only."""
+    raw = os.environ.get("PDE_LIST", "").strip()
+    if not raw:
+        return list(configured)
+    requested = [value for value in re.split(r"[,\s]+", raw) if value]
+    if len(requested) != len(set(requested)):
+        raise ValueError(f"PDE_LIST contains duplicate entries: {requested}")
+    if "burger" in requested:
+        raise ValueError(
+            "sparse_solution_multicondition does not support Burgers trajectory semantics"
+        )
+    supported = {"poisson", "helmholtz", "darcy", "nsnonbounded"}
+    unsupported = sorted(set(requested) - supported)
+    if unsupported:
+        raise ValueError(
+            "PDE_LIST contains PDEs unsupported by sparse_solution_multicondition: "
+            f"{unsupported}"
+        )
+    unavailable = sorted(set(requested) - set(configured))
+    if unavailable:
+        raise ValueError(
+            f"PDE_LIST selects PDEs not declared by the experiment config: {unavailable}"
+        )
+    return requested
 
 
 def write_outputs(rows: list[dict[str, Any]], skipped_rows: list[dict[str, Any]], summary: dict[str, Any], output_root: str | Path, matrix_name: str) -> None:
@@ -1088,9 +1124,16 @@ def _matrix_uses_official_inverse_observation_operator(cfg: dict[str, Any], grou
 def _resolve_pdes(cfg: dict[str, Any], group_cfg: dict[str, Any], experiment_kind: str, ablation_factor: str) -> list[str]:
     if experiment_kind == "ablation" and _env_flag("FULL_ABLATION_ALL"):
         if ablation_factor == "time_varying_sensor_count":
-            return list(ALL_PDES)
-        return list(ALL_PDES)
-    return _resolve_list(group_cfg.get("pdes", cfg.get("pdes", ALL_PDES)), ALL_PDES)
+            configured = list(ALL_PDES)
+        else:
+            configured = list(ALL_PDES)
+    else:
+        configured = _resolve_list(
+            group_cfg.get("pdes", cfg.get("pdes", ALL_PDES)), ALL_PDES
+        )
+    if ablation_factor == "sparse_solution_multicondition":
+        return _restrict_multicondition_pdes(configured)
+    return configured
 
 
 def _resolve_baselines(

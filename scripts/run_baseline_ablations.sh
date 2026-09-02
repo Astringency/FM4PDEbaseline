@@ -4,8 +4,9 @@ set -Eeuo pipefail
 # One-command workflow for sparse_solution_multicondition.
 # Override values as environment variables, for example:
 #   DATA_ROOT=/data/PDEdata GPUS=0,1 JOBS_PER_GPU=1 bash scripts/run_baseline_ablations.sh
+# Run a PDE subset with, for example:
+#   PDE_LIST=poisson bash scripts/run_baseline_ablations.sh
 DATA_ROOT="${DATA_ROOT:-${HOME}/share/PDEdata}"
-OUT_ROOT="${OUT_ROOT:-results/ablations/sparse_solution_multicondition}"
 CONFIG="${CONFIG:-configs/experiments/sparse_solution_multicondition_ablation.yaml}"
 MATRIX_NAME="${MATRIX_NAME:-sparse_solution_multicondition_ablation}"
 GPUS="${GPUS:-0,1}"
@@ -15,14 +16,76 @@ RERUN_RUNNING="${RERUN_RUNNING:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 PYTHON_BIN="${PYTHON:-python}"
 
+PDE_SELECTOR_ACTIVE=0
+PDE_LIST_RAW="${PDE_LIST:-}"
+SELECTED_PDES=(poisson helmholtz darcy nsnonbounded)
+if [ -n "${PDE_LIST_RAW//[[:space:],]/}" ]; then
+  PDE_SELECTOR_ACTIVE=1
+  PDE_LIST_NORMALIZED="${PDE_LIST_RAW//,/ }"
+  read -r -a REQUESTED_PDES <<< "$PDE_LIST_NORMALIZED"
+  SELECTED_PDES=()
+  for pde in "${REQUESTED_PDES[@]}"; do
+    case "$pde" in
+      poisson|helmholtz|darcy|nsnonbounded) ;;
+      burger)
+        printf '[run_baseline_ablations] sparse_solution_multicondition does not support Burgers trajectory semantics\n' >&2
+        exit 2
+        ;;
+      *)
+        printf '[run_baseline_ablations] unsupported PDE in PDE_LIST: %s\n' "$pde" >&2
+        exit 2
+        ;;
+    esac
+    for selected in "${SELECTED_PDES[@]}"; do
+      if [ "$selected" = "$pde" ]; then
+        printf '[run_baseline_ablations] duplicate PDE in PDE_LIST: %s\n' "$pde" >&2
+        exit 2
+      fi
+    done
+    SELECTED_PDES+=("$pde")
+  done
+fi
+
+PDE_LIST=""
+PDE_TAG=""
+for pde in "${SELECTED_PDES[@]}"; do
+  if [ -n "$PDE_LIST" ]; then
+    PDE_LIST+=","
+    PDE_TAG+="_"
+  fi
+  PDE_LIST+="$pde"
+  PDE_TAG+="$pde"
+done
+export PDE_LIST
+
+if [ -n "${OUT_ROOT:-}" ]; then
+  OUT_ROOT="$OUT_ROOT"
+elif [ "$PDE_SELECTOR_ACTIVE" = "1" ]; then
+  OUT_ROOT="results/ablations/sparse_solution_multicondition/$PDE_TAG"
+else
+  OUT_ROOT="results/ablations/sparse_solution_multicondition"
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 DATA_REPORT="${DATA_REPORT:-$OUT_ROOT/data_protocol/$MATRIX_NAME/full/data_protocol_report.json}"
 MATRIX="$OUT_ROOT/matrices/$MATRIX_NAME.jsonl"
 REPORT_DIR="${REPORT_DIR:-$OUT_ROOT/report}"
-TRAIN_INDICES="0-11"
-EVAL_INDICES="12-47"
+PDE_COUNT="${#SELECTED_PDES[@]}"
+BASELINE_COUNT=3
+CONDITION_COUNT=3
+TRAIN_COUNT=$((PDE_COUNT * BASELINE_COUNT))
+EVAL_COUNT=$((TRAIN_COUNT * CONDITION_COUNT))
+TOTAL_COUNT=$((TRAIN_COUNT + EVAL_COUNT))
+TRAIN_INDICES="0-$((TRAIN_COUNT - 1))"
+EVAL_INDICES="$TRAIN_COUNT-$((TOTAL_COUNT - 1))"
+VERIFY_PDE_ARGS=()
+if [ "$PDE_SELECTOR_ACTIVE" = "1" ]; then
+  for pde in "${SELECTED_PDES[@]}"; do
+    VERIFY_PDE_ARGS+=(--pde "$pde")
+  done
+fi
 
 log() {
   printf '[run_baseline_ablations] %s\n' "$*"
@@ -65,8 +128,9 @@ log "DATA_ROOT=$DATA_ROOT"
 log "OUT_ROOT=$OUT_ROOT"
 log "CONFIG=$CONFIG"
 log "MATRIX=$MATRIX"
+log "PDE_LIST=$PDE_LIST"
 log "GPUS=$GPUS JOBS_PER_GPU=$JOBS_PER_GPU"
-log "workflow=12 training rows -> checkpoint binding -> 36 eval-only rows -> report"
+log "workflow=$TRAIN_COUNT training rows -> checkpoint binding -> $EVAL_COUNT eval-only rows -> report"
 
 if [ "$DRY_RUN" != "1" ]; then
   mkdir -p "$OUT_ROOT"
@@ -84,6 +148,7 @@ if [ "$VERIFY_DATA" = "1" ]; then
     --config "$CONFIG" \
     --data-root "$DATA_ROOT" \
     --output-dir "$(dirname "$DATA_REPORT")" \
+    "${VERIFY_PDE_ARGS[@]}" \
     --full
 elif [ "$DRY_RUN" != "1" ] && [ ! -f "$DATA_REPORT" ]; then
   log "VERIFY_DATA=0 but DATA_REPORT does not exist: $DATA_REPORT"
@@ -98,7 +163,7 @@ build_matrix() {
     --data-manifest "$DATA_REPORT"
 }
 
-log "step 2/6: build the 12-train + 36-evaluation matrix"
+log "step 2/6: build the $TRAIN_COUNT-train + $EVAL_COUNT-evaluation matrix"
 build_matrix
 if [ "$DRY_RUN" != "1" ] && [ ! -f "$MATRIX" ]; then
   log "matrix was not created: $MATRIX"
@@ -116,7 +181,7 @@ if [ "$RERUN_RUNNING" = "1" ]; then
 fi
 
 runner_failed=0
-log "step 3/6: train or resume exactly 12 models"
+log "step 3/6: train or resume exactly $TRAIN_COUNT models"
 run_cmd "${runner_args[@]}" --indices "$TRAIN_INDICES" || runner_failed=1
 
 log "step 4/6: rebuild the matrix and bind checkpoint paths/SHA-256 values"

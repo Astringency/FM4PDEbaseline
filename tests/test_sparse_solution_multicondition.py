@@ -311,7 +311,8 @@ def test_condition_probabilities_are_strictly_validated():
         validate_condition_probabilities({"a_only": 0.2, "u_only": 0.2, "both": 0.2})
 
 
-def test_ablation_matrix_is_12_train_rows_plus_36_eval_views(tmp_path):
+def test_ablation_matrix_is_12_train_rows_plus_36_eval_views(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDE_LIST", raising=False)
     config_path = ROOT / "configs/experiments/sparse_solution_multicondition_ablation.yaml"
     config = load_config(config_path)
     rows, skipped, _summary = build_matrix(
@@ -336,6 +337,24 @@ def test_ablation_matrix_is_12_train_rows_plus_36_eval_views(tmp_path):
 
     main_text = (ROOT / "configs/experiments/main_results.yaml").read_text(encoding="utf-8")
     assert "sparse_solution_multicondition" not in main_text
+
+
+def test_ablation_matrix_pde_list_is_a_cohort_filter(tmp_path, monkeypatch):
+    monkeypatch.setenv("PDE_LIST", "poisson")
+    config_path = ROOT / "configs/experiments/sparse_solution_multicondition_ablation.yaml"
+    rows, skipped, _summary = build_matrix(
+        load_config(config_path),
+        tmp_path / "matrix-output",
+        "sparse_solution_multicondition_ablation",
+        experiment_config_path=config_path,
+    )
+
+    train_rows = [row for row in rows if row["execution_mode"] == "train"]
+    eval_rows = [row for row in rows if row["execution_mode"] == "eval_only"]
+    assert not skipped
+    assert len(train_rows) == 3
+    assert len(eval_rows) == 9
+    assert {row["pde"] for row in rows} == {"poisson"}
 
 
 def test_matrix_commands_separate_training_from_checkpoint_only_evaluation(
