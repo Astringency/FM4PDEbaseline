@@ -77,6 +77,7 @@ details and disclosed adaptations.
 | `scripts/build_experiment_matrix.py` | Generate a matrix from an experiment YAML |
 | `scripts/run_experiments.py` | Run, resume, inspect, or retry a matrix |
 | `scripts/collect_results.py` | Produce CSV, JSON, XLSX, and LaTeX artifacts |
+| `scripts/summary.py` | Combine smooth, ID, and rough run summaries into one compact CSV |
 | `scripts/plot_results.py` | Render one PDF per stored evaluation sample |
 | `scripts/run_baseline.sh` | Run the complete resumable workflow |
 
@@ -346,6 +347,8 @@ python -m baselines.run \
 ### 3. Collect the results
 
 ```bash
+OUT_ROOT="$OUT_ROOT" python scripts/summary.py
+
 python scripts/collect_results.py \
   "$OUT_ROOT/matrices/main_results.jsonl" \
   --output-dir "$OUT_ROOT/aggregate/main_results" \
