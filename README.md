@@ -77,7 +77,7 @@ details and disclosed adaptations.
 | `scripts/build_experiment_matrix.py` | Generate a matrix from an experiment YAML |
 | `scripts/run_experiments.py` | Run, resume, inspect, or retry a matrix |
 | `scripts/collect_results.py` | Produce CSV, JSON, XLSX, and LaTeX artifacts |
-| `scripts/summary.py` | Combine smooth, ID, and rough run summaries into one compact CSV |
+| `scripts/summary.py` | Combine smooth, ID, and rough run summaries into one compact XLSX workbook |
 | `scripts/plot_results.py` | Render one PDF per stored evaluation sample |
 | `scripts/run_baseline.sh` | Run the complete resumable workflow |
 

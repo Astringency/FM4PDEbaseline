@@ -1,43 +1,72 @@
 #!/usr/bin/env python
-"""Collect smooth, ID, and rough results into one compact CSV file.
+"""Collect smooth, ID, and rough results into one compact XLSX workbook.
 
-Every successful run under ``runs/main_results`` contributes one output row.
-Those results are the smooth-distribution results.  Matching summaries under
-``runs/evaluations/id`` and ``runs/evaluations/rough`` fill the optional ID and
-rough columns; missing evaluations remain blank.
+Every current run in ``matrices/main_results.jsonl`` contributes Smooth, ID,
+and Rough rows.  The Smooth values come from ``runs/main_results``.  Matching
+summaries under ``runs/evaluations/id`` and ``runs/evaluations/rough`` fill the
+optional evaluation rows; missing evaluations remain blank.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.table import Table, TableStyleInfo
+
 
 SUMMARY_COLUMNS = [
-    "task_group",
-    "pde",
-    "task",
-    "baseline",
-    "seed",
-    "relative_l2_a_smooth_pct",
-    "relative_l2_a_id_pct",
-    "relative_l2_a_rough_pct",
-    "relative_l2_u_smooth_pct",
-    "relative_l2_u_id_pct",
-    "relative_l2_u_rough_pct",
+    "PDE",
+    "Method",
+    "TASK",
+    "DIST",
+    "SENSOR",
+    "rel L2(a)",
+    "rel L2(u)",
+    "pde L",
+    "Remark",
 ]
 
-_DISTRIBUTIONS = ("id", "rough")
+_DISTRIBUTIONS = ("smooth", "id", "rough")
 _METRIC_FIELDS = {
     "a": "relative_l2_input_or_coeff_mean",
     "u": "relative_l2_solution_mean",
 }
 _SUMMARY_IDENTITY_FIELDS = ("task_group", "pde", "baseline", "seed")
+_TASK_LABELS = {
+    "forward": "forward",
+    "sparse_forward": "forward",
+    "inverse": "inverse",
+    "sparse_inverse": "inverse",
+    "sparse_solution": "both",
+    "sparse_solution_multicondition": "both",
+}
+_PDE_LABELS = {
+    "poisson": "Poisson",
+    "helmholtz": "Helmholtz",
+    "darcy": "Darcy",
+    "burger": "Burgers",
+    "nsnonbounded": "NS",
+}
+_METHOD_LABELS = {
+    "fno": "FNO",
+    "deeponet": "DeepONet",
+    "ifno": "IFNO",
+    "recfno": "RecFNO",
+    "senseiver": "Senseiver",
+    "voronoicnn": "VoronoiCNN",
+    "pinn_sparse": "PINN-Sparse",
+    "pde_opt": "PDE-Opt",
+    "pc_bnn": "PC-BNN",
+    "var4d": "Var4D",
+    "vivid": "VIVID",
+}
 
 
 def _resolve_out_root(out_root: str | Path | None) -> Path:
@@ -151,7 +180,7 @@ def _load_result(
     return item
 
 
-def _percent(item: Mapping[str, Any] | None, metric: str) -> float | str:
+def _relative_l2(item: Mapping[str, Any] | None, metric: str) -> float | str:
     if item is None:
         return ""
     value = item.get(_METRIC_FIELDS[metric])
@@ -159,7 +188,47 @@ def _percent(item: Mapping[str, Any] | None, metric: str) -> float | str:
         number = float(value)
     except (TypeError, ValueError):
         return ""
-    return number * 100.0 if math.isfinite(number) else ""
+    return number if math.isfinite(number) else ""
+
+
+def _finite_value(item: Mapping[str, Any] | None, field: str) -> float | str:
+    if item is None:
+        return ""
+    try:
+        value = float(item.get(field))
+    except (TypeError, ValueError):
+        return ""
+    return value if math.isfinite(value) else ""
+
+
+def _task_label(row: Mapping[str, Any]) -> str:
+    task = str(row.get("task", ""))
+    try:
+        return _TASK_LABELS[task]
+    except KeyError as exc:
+        raise RuntimeError(f"unsupported task in main-results matrix: {task!r}") from exc
+
+
+def _sensor_label(item: Mapping[str, Any]) -> str:
+    mode = str(item.get("sensor_mode", item.get("requested_sensor_mode", ""))).lower()
+    if mode in {"", "none"}:
+        return ""
+    if "time_slice" in mode or "sensor_col" in mode or "sersor_col" in mode:
+        return "sersor_col"
+    return "random"
+
+
+def _display_label(value: Any, labels: Mapping[str, str]) -> str:
+    text = str(value)
+    return labels.get(text.lower(), text)
+
+
+def _relative_folder(root: Path, summary_path: Path) -> str:
+    folder = summary_path.parent
+    try:
+        return str(folder.relative_to(root))
+    except ValueError:
+        return str(folder)
 
 
 def collect_summary_rows(out_root: str | Path | None = None) -> list[dict[str, Any]]:
@@ -169,60 +238,114 @@ def collect_summary_rows(out_root: str | Path | None = None) -> list[dict[str, A
     rows: list[dict[str, Any]] = []
     for row in _load_matrix(root):
         run_id = str(row["run_id"])
+        main_path = _main_summary_path(root, row)
         smooth = _load_result(
-            _main_summary_path(root, row),
+            main_path,
             row,
             expected_run_id=run_id,
             required=True,
         )
         assert smooth is not None
-        evaluations = {
-            distribution: _load_result(
-                _evaluation_summary_path(root, row, distribution),
-                row,
-                expected_run_id=f"eval_{distribution}_{run_id}",
-                required=False,
-            )
-            for distribution in _DISTRIBUTIONS
+        result_paths = {
+            "smooth": main_path,
+            **{
+                distribution: _evaluation_summary_path(root, row, distribution)
+                for distribution in _DISTRIBUTIONS
+                if distribution != "smooth"
+            },
         }
-        item: dict[str, Any] = {
-            "task_group": smooth.get("task_group", ""),
-            "pde": smooth.get("pde", ""),
-            "task": smooth.get("task", ""),
-            "baseline": smooth.get("baseline", ""),
-            "seed": smooth.get("seed", ""),
-        }
-        for metric in _METRIC_FIELDS:
-            item[f"relative_l2_{metric}_smooth_pct"] = _percent(smooth, metric)
-            for distribution in _DISTRIBUTIONS:
-                item[f"relative_l2_{metric}_{distribution}_pct"] = _percent(
-                    evaluations[distribution], metric
+        results: dict[str, dict[str, Any] | None] = {
+            "smooth": smooth,
+            **{
+                distribution: _load_result(
+                    result_paths[distribution],
+                    row,
+                    expected_run_id=f"eval_{distribution}_{run_id}",
+                    required=False,
                 )
-        rows.append({column: item.get(column, "") for column in SUMMARY_COLUMNS})
+                for distribution in _DISTRIBUTIONS
+                if distribution != "smooth"
+            },
+        }
+        task = _task_label(row)
+        for distribution in _DISTRIBUTIONS:
+            result = results[distribution]
+            source = _relative_folder(root, result_paths[distribution])
+            rows.append(
+                {
+                    "PDE": _display_label(row.get("pde", ""), _PDE_LABELS),
+                    "Method": _display_label(row.get("baseline", ""), _METHOD_LABELS),
+                    "TASK": task,
+                    "DIST": distribution.title() if distribution != "id" else "ID",
+                    "SENSOR": _sensor_label(result or smooth),
+                    "rel L2(a)": _relative_l2(result, "a"),
+                    "rel L2(u)": _relative_l2(result, "u"),
+                    "pde L": (
+                        _finite_value(result, "pde_residual_mean") if task == "both" else ""
+                    ),
+                    "Remark": source if result is not None else f"missing: {source}",
+                }
+            )
     return rows
 
 
 def summary(out_root: str | Path | None = None) -> Path:
-    """Write ``OUT_ROOT/summary/results.csv`` and return its path."""
+    """Write ``OUT_ROOT/summary/results.xlsx`` and return its path."""
 
     root = _resolve_out_root(out_root)
     rows = collect_summary_rows(root)
     output_dir = root / "summary"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / "results.csv"
-    temporary = output_dir / ".results.csv.tmp"
+    output = output_dir / "results.xlsx"
+    temporary = output_dir / ".results.tmp.xlsx"
     try:
-        with temporary.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=SUMMARY_COLUMNS)
-            writer.writeheader()
-            writer.writerows(
-                {
-                    key: f"{value:.6g}" if isinstance(value, float) else value
-                    for key, value in row.items()
-                }
-                for row in rows
-            )
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Results"
+        worksheet.append(SUMMARY_COLUMNS)
+        for row in rows:
+            worksheet.append([row[column] for column in SUMMARY_COLUMNS])
+
+        header_fill = PatternFill("solid", fgColor="2F75B5")
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = f"A1:I{len(rows) + 1}"
+        widths = (14, 16, 10, 10, 12, 14, 14, 14, 72)
+        for index, width in enumerate(widths, start=1):
+            worksheet.column_dimensions[chr(64 + index)].width = width
+        for row_number in range(2, len(rows) + 2):
+            for column in (6, 7):
+                worksheet.cell(row_number, column).number_format = "0.000000"
+            worksheet.cell(row_number, 8).number_format = "0.000000E+00"
+        table = Table(displayName="ResultsTable", ref=f"A1:I{len(rows) + 1}")
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        worksheet.add_table(table)
+        workbook.save(temporary)
+        workbook.close()
+
+        validation = load_workbook(temporary, read_only=True, data_only=True)
+        try:
+            if validation.sheetnames != ["Results"]:
+                raise RuntimeError(f"unexpected workbook sheets: {validation.sheetnames}")
+            saved = validation["Results"]
+            headers = [saved.cell(1, column).value for column in range(1, 10)]
+            if headers != SUMMARY_COLUMNS or saved.max_row != len(rows) + 1:
+                raise RuntimeError("saved workbook structure does not match the summary rows")
+        finally:
+            validation.close()
         temporary.replace(output)
+        legacy_csv = output_dir / "results.csv"
+        if legacy_csv.is_file():
+            legacy_csv.unlink()
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -244,8 +367,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     output = summary(args.out_root)
-    with output.open(encoding="utf-8") as handle:
-        rows = sum(1 for _ in handle) - 1
+    workbook = load_workbook(output, read_only=True)
+    try:
+        rows = workbook["Results"].max_row - 1
+    finally:
+        workbook.close()
     print(json.dumps({"output": str(output), "rows": rows}, ensure_ascii=False))
     return 0
 
