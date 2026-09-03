@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-Identity = tuple[str, str, str, str]
-
 SUMMARY_COLUMNS = [
     "task_group",
     "pde",
@@ -39,7 +37,7 @@ _METRIC_FIELDS = {
     "a": "relative_l2_input_or_coeff_mean",
     "u": "relative_l2_solution_mean",
 }
-_IDENTITY_FIELDS = ("task_group", "pde", "baseline", "seed")
+_SUMMARY_IDENTITY_FIELDS = ("task_group", "pde", "baseline", "seed")
 
 
 def _resolve_out_root(out_root: str | Path | None) -> Path:
@@ -63,65 +61,94 @@ def _read_summary(path: Path) -> dict[str, Any]:
     return value
 
 
-def _successful_summaries(root: Path, *, required: bool) -> list[dict[str, Any]]:
-    if not root.is_dir():
-        if required:
-            raise RuntimeError(f"results directory is missing: {root}")
-        return []
-
-    summaries = [_read_summary(path) for path in sorted(root.glob("**/summary.json"))]
-    successful = [item for item in summaries if item.get("status") == "success"]
-    if required and not successful:
-        raise RuntimeError(f"no successful result summaries found under: {root}")
-    return successful
-
-
-def _identity(item: Mapping[str, Any]) -> Identity:
-    values = [str(item.get(field, "")) for field in _IDENTITY_FIELDS]
-    return values[0], values[1], values[2], values[3]
-
-
-def _index_main_results(
-    summaries: Sequence[dict[str, Any]],
-) -> tuple[dict[str, dict[str, Any]], dict[Identity, str]]:
-    by_run_id: dict[str, dict[str, Any]] = {}
-    by_identity: dict[Identity, str] = {}
-    for item in summaries:
-        run_id = str(item.get("run_id", ""))
-        if not run_id:
-            raise RuntimeError("a main-results summary has no run_id")
-        if run_id in by_run_id:
-            raise RuntimeError(f"duplicate main-results run_id: {run_id}")
-        identity = _identity(item)
-        if identity in by_identity:
-            raise RuntimeError(f"duplicate main-results identity: {identity}")
-        by_run_id[run_id] = item
-        by_identity[identity] = run_id
-    return by_run_id, by_identity
-
-
-def _index_evaluations(
-    summaries: Sequence[dict[str, Any]],
-    *,
-    distribution: str,
-    main_by_run_id: Mapping[str, dict[str, Any]],
-    main_by_identity: Mapping[Identity, str],
-) -> dict[str, dict[str, Any]]:
-    indexed: dict[str, dict[str, Any]] = {}
-    prefix = f"eval_{distribution}_"
-    for item in summaries:
-        eval_run_id = str(item.get("run_id", ""))
-        source_run_id = eval_run_id[len(prefix) :] if eval_run_id.startswith(prefix) else ""
-        if source_run_id not in main_by_run_id:
-            source_run_id = main_by_identity.get(_identity(item), "")
-        if not source_run_id:
+def _load_matrix(root: Path) -> list[dict[str, Any]]:
+    path = root / "matrices" / "main_results.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read main-results matrix: {path}: {exc}") from exc
+    rows: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
             continue
-        if source_run_id in indexed:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid matrix JSON at {path}:{line_number}: {exc}") from exc
+        if not isinstance(row, dict):
+            raise RuntimeError(f"matrix row is not a JSON object at {path}:{line_number}")
+        if not row.get("skip_reason"):
+            rows.append(row)
+    if not rows:
+        raise RuntimeError(f"main-results matrix has no runnable rows: {path}")
+    return rows
+
+
+def _main_summary_path(root: Path, row: Mapping[str, Any]) -> Path:
+    configured = str(row.get("output_dir", ""))
+    marker = "/runs/main_results/"
+    if marker in configured:
+        relative = configured.split(marker, 1)[1]
+        return root / "runs" / "main_results" / relative / "summary.json"
+    if configured:
+        return Path(configured).expanduser() / "summary.json"
+    return (
+        root
+        / "runs"
+        / "main_results"
+        / f"task_group={row['task_group']}"
+        / f"pde={row['pde']}"
+        / f"baseline={row['baseline']}"
+        / f"seed={row['seed']}"
+        / f"run={row['run_id']}"
+        / "summary.json"
+    )
+
+
+def _evaluation_summary_path(
+    root: Path,
+    row: Mapping[str, Any],
+    distribution: str,
+) -> Path:
+    return (
+        root
+        / "runs"
+        / "evaluations"
+        / distribution
+        / f"task_group={row['task_group']}"
+        / f"pde={row['pde']}"
+        / f"baseline={row['baseline']}"
+        / f"seed={row['seed']}"
+        / f"run=eval_{distribution}_{row['run_id']}"
+        / "summary.json"
+    )
+
+
+def _load_result(
+    path: Path,
+    row: Mapping[str, Any],
+    *,
+    expected_run_id: str,
+    required: bool,
+) -> dict[str, Any] | None:
+    if not path.is_file():
+        if required:
+            raise RuntimeError(f"main-results summary is missing: {path}")
+        return None
+    item = _read_summary(path)
+    if item.get("status") != "success":
+        if required:
+            raise RuntimeError(f"main-results summary is not successful: {path}")
+        return None
+    expected = {field: row.get(field) for field in _SUMMARY_IDENTITY_FIELDS}
+    expected["run_id"] = expected_run_id
+    for field, value in expected.items():
+        if item.get(field) != value:
             raise RuntimeError(
-                f"duplicate {distribution} evaluation for main run: {source_run_id}"
+                f"summary identity mismatch at {path}: "
+                f"{field}={item.get(field)!r}, expected {value!r}"
             )
-        indexed[source_run_id] = item
-    return indexed
+    return item
 
 
 def _percent(item: Mapping[str, Any] | None, metric: str) -> float | str:
@@ -136,26 +163,28 @@ def _percent(item: Mapping[str, Any] | None, metric: str) -> float | str:
 
 
 def collect_summary_rows(out_root: str | Path | None = None) -> list[dict[str, Any]]:
-    """Return one row per successful main run, with optional ID/rough metrics."""
+    """Return current matrix rows with smooth and optional ID/rough metrics."""
 
     root = _resolve_out_root(out_root)
-    main_summaries = _successful_summaries(root / "runs" / "main_results", required=True)
-    main_by_run_id, main_by_identity = _index_main_results(main_summaries)
-    evaluations = {
-        distribution: _index_evaluations(
-            _successful_summaries(
-                root / "runs" / "evaluations" / distribution,
-                required=False,
-            ),
-            distribution=distribution,
-            main_by_run_id=main_by_run_id,
-            main_by_identity=main_by_identity,
-        )
-        for distribution in _DISTRIBUTIONS
-    }
-
     rows: list[dict[str, Any]] = []
-    for run_id, smooth in main_by_run_id.items():
+    for row in _load_matrix(root):
+        run_id = str(row["run_id"])
+        smooth = _load_result(
+            _main_summary_path(root, row),
+            row,
+            expected_run_id=run_id,
+            required=True,
+        )
+        assert smooth is not None
+        evaluations = {
+            distribution: _load_result(
+                _evaluation_summary_path(root, row, distribution),
+                row,
+                expected_run_id=f"eval_{distribution}_{run_id}",
+                required=False,
+            )
+            for distribution in _DISTRIBUTIONS
+        }
         item: dict[str, Any] = {
             "task_group": smooth.get("task_group", ""),
             "pde": smooth.get("pde", ""),
@@ -167,19 +196,10 @@ def collect_summary_rows(out_root: str | Path | None = None) -> list[dict[str, A
             item[f"relative_l2_{metric}_smooth_pct"] = _percent(smooth, metric)
             for distribution in _DISTRIBUTIONS:
                 item[f"relative_l2_{metric}_{distribution}_pct"] = _percent(
-                    evaluations[distribution].get(run_id), metric
+                    evaluations[distribution], metric
                 )
         rows.append({column: item.get(column, "") for column in SUMMARY_COLUMNS})
-
-    return sorted(
-        rows,
-        key=lambda item: (
-            str(item["task_group"]),
-            str(item["pde"]),
-            str(item["baseline"]),
-            str(item["seed"]),
-        ),
-    )
+    return rows
 
 
 def summary(out_root: str | Path | None = None) -> Path:
