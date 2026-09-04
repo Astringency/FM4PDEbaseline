@@ -77,7 +77,7 @@ details and disclosed adaptations.
 | `scripts/build_experiment_matrix.py` | Generate a matrix from an experiment YAML |
 | `scripts/run_experiments.py` | Run, resume, inspect, or retry a matrix |
 | `scripts/collect_results.py` | Produce CSV, JSON, XLSX, and LaTeX artifacts |
-| `scripts/summary.py` | Combine smooth, ID, and rough run summaries into one compact XLSX workbook |
+| `scripts/summary.py` | Combine main and ablation evaluations across smooth, ID, and rough into one provenance-aware XLSX workbook |
 | `scripts/plot_results.py` | Render one PDF per stored evaluation sample |
 | `scripts/run_baseline.sh` | Run the complete resumable workflow |
 
@@ -358,6 +358,14 @@ python scripts/plot_results.py \
   --matrix "$OUT_ROOT/matrices/main_results.jsonl" \
   --max-samples 100
 ```
+
+The compact summary prefers explicit results under
+`runs/evaluations/{smooth,id,rough}`. If an explicit Smooth evaluation is
+missing for a spatial PDE, it uses the historical Smooth metric in
+`runs/main_results` and marks the row as a fallback. Burgers is not eligible
+for this fallback because its historical unsuffixed test set is ID-like.
+Successful distribution-specific ablation evaluations are included as
+separate rows with their condition and source run recorded.
 
 Collection fails before writing publication tables if any run is missing,
 invalid, or from another provenance cohort. Plotting reads only stored sample

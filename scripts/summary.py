@@ -1,10 +1,14 @@
 #!/usr/bin/env python
-"""Collect smooth, ID, and rough results into one compact XLSX workbook.
+"""Collect main and ablation evaluations into one compact XLSX workbook.
 
-Every current run in ``matrices/main_results.jsonl`` contributes Smooth, ID,
-and Rough rows.  The Smooth values come from ``runs/main_results``.  Matching
-summaries under ``runs/evaluations/id`` and ``runs/evaluations/rough`` fill the
-optional evaluation rows; missing evaluations remain blank.
+For main-result runs, explicit evaluations under ``runs/evaluations`` are the
+preferred source for all three distributions.  When an explicit Smooth result
+is missing, spatial-PDE metrics fall back to the historical Smooth evaluation
+stored with training under ``runs/main_results``.  Burgers is excluded from
+that fallback because its historical unsuffixed test set is ID-like.
+
+Successful ablation evaluations stored below an ``ablation=*`` directory in
+``runs/evaluations/{smooth,id,rough}`` are appended to the same workbook.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from typing import Any, Mapping, Sequence
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 
@@ -26,17 +31,33 @@ SUMMARY_COLUMNS = [
     "Method",
     "TASK",
     "DIST",
+    "CONDITION",
     "SENSOR",
     "rel L2(a)",
     "rel L2(u)",
+    "joint rel L2",
     "pde L",
+    "Namespace",
+    "Ablation",
+    "Result Source",
+    "Fallback Used",
+    "Test File",
+    "Source Run",
     "Remark",
 ]
 
 _DISTRIBUTIONS = ("smooth", "id", "rough")
+_DISTRIBUTION_ORDER = {value: index for index, value in enumerate(_DISTRIBUTIONS)}
+_CONDITION_ORDER = {"a_only": 0, "u_only": 1, "both": 2}
+_IGNORED_RESULT_DIRECTORIES = {"archive", "historical", "quarantine"}
+_SMOOTH_FALLBACK_PDES = {"poisson", "helmholtz", "darcy", "nsnonbounded"}
 _METRIC_FIELDS = {
     "a": "relative_l2_input_or_coeff_mean",
     "u": "relative_l2_solution_mean",
+}
+_MULTICONDITION_METRIC_FIELDS = {
+    "a": "rel_l2_a_mean",
+    "u": "rel_l2_u_mean",
 }
 _SUMMARY_IDENTITY_FIELDS = ("task_group", "pde", "baseline", "seed")
 _TASK_LABELS = {
@@ -183,12 +204,14 @@ def _load_result(
 def _relative_l2(item: Mapping[str, Any] | None, metric: str) -> float | str:
     if item is None:
         return ""
-    value = item.get(_METRIC_FIELDS[metric])
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return ""
-    return number if math.isfinite(number) else ""
+    fields = [_METRIC_FIELDS[metric]]
+    if item.get("task") == "sparse_solution_multicondition":
+        fields.insert(0, _MULTICONDITION_METRIC_FIELDS[metric])
+    for field in fields:
+        value = _finite_value(item, field)
+        if value != "":
+            return value
+    return ""
 
 
 def _finite_value(item: Mapping[str, Any] | None, field: str) -> float | str:
@@ -207,6 +230,10 @@ def _task_label(row: Mapping[str, Any]) -> str:
         return _TASK_LABELS[task]
     except KeyError as exc:
         raise RuntimeError(f"unsupported task in main-results matrix: {task!r}") from exc
+
+
+def _joint_relative_l2(item: Mapping[str, Any] | None) -> float | str:
+    return _finite_value(item, "joint_rel_l2_mean")
 
 
 def _sensor_label(item: Mapping[str, Any]) -> str:
@@ -231,61 +258,182 @@ def _relative_folder(root: Path, summary_path: Path) -> str:
         return str(folder)
 
 
+def _test_file(item: Mapping[str, Any] | None) -> str:
+    if item is None:
+        return ""
+    raw = item.get("data_files_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return ""
+    if not isinstance(raw, Mapping):
+        return ""
+    test = raw.get("test")
+    if isinstance(test, str):
+        return test
+    if isinstance(test, Sequence) and not isinstance(test, (str, bytes)):
+        return str(test[0]) if test else ""
+    return ""
+
+
+def _distribution_label(distribution: str) -> str:
+    return "ID" if distribution == "id" else distribution.title()
+
+
+def _result_row(
+    *,
+    identity: Mapping[str, Any],
+    distribution: str,
+    result: Mapping[str, Any] | None,
+    sensor_fallback: Mapping[str, Any] | None,
+    namespace: str,
+    ablation: str,
+    condition: str,
+    result_source: str,
+    fallback_used: bool,
+    source_path: str,
+) -> dict[str, Any]:
+    task = _task_label(identity)
+    source_run = ""
+    if result is not None:
+        source_run = str(
+            result.get("source_train_run_id") or result.get("run_id") or ""
+        )
+    return {
+        "PDE": _display_label(identity.get("pde", ""), _PDE_LABELS),
+        "Method": _display_label(identity.get("baseline", ""), _METHOD_LABELS),
+        "TASK": task,
+        "DIST": _distribution_label(distribution),
+        "CONDITION": condition,
+        "SENSOR": _sensor_label(result or sensor_fallback or {}),
+        "rel L2(a)": _relative_l2(result, "a"),
+        "rel L2(u)": _relative_l2(result, "u"),
+        "joint rel L2": _joint_relative_l2(result),
+        "pde L": _finite_value(result, "pde_residual_mean") if task == "both" else "",
+        "Namespace": namespace,
+        "Ablation": ablation,
+        "Result Source": result_source,
+        "Fallback Used": fallback_used,
+        "Test File": _test_file(result),
+        "Source Run": source_run,
+        "Remark": source_path if result is not None else f"missing: {source_path}",
+    }
+
+
+def _evaluation_ablation_rows(root: Path) -> list[dict[str, Any]]:
+    rows: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    evaluation_root = root / "runs" / "evaluations"
+    for distribution in _DISTRIBUTIONS:
+        distribution_root = evaluation_root / distribution
+        if not distribution_root.is_dir():
+            continue
+        for summary_path in distribution_root.glob("ablation=*/**/summary.json"):
+            relative_parts = summary_path.relative_to(distribution_root).parts
+            if any(
+                part.lower() in _IGNORED_RESULT_DIRECTORIES
+                for part in relative_parts
+            ):
+                continue
+            ablation_parts = [
+                part for part in relative_parts if part.startswith("ablation=")
+            ]
+            if not ablation_parts:
+                continue
+            result = _read_summary(summary_path)
+            if result.get("status") != "success":
+                continue
+            task = str(result.get("task", ""))
+            if task not in _TASK_LABELS:
+                raise RuntimeError(
+                    f"unsupported task in evaluation summary: {summary_path}: {task!r}"
+                )
+            ablation = ablation_parts[0].split("=", 1)[1]
+            condition = str(
+                result.get("evaluation_condition_mode")
+                or result.get("condition_mode")
+                or ""
+            )
+            relative_path = _relative_folder(root, summary_path)
+            item = _result_row(
+                identity=result,
+                distribution=distribution,
+                result=result,
+                sensor_fallback=None,
+                namespace="evaluations",
+                ablation=ablation,
+                condition=condition,
+                result_source="explicit_evaluation",
+                fallback_used=False,
+                source_path=relative_path,
+            )
+            sort_key = (
+                _DISTRIBUTION_ORDER[distribution],
+                ablation,
+                str(result.get("pde", "")),
+                str(result.get("baseline", "")),
+                _CONDITION_ORDER.get(condition, len(_CONDITION_ORDER)),
+                str(result.get("run_id", "")),
+            )
+            rows.append((sort_key, item))
+    rows.sort(key=lambda pair: pair[0])
+    return [item for _, item in rows]
+
+
 def collect_summary_rows(out_root: str | Path | None = None) -> list[dict[str, Any]]:
-    """Return current matrix rows with smooth and optional ID/rough metrics."""
+    """Return main-result distribution rows plus explicit ablation evaluations."""
 
     root = _resolve_out_root(out_root)
     rows: list[dict[str, Any]] = []
     for row in _load_matrix(root):
         run_id = str(row["run_id"])
         main_path = _main_summary_path(root, row)
-        smooth = _load_result(
+        main = _load_result(
             main_path,
             row,
             expected_run_id=run_id,
             required=True,
         )
-        assert smooth is not None
-        result_paths = {
-            "smooth": main_path,
-            **{
-                distribution: _evaluation_summary_path(root, row, distribution)
-                for distribution in _DISTRIBUTIONS
-                if distribution != "smooth"
-            },
-        }
-        results: dict[str, dict[str, Any] | None] = {
-            "smooth": smooth,
-            **{
-                distribution: _load_result(
-                    result_paths[distribution],
-                    row,
-                    expected_run_id=f"eval_{distribution}_{run_id}",
-                    required=False,
-                )
-                for distribution in _DISTRIBUTIONS
-                if distribution != "smooth"
-            },
-        }
-        task = _task_label(row)
+        assert main is not None
         for distribution in _DISTRIBUTIONS:
-            result = results[distribution]
-            source = _relative_folder(root, result_paths[distribution])
-            rows.append(
-                {
-                    "PDE": _display_label(row.get("pde", ""), _PDE_LABELS),
-                    "Method": _display_label(row.get("baseline", ""), _METHOD_LABELS),
-                    "TASK": task,
-                    "DIST": distribution.title() if distribution != "id" else "ID",
-                    "SENSOR": _sensor_label(result or smooth),
-                    "rel L2(a)": _relative_l2(result, "a"),
-                    "rel L2(u)": _relative_l2(result, "u"),
-                    "pde L": (
-                        _finite_value(result, "pde_residual_mean") if task == "both" else ""
-                    ),
-                    "Remark": source if result is not None else f"missing: {source}",
-                }
+            evaluation_path = _evaluation_summary_path(root, row, distribution)
+            result = _load_result(
+                evaluation_path,
+                row,
+                expected_run_id=f"eval_{distribution}_{run_id}",
+                required=False,
             )
+            fallback_used = False
+            namespace = "evaluations"
+            result_source = (
+                "explicit_evaluation" if result is not None else "missing_evaluation"
+            )
+            source_path = _relative_folder(root, evaluation_path)
+            if (
+                distribution == "smooth"
+                and result is None
+                and str(row.get("pde", "")).lower() in _SMOOTH_FALLBACK_PDES
+            ):
+                result = main
+                fallback_used = True
+                namespace = "main_results"
+                result_source = "main_legacy_smooth_fallback"
+                source_path = _relative_folder(root, main_path)
+            rows.append(
+                _result_row(
+                    identity=row,
+                    distribution=distribution,
+                    result=result,
+                    sensor_fallback=main,
+                    namespace=namespace,
+                    ablation="",
+                    condition="",
+                    result_source=result_source,
+                    fallback_used=fallback_used,
+                    source_path=source_path,
+                )
+            )
+    rows.extend(_evaluation_ablation_rows(root))
     return rows
 
 
@@ -312,15 +460,45 @@ def summary(out_root: str | Path | None = None) -> Path:
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center")
         worksheet.freeze_panes = "A2"
-        worksheet.auto_filter.ref = f"A1:I{len(rows) + 1}"
-        widths = (14, 16, 10, 10, 12, 14, 14, 14, 72)
+        last_column = get_column_letter(len(SUMMARY_COLUMNS))
+        worksheet.auto_filter.ref = f"A1:{last_column}{len(rows) + 1}"
+        widths = (
+            14,
+            16,
+            10,
+            10,
+            14,
+            12,
+            14,
+            14,
+            14,
+            14,
+            16,
+            34,
+            30,
+            14,
+            52,
+            38,
+            72,
+        )
         for index, width in enumerate(widths, start=1):
-            worksheet.column_dimensions[chr(64 + index)].width = width
+            worksheet.column_dimensions[get_column_letter(index)].width = width
+        numeric_columns = {
+            SUMMARY_COLUMNS.index("rel L2(a)") + 1,
+            SUMMARY_COLUMNS.index("rel L2(u)") + 1,
+            SUMMARY_COLUMNS.index("joint rel L2") + 1,
+        }
+        pde_loss_column = SUMMARY_COLUMNS.index("pde L") + 1
         for row_number in range(2, len(rows) + 2):
-            for column in (6, 7):
+            for column in numeric_columns:
                 worksheet.cell(row_number, column).number_format = "0.000000"
-            worksheet.cell(row_number, 8).number_format = "0.000000E+00"
-        table = Table(displayName="ResultsTable", ref=f"A1:I{len(rows) + 1}")
+            worksheet.cell(
+                row_number, pde_loss_column
+            ).number_format = "0.000000E+00"
+        table = Table(
+            displayName="ResultsTable",
+            ref=f"A1:{last_column}{len(rows) + 1}",
+        )
         table.tableStyleInfo = TableStyleInfo(
             name="TableStyleMedium2",
             showFirstColumn=False,
@@ -337,7 +515,10 @@ def summary(out_root: str | Path | None = None) -> Path:
             if validation.sheetnames != ["Results"]:
                 raise RuntimeError(f"unexpected workbook sheets: {validation.sheetnames}")
             saved = validation["Results"]
-            headers = [saved.cell(1, column).value for column in range(1, 10)]
+            headers = [
+                saved.cell(1, column).value
+                for column in range(1, len(SUMMARY_COLUMNS) + 1)
+            ]
             if headers != SUMMARY_COLUMNS or saved.max_row != len(rows) + 1:
                 raise RuntimeError("saved workbook structure does not match the summary rows")
         finally:
