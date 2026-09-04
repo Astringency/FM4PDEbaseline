@@ -7,6 +7,7 @@ from scripts.run_eval import (
     DISTRIBUTION_TEST_FILES,
     build_evaluation_run,
     filter_rows,
+    load_source_summary,
     split_selection,
     successful_summary,
 )
@@ -126,6 +127,79 @@ def test_checkpoint_row_builds_eval_only_command(tmp_path: Path):
     }
 
 
+def test_ablation_source_path_is_translated_to_active_output_mount(tmp_path: Path):
+    output_root = tmp_path / "outputs" / "FM4PDEbaseline"
+    relative_run = Path(
+        "ablations/ablation=sparse_solution_multicondition/"
+        "pde=poisson/baseline=recfno/seed=1/run=source"
+    )
+    mounted_run = output_root / "runs" / relative_run
+    mounted_run.mkdir(parents=True)
+    (mounted_run / "summary.json").write_text(
+        json.dumps({"status": "success"}), encoding="utf-8"
+    )
+    row = _row(
+        output_dir=str(Path("/remote/storage/outputs/FM4PDEbaseline/runs") / relative_run)
+    )
+
+    run_dir, summary = load_source_summary(
+        row, output_root / "runs/main_results", output_root
+    )
+
+    assert run_dir == mounted_run
+    assert summary["status"] == "success"
+
+
+def test_multicondition_ablation_preserves_evaluation_condition(tmp_path: Path):
+    checkpoint = tmp_path / "source.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    probabilities = {
+        "a_only": 0.3333333333,
+        "u_only": 0.3333333333,
+        "both": 0.3333333334,
+    }
+    row = _row(
+        task="sparse_solution_multicondition",
+        task_group="sparse_solution_multicondition_eval_u_only",
+        execution_mode="eval_only",
+        condition_mode="u_only",
+        condition_probabilities=probabilities,
+        source_train_run_id="multicondition-train",
+        source_train_run_fingerprint="d" * 64,
+        source_train_seed=1,
+        source_train_task="sparse_solution_multicondition",
+        source_train_baseline_code_sha256="e" * 64,
+        checkpoint_path=str(checkpoint),
+        sensor_budget_mode="total",
+    )
+    evaluation = build_evaluation_run(
+        row,
+        {
+            "status": "success",
+            "checkpoint_path": str(checkpoint),
+            "checkpoint_sha256": "b" * 64,
+        },
+        tmp_path,
+        test_file="poisson/rough.mat",
+        test_size=1000,
+        eval_root=tmp_path / "evaluations",
+        eval_tag="rough",
+        data_root=tmp_path,
+        config=tmp_path / "paper.yaml",
+        python_bin="python",
+        device="cuda",
+        save_samples=False,
+        train_root=tmp_path,
+        output_root=tmp_path,
+    )
+
+    assert _command_value(evaluation.command, "--condition-mode") == "u_only"
+    assert json.loads(
+        _command_value(evaluation.command, "--condition-probabilities-json")
+    ) == probabilities
+    assert _command_value(evaluation.command, "--sensor-budget-mode") == "total"
+
+
 def test_per_instance_row_reruns_original_budget_without_checkpoint(tmp_path: Path):
     row = _row(
         baseline="pc_bnn",
@@ -240,5 +314,65 @@ def test_completed_summary_must_match_requested_evaluation(tmp_path: Path):
     assert successful_summary(summary_path, evaluation)
 
     summary["test_size"] = 999
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    assert not successful_summary(summary_path, evaluation)
+
+
+def test_completed_multicondition_summary_must_match_condition(tmp_path: Path):
+    checkpoint = tmp_path / "source.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    row = _row(
+        task="sparse_solution_multicondition",
+        task_group="sparse_solution_multicondition_eval_both",
+        execution_mode="eval_only",
+        condition_mode="both",
+        condition_probabilities={
+            "a_only": 0.3333333333,
+            "u_only": 0.3333333333,
+            "both": 0.3333333334,
+        },
+        source_train_run_id="multicondition-train",
+        source_train_run_fingerprint="d" * 64,
+        source_train_seed=1,
+        source_train_task="sparse_solution_multicondition",
+        checkpoint_path=str(checkpoint),
+    )
+    evaluation = build_evaluation_run(
+        row,
+        {"status": "success", "checkpoint_path": str(checkpoint)},
+        tmp_path,
+        test_file="poisson/id.mat",
+        test_size=1000,
+        eval_root=tmp_path / "evaluations",
+        eval_tag="id",
+        data_root=tmp_path,
+        config=tmp_path / "paper.yaml",
+        python_bin="python",
+        device="cuda",
+        save_samples=False,
+        train_root=tmp_path,
+    )
+    summary_path = evaluation.output_dir / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary = {
+        "status": "success",
+        "baseline": "recfno",
+        "pde": "poisson",
+        "task": "sparse_solution_multicondition",
+        "run_id": _command_value(evaluation.command, "--run-id"),
+        "seed": 1,
+        "test_size": 1000,
+        "test_requested_size": 1000,
+        "batch_size": 16,
+        "metric_granularity": "per_sample",
+        "execution_mode": "eval_only",
+        "eval_only": True,
+        "condition_mode": "both",
+        "data_files_json": _command_value(evaluation.command, "--data-files-json"),
+    }
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    assert successful_summary(summary_path, evaluation)
+
+    summary["condition_mode"] = "mixed"
     summary_path.write_text(json.dumps(summary), encoding="utf-8")
     assert not successful_summary(summary_path, evaluation)

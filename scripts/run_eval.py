@@ -1,9 +1,11 @@
 #!/usr/bin/env python
-"""Evaluate main-results matrix rows on replacement test distributions.
+"""Evaluate experiment-matrix rows on replacement test distributions.
 
 Checkpoint-backed rows use eval-only inference. Rows without reusable state
 (PINN-Sparse, PDE-Opt, PC-BNN, Var4D, and VIVID) rerun their original
-per-instance/training procedure against the replacement test file.
+per-instance/training procedure against the replacement test file. Matrix rows
+may come from main results or an ablation, provided their source summaries are
+complete.
 """
 
 from __future__ import annotations
@@ -156,8 +158,29 @@ def filter_rows(
     ]
 
 
-def source_run_dir(row: Mapping[str, Any], train_root: Path) -> Path:
+def _translate_runs_path(path: str | Path, output_root: Path) -> Path:
+    """Translate a recorded run path onto the active output mount."""
+    candidate = Path(path).expanduser()
+    try:
+        if candidate.exists():
+            return candidate.resolve()
+    except OSError:
+        # A path recorded on another host can have an inaccessible parent on
+        # the active machine. Fall through to mount-relative translation.
+        pass
+    configured = str(candidate)
+    marker = "/runs/"
+    if marker in configured:
+        return output_root / "runs" / configured.split(marker, 1)[1]
+    return candidate
+
+
+def source_run_dir(
+    row: Mapping[str, Any], train_root: Path, output_root: Path | None = None
+) -> Path:
     configured = str(row.get("output_dir", "") or "")
+    if configured and output_root is not None:
+        return _translate_runs_path(configured, output_root)
     marker = "/runs/main_results/"
     if marker in configured:
         return train_root / configured.split(marker, 1)[1]
@@ -171,8 +194,12 @@ def source_run_dir(row: Mapping[str, Any], train_root: Path) -> Path:
     )
 
 
-def translate_main_results_path(path: str | Path, train_root: Path) -> Path:
+def translate_run_path(
+    path: str | Path, train_root: Path, output_root: Path | None = None
+) -> Path:
     candidate = Path(path).expanduser()
+    if output_root is not None:
+        return _translate_runs_path(candidate, output_root)
     configured = str(candidate)
     marker = "/runs/main_results/"
     if marker in configured:
@@ -182,8 +209,10 @@ def translate_main_results_path(path: str | Path, train_root: Path) -> Path:
     return candidate
 
 
-def load_source_summary(row: Mapping[str, Any], train_root: Path) -> tuple[Path, dict[str, Any]]:
-    run_dir = source_run_dir(row, train_root)
+def load_source_summary(
+    row: Mapping[str, Any], train_root: Path, output_root: Path | None = None
+) -> tuple[Path, dict[str, Any]]:
+    run_dir = source_run_dir(row, train_root, output_root)
     summary_path = run_dir / "summary.json"
     if not summary_path.is_file():
         raise FileNotFoundError(f"source summary is not complete: {summary_path}")
@@ -250,6 +279,7 @@ def build_evaluation_run(
     device: str,
     save_samples: bool,
     train_root: Path,
+    output_root: Path | None = None,
     resume: bool = True,
 ) -> EvaluationRun:
     baseline = str(row["baseline"])
@@ -272,7 +302,11 @@ def build_evaluation_run(
     checkpoint_value = str(
         summary.get("checkpoint_path", "") or row.get("checkpoint_path", "") or ""
     )
-    checkpoint = translate_main_results_path(checkpoint_value, train_root) if checkpoint_value else None
+    checkpoint = (
+        translate_run_path(checkpoint_value, train_root, output_root)
+        if checkpoint_value
+        else None
+    )
     if checkpoint is not None and not checkpoint.is_file():
         raise FileNotFoundError(f"source checkpoint is missing: {checkpoint}")
     uses_checkpoint = checkpoint is not None
@@ -406,6 +440,40 @@ def build_evaluation_run(
             ]
         )
 
+    if task == "sparse_solution_multicondition":
+        condition_mode = str(
+            first_value(
+                row.get("condition_mode"),
+                summary.get("evaluation_condition_mode"),
+                summary.get("condition_mode"),
+                default="mixed",
+            )
+        )
+        probabilities: Any = row.get("condition_probabilities")
+        if not isinstance(probabilities, Mapping):
+            probabilities = summary.get("condition_probabilities")
+        if isinstance(probabilities, str):
+            try:
+                probabilities = json.loads(probabilities)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"row {source_row_id} has invalid condition_probabilities JSON"
+                ) from exc
+        if not isinstance(probabilities, Mapping):
+            probabilities = {
+                "a_only": 0.3333333333,
+                "u_only": 0.3333333333,
+                "both": 0.3333333334,
+            }
+        command.extend(
+            [
+                "--condition-mode",
+                condition_mode,
+                "--condition-probabilities-json",
+                json.dumps(dict(probabilities), sort_keys=True, separators=(",", ":")),
+            ]
+        )
+
     if as_bool(first_value(row.get("load_full_trajectory"), summary.get("load_full_trajectory"), default=False)):
         command.append("--load-full-trajectory")
     command.append(
@@ -498,7 +566,7 @@ def build_evaluation_run(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate selected rows from the 80-row main-results matrix on replacement test data. "
+            "Evaluate selected rows from an experiment matrix on replacement test data. "
             "BASELINE_LIST (or legacy BASELINES) accepts comma/space-separated method names."
         )
     )
@@ -579,6 +647,8 @@ def successful_summary(path: Path, evaluation: EvaluationRun) -> bool:
         "execution_mode": command_value(command, "--execution-mode"),
         "eval_only": "--eval-only" in command,
     }
+    if "--condition-mode" in command:
+        expected["condition_mode"] = command_value(command, "--condition-mode")
     if any(summary.get(field) != value for field, value in expected.items()):
         return False
     try:
@@ -748,7 +818,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for index, row in enumerate(selected, start=1):
         identity = f"{row['task_group']}/{row['baseline']}/{row['pde']}/seed={row['seed']}"
         try:
-            run_dir, summary = load_source_summary(row, train_root)
+            run_dir, summary = load_source_summary(row, train_root, output_root)
             evaluation = build_evaluation_run(
                 row,
                 summary,
@@ -763,6 +833,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 device=args.device,
                 save_samples=args.save_samples,
                 train_root=train_root,
+                output_root=output_root,
                 resume=args.resume,
             )
         except (FileNotFoundError, ValueError) as exc:
