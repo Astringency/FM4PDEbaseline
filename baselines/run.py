@@ -1618,6 +1618,12 @@ def _rewrite_result_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     temporary.replace(path)
 
 
+def _solution_metric_fields(args: argparse.Namespace) -> dict[str, str]:
+    if str(args.pde).lower() == "burger" and args.task in {"sparse_solution", "sparse_reconstruction"}:
+        return {"relative_l2_solution_scope": "full_trajectory"}
+    return {}
+
+
 def _resume_identity_error(
     row: dict[str, Any],
     args: argparse.Namespace,
@@ -1643,6 +1649,7 @@ def _resume_identity_error(
         "baseline_config_sha256": str(getattr(args, "baseline_config_sha256", "")),
         "baseline_code_sha256": str(getattr(args, "baseline_code_sha256", "")),
         "data_content_sha256": str(getattr(args, "data_content_sha256", "")),
+        **_solution_metric_fields(args),
     }
     for field, value in expected.items():
         if row.get(field) != value:
@@ -1800,10 +1807,12 @@ def _evaluate_full_test_loader(
                 "task": str(args.task),
                 "seed": int(args.seed),
                 "sensor_seed": sensor_seed,
+                **_solution_metric_fields(args),
             },
             resume_sample_ids=resumed_sample_ids,
         )
     provenance_fields = {
+        **_solution_metric_fields(args),
         "matrix_schema_version": int(getattr(args, "matrix_schema_version", MATRIX_SCHEMA_VERSION)),
         "summary_schema_version": int(getattr(args, "summary_schema_version", 2)),
         "status": "success",
@@ -2270,6 +2279,7 @@ def _summarize_run(
     amortized_training = bool(split_info.get("amortized_training", not per_instance))
     reported_train_size = int(split_info["effective_train_size"]) if amortized_training else 0
     summary: dict[str, Any] = {
+        **_solution_metric_fields(args),
         "run_id": args.run_id,
         "run_name": args.run_name,
         "matrix_schema_version": int(getattr(args, "matrix_schema_version", MATRIX_SCHEMA_VERSION)),
@@ -2698,11 +2708,10 @@ def _joint_reconstruction_relative_l2_values(
             )
         input_pred = pred.narrow(axis, 0, input_extent)
         input_target = target.narrow(axis, 0, input_extent)
-        solution_extent = int(target.shape[axis] - input_extent)
-        solution_pred = pred.narrow(axis, input_extent, solution_extent)
-        solution_target = target.narrow(axis, input_extent, solution_extent)
+        # Burgers reconstructs one complete time-space solution field. Include
+        # its initial slice in the solution error and also report it separately.
         return (
-            _relative_l2_values(solution_pred, solution_target),
+            _relative_l2_values(pred, target),
             _relative_l2_values(input_pred, input_target),
         )
     input_channels = int(metadata.get("joint_input_channels", 0) or 0)

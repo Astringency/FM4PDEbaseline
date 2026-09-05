@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
 
 from baselines.run import _joint_reconstruction_relative_l2_values, _relative_l2_input_or_coeff_values
@@ -37,11 +38,18 @@ def test_joint_sparse_solution_reports_input_and_solution_errors_separately():
     assert input_or_coeff == [0.5]
 
 
-def test_burger_joint_reconstruction_splits_initial_state_from_later_solution_times():
-    target = torch.ones(1, 1, 4, 2)
-    pred = target.clone()
-    pred[:, :, 0] = 2.0
-    pred[:, :, 1:] = 3.0
+@pytest.mark.parametrize(
+    "errors",
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 3.0],
+        [1.0, 2.0, 2.0, 2.0],
+    ],
+)
+def test_burger_solution_error_covers_every_time_and_keeps_initial_error(errors):
+    target = torch.tensor([1.0, 2.0, 4.0, 8.0]).reshape(1, 1, 4, 1).expand(1, 1, 4, 2)
+    pred = target + torch.tensor(errors).reshape(1, 1, 4, 1)
 
     solution, input_or_coeff = _joint_reconstruction_relative_l2_values(
         pred,
@@ -53,5 +61,7 @@ def test_burger_joint_reconstruction_splits_initial_state_from_later_solution_ti
         },
     )
 
-    assert solution == [2.0]
-    assert input_or_coeff == [1.0]
+    # One norm over all time-space points, including the initial slice;
+    # unequal target magnitudes distinguish it from a mean of per-time errors.
+    assert solution == pytest.approx([math.sqrt(sum(error**2 for error in errors) / 85.0)])
+    assert input_or_coeff == pytest.approx([abs(errors[0])])

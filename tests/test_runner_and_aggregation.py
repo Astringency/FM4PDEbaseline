@@ -4,8 +4,63 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from statistics import mean, stdev
+
+import pytest
+import torch
 
 from baselines.aggregate_results import aggregate_rows
+
+
+def test_burger_full_trajectory_metrics_persist_and_reject_legacy_resume(tmp_path: Path):
+    out = tmp_path / "burger"
+    cmd = [
+        sys.executable, "-m", "baselines.run",
+        "--baseline", "recfno", "--pde", "burger", "--task", "sparse_solution",
+        "--experiment-mode", "smoke", "--dry-run", "--synthetic-data",
+        "--synthetic-resolution", "8", "--test-size", "2", "--train-size", "4",
+        "--val-size", "0", "--batch-size", "1", "--num-sensors", "4",
+        "--output-dir", str(out), "--resume-eval",
+    ]
+    root = Path(__file__).resolve().parents[1]
+    subprocess.run(cmd, check=True, cwd=root, capture_output=True, text=True)
+
+    full_errors = []
+    initial_errors = []
+    for path in sorted((out / "samples").glob("sample_*.pt")):
+        sample = torch.load(path, weights_only=False)
+        target = sample["target_fields"]
+        pred = sample["prediction"]
+        assert target.shape == pred.shape == (1, 8, 8)
+        full_errors.append(float(((pred - target).square().sum() / target.square().sum()).sqrt()))
+        initial_errors.append(float(
+            ((pred[:, 0] - target[:, 0]).square().sum() / target[:, 0].square().sum()).sqrt()
+        ))
+    assert len(full_errors) == 2
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["relative_l2_solution_scope"] == "full_trajectory"
+    assert summary["relative_l2_solution_mean"] == pytest.approx(mean(full_errors))
+    assert summary["relative_l2_solution_std"] == pytest.approx(stdev(full_errors), abs=1e-7)
+    assert summary["relative_l2_input_or_coeff_mean"] == pytest.approx(mean(initial_errors))
+
+    # Batches evaluated under the current definition remain resumable.
+    subprocess.run(cmd, check=True, cwd=root, capture_output=True, text=True)
+    resumed = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert resumed["resumed_sample_count"] == 2
+    assert resumed["relative_l2_solution_mean"] == summary["relative_l2_solution_mean"]
+
+    # Historical batches have no scope marker; never pool them with new errors.
+    raw_path = out / "results_raw.jsonl"
+    legacy_rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    for row in legacy_rows:
+        row.pop("relative_l2_solution_scope")
+    legacy_text = "".join(json.dumps(row) + "\n" for row in legacy_rows)
+    raw_path.write_text(legacy_text, encoding="utf-8")
+    rejected = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert "relative_l2_solution_scope" in rejected.stderr
+    assert "Cannot resume evaluation" in rejected.stderr
+    assert raw_path.read_text(encoding="utf-8") == legacy_text
 
 
 def test_runner_synthetic_full_test_loader_outputs_raw_and_summary(tmp_path: Path):

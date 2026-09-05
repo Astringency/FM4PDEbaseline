@@ -42,7 +42,7 @@ PINN-sparse 对每个测试样本先执行 Adam（上限 1000 iterations），�
 
 给定 $[O_{a}, O_{u}]$ 求解 $[a, u]$。RecFNO、Senseiver、VoronoiCNN 覆盖 Poisson、Helmholtz、Darcy、Burgers、Navier-Stokes 5 个 PDE；Var4D、VIVID 仅用于 Burgers，不再在 Navier-Stokes（`nsnonbounded`）上设置实验任务。
 
-Burgers 是一维时变数据，重建目标为完整的 $128\times128$（时间 $\times$ 空间）轨迹，其中首个时间片对应 $a=u(t=0)$，其余时间片对应 $u$。五种方法均运行以下两种观测协议：
+Burgers 是一维时变数据，重建目标为完整的 $128\times128$（时间 $\times$ 空间）轨迹。评估时，`rel L2(u)` 对包含初始时间片的完整轨迹计算整体相对 L2 误差，`rel L2(a)` 单独评估初值 $a=u(t=0)$；均值与标准差在测试样本间统计。五种方法均运行以下两种观测协议：
 
 1. 在完整 $128\times128$ 时间—空间网格上，每个样本独立随机选择总计 500 个散布观测点；
 2. 每个样本独立选择 5 个完整时间片，共 $5\times128$ 个观测点。

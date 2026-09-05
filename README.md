@@ -29,6 +29,16 @@ protocols: 500 total scattered observations sampled independently per example,
 or 5 complete time slices (`5 × 128` observations). Var4D and VIVID are not
 configured for `nsnonbounded`, Reaction-Diffusion, or Shallow-Water.
 
+For Burgers reconstruction, `rel L2(u)` measures each sample's complete
+time-space trajectory, including the initial slice; `rel L2(a)` separately
+measures that initial slice. Means and standard deviations are computed over
+test samples. Earlier evaluations excluded the initial slice from `rel L2(u)`;
+existing result files need metric recomputation from saved predictions or a
+fresh evaluation to use the updated definition. Running `scripts/summary.py`
+alone only exports their stored statistics. Updated evaluations record
+`relative_l2_solution_scope=full_trajectory` and cannot resume older batches
+without that scope marker.
+
 Important method budgets and adaptations:
 
 - Senseiver and VoronoiCNN use early-stopping patience 20 with minimum
