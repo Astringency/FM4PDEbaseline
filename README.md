@@ -34,7 +34,8 @@ time-space trajectory, including the initial slice; `rel L2(a)` separately
 measures that initial slice. Means and standard deviations are computed over
 test samples. Earlier evaluations excluded the initial slice from `rel L2(u)`;
 existing result files need metric recomputation from saved predictions or a
-fresh evaluation to use the updated definition. Running `scripts/summary.py`
+fresh evaluation to use the updated definition. Use `scripts/recompute_metrics.py`
+for saved predictions. Running `scripts/summary.py`
 alone only exports their stored statistics. Updated evaluations record
 `relative_l2_solution_scope=full_trajectory` and cannot resume older batches
 without that scope marker.
@@ -86,6 +87,7 @@ details and disclosed adaptations.
 |---|---|
 | `scripts/build_experiment_matrix.py` | Generate a matrix from an experiment YAML |
 | `scripts/run_experiments.py` | Run, resume, inspect, or retry a matrix |
+| `scripts/recompute_metrics.py` | Recompute prediction errors from complete saved samples on CPU, without model inference |
 | `scripts/collect_results.py` | Produce CSV, JSON, XLSX, and LaTeX artifacts |
 | `scripts/summary.py` | Combine main and ablation evaluations across smooth, ID, and rough into a compact XLSX workbook with metric means and standard deviations |
 | `scripts/plot_results.py` | Render one PDF per stored evaluation sample |
@@ -205,6 +207,37 @@ incomplete row validates `results_raw.jsonl` and the saved-sample manifest,
 skips their committed batch prefix, and evaluates only the remaining samples.
 Use `RESUME=0` or `--no-resume` to discard partial evaluation products and
 restart each selected row cleanly.
+
+### Recompute metrics from saved predictions
+
+To apply the complete-trajectory Burgers error definition to existing results:
+
+```bash
+python scripts/recompute_metrics.py \
+  --output-root "$OUT_ROOT" --pde burger \
+  --distributions main,smooth,id,rough
+
+python scripts/summary.py --out-root "$OUT_ROOT"
+```
+
+Add `--dry-run` to verify every sample and preview the recalculated mean without
+writing files, or `--baselines recfno,senseiver` to select methods. Use
+`--run-dir /path/to/a/run` for an individual run, including an ablation result.
+Sample files are read with four concurrent workers by default; `--workers 1`
+uses sequential reads when memory or storage bandwidth is constrained.
+The command needs the saved sample manifest, `.pt` files, raw results, and
+`summary.json`; it does not load model checkpoints or original datasets.
+
+Each run is fully checked for sample count, identities, checksums, and tensor
+shapes before its metrics are replaced. Missing or damaged samples stop the
+command without launching training or inference. Relative L2, MSE, MAE, and
+multicondition prediction metrics are recomputed with the runner's current
+definitions, including their mean, standard deviation, SEM, and 95% confidence
+interval half-width. Raw JSONL and run summary JSON/JSONL/CSV files are updated
+together; physics metrics and original runtimes are retained. Sample `.pt`
+files and manifests remain immutable, so metrics embedded in those files
+continue to describe the original evaluation. Run `scripts/summary.py` after
+recomputation to refresh the XLSX workbook.
 
 The commands below show the equivalent manual workflow.
 
