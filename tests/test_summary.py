@@ -92,6 +92,11 @@ def test_summary_keeps_all_main_results_and_leaves_missing_evaluations_blank(
         rel_u=0.2,
         task="sparse_solution",
         pde_loss=0.01,
+        extra={
+            "relative_l2_input_or_coeff_std": 0.01,
+            "relative_l2_solution_std": 0.02,
+            "pde_residual_std": 0.001,
+        },
     )
     _write_result(
         physics_dir,
@@ -101,6 +106,7 @@ def test_summary_keeps_all_main_results_and_leaves_missing_evaluations_blank(
         rel_a=0.3,
         rel_u=None,
         pde_loss=0.9,
+        extra={"pde_residual_std": 0.09},
     )
     _write_result(
         eval_root
@@ -113,6 +119,11 @@ def test_summary_keeps_all_main_results_and_leaves_missing_evaluations_blank(
         rel_u=0.5,
         task="sparse_solution",
         pde_loss=0.02,
+        extra={
+            "relative_l2_input_or_coeff_std": 0.0,
+            "relative_l2_solution_std": float("nan"),
+            "pde_residual_std": float("inf"),
+        },
     )
     _write_result(
         eval_root
@@ -126,6 +137,7 @@ def test_summary_keeps_all_main_results_and_leaves_missing_evaluations_blank(
         task="sparse_solution",
         sensor_mode="time_slices_per_sample",
         pde_loss=0.03,
+        extra={"relative_l2_input_or_coeff_std": 0.06},
     )
 
     summary_dir = tmp_path / "summary"
@@ -140,6 +152,17 @@ def test_summary_keeps_all_main_results_and_leaves_missing_evaluations_blank(
     assert workbook.sheetnames == ["Results"]
     worksheet = workbook["Results"]
     assert [cell.value for cell in worksheet[1]] == result_summary.SUMMARY_COLUMNS
+    assert worksheet.max_column == 16
+    assert not {
+        "Namespace", "Result Source", "Fallback Used", "Test File", "Source Run", "Remark"
+    }.intersection(cell.value for cell in worksheet[1])
+    for column in ("rel L2(a) std", "rel L2(u) std", "joint rel L2 std"):
+        assert worksheet.cell(
+            2, result_summary.SUMMARY_COLUMNS.index(column) + 1
+        ).number_format == "0.000000"
+    assert worksheet.cell(
+        2, result_summary.SUMMARY_COLUMNS.index("pde L std") + 1
+    ).number_format == "0.000000E+00"
     rows = [
         dict(zip(result_summary.SUMMARY_COLUMNS, values))
         for values in worksheet.iter_rows(min_row=2, values_only=True)
@@ -152,6 +175,9 @@ def test_summary_keeps_all_main_results_and_leaves_missing_evaluations_blank(
     trained_rough = next(
         row for row in rows if row["Method"] == "RecFNO" and row["DIST"] == "Rough"
     )
+    trained_id = next(
+        row for row in rows if row["Method"] == "RecFNO" and row["DIST"] == "ID"
+    )
     physics_smooth = next(
         row for row in rows if row["Method"] == "PDE-Opt" and row["DIST"] == "Smooth"
     )
@@ -160,20 +186,28 @@ def test_summary_keeps_all_main_results_and_leaves_missing_evaluations_blank(
     )
     assert trained_smooth["TASK"] == "both"
     assert trained_smooth["SENSOR"] == "random"
+    assert trained_smooth["SEED"] == 1
     assert trained_smooth["rel L2(a)"] == pytest.approx(0.1)
+    assert trained_smooth["rel L2(a) std"] == pytest.approx(0.01)
     assert trained_smooth["rel L2(u)"] == pytest.approx(0.2)
+    assert trained_smooth["rel L2(u) std"] == pytest.approx(0.02)
     assert trained_smooth["pde L"] == pytest.approx(0.01)
-    assert trained_smooth["Namespace"] == "main_results"
-    assert trained_smooth["Result Source"] == "main_legacy_smooth_fallback"
-    assert trained_smooth["Fallback Used"] is True
+    assert trained_smooth["pde L std"] == pytest.approx(0.001)
+    assert trained_id["rel L2(a) std"] == 0.0
+    assert trained_id["rel L2(u) std"] is None
+    assert trained_id["pde L std"] is None
     assert trained_rough["SENSOR"] == "sersor_col"
     assert trained_rough["rel L2(a)"] == pytest.approx(0.6)
+    assert trained_rough["rel L2(a) std"] == pytest.approx(0.06)
     assert physics_smooth["TASK"] == "inverse"
     assert physics_smooth["rel L2(a)"] == pytest.approx(0.3)
+    assert physics_smooth["rel L2(a) std"] is None
     assert physics_smooth["rel L2(u)"] is None
+    assert physics_smooth["rel L2(u) std"] is None
     assert physics_smooth["pde L"] is None
+    assert physics_smooth["pde L std"] is None
     assert physics_id["rel L2(a)"] is None
-    assert str(physics_id["Remark"]).startswith("missing: runs/evaluations/id/")
+    assert physics_id["rel L2(a) std"] is None
 
 
 def test_explicit_smooth_evaluation_takes_priority_over_main_result(tmp_path: Path) -> None:
@@ -206,6 +240,7 @@ def test_explicit_smooth_evaluation_takes_priority_over_main_result(tmp_path: Pa
         rel_u=0.1,
         task="forward",
         test_file="poisson/legacy.mat",
+        extra={"relative_l2_solution_std": 0.01},
     )
     _write_result(
         smooth_dir,
@@ -216,16 +251,14 @@ def test_explicit_smooth_evaluation_takes_priority_over_main_result(tmp_path: Pa
         rel_u=0.2,
         task="forward",
         test_file="poisson/poisson_test_smooth.mat",
+        extra={"relative_l2_solution_std": 0.02},
     )
 
     rows = result_summary.collect_summary_rows(tmp_path)
 
     smooth = next(row for row in rows if row["DIST"] == "Smooth")
     assert smooth["rel L2(u)"] == pytest.approx(0.2)
-    assert smooth["Namespace"] == "evaluations"
-    assert smooth["Result Source"] == "explicit_evaluation"
-    assert smooth["Fallback Used"] is False
-    assert smooth["Test File"] == "poisson/poisson_test_smooth.mat"
+    assert smooth["rel L2(u) std"] == pytest.approx(0.02)
 
 
 def test_burgers_does_not_treat_legacy_main_result_as_smooth(tmp_path: Path) -> None:
@@ -254,6 +287,10 @@ def test_burgers_does_not_treat_legacy_main_result_as_smooth(tmp_path: Path) -> 
         task="sparse_solution",
         pde="burger",
         test_file="burgers/burger_test_10000-128-128.mat",
+        extra={
+            "relative_l2_input_or_coeff_std": 0.01,
+            "relative_l2_solution_std": 0.02,
+        },
     )
 
     rows = result_summary.collect_summary_rows(tmp_path)
@@ -261,12 +298,25 @@ def test_burgers_does_not_treat_legacy_main_result_as_smooth(tmp_path: Path) -> 
     smooth = next(row for row in rows if row["DIST"] == "Smooth")
     assert smooth["rel L2(a)"] == ""
     assert smooth["rel L2(u)"] == ""
-    assert smooth["Result Source"] == "missing_evaluation"
-    assert smooth["Fallback Used"] is False
-    assert smooth["Test File"] == ""
+    assert smooth["rel L2(a) std"] == ""
+    assert smooth["rel L2(u) std"] == ""
 
 
-def test_summary_appends_multicondition_ablation_evaluations(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("metric_overrides", "expected_a", "expected_a_std"),
+    [
+        ({}, 0.11, 0.011),
+        ({"rel_l2_a_std": None}, 0.11, None),
+        ({"rel_l2_a_std": float("inf")}, 0.11, None),
+        ({"rel_l2_a_mean": None}, 0.9, 0.09),
+    ],
+)
+def test_summary_appends_multicondition_ablation_evaluations(
+    tmp_path: Path,
+    metric_overrides: dict,
+    expected_a: float,
+    expected_a_std: float | None,
+) -> None:
     main_dir = tmp_path / "runs/main_results/main"
     ablation_dir = (
         tmp_path
@@ -302,33 +352,52 @@ def test_summary_appends_multicondition_ablation_evaluations(tmp_path: Path) -> 
         run_id="eval_rough_ablation",
         task_group="sparse_solution_multicondition_eval_a_only",
         baseline="recfno",
-        rel_a=None,
-        rel_u=None,
+        rel_a=0.9,
+        rel_u=0.8,
         task="sparse_solution_multicondition",
+        pde_loss=0.044,
         test_file="poisson/poisson_test_rough.mat",
         extra={
             "evaluation_condition_mode": "a_only",
             "rel_l2_a_mean": 0.11,
+            "rel_l2_a_std": 0.011,
             "rel_l2_u_mean": 0.22,
+            "rel_l2_u_std": 0.022,
             "joint_rel_l2_mean": 0.33,
+            "joint_rel_l2_std": 0.033,
+            "pde_residual_std": 0.0044,
+            "relative_l2_input_or_coeff_std": 0.09,
+            "relative_l2_solution_std": 0.08,
             "source_train_run_id": "train_ablation",
+            **metric_overrides,
         },
     )
 
-    rows = result_summary.collect_summary_rows(tmp_path)
+    output = result_summary.summary(tmp_path)
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    rows = [
+        dict(zip(result_summary.SUMMARY_COLUMNS, values))
+        for values in workbook["Results"].iter_rows(min_row=2, values_only=True)
+    ]
+    workbook.close()
 
     assert len(rows) == 4
     ablation = next(row for row in rows if row["Ablation"])
     assert ablation["DIST"] == "Rough"
     assert ablation["TASK"] == "both"
     assert ablation["CONDITION"] == "a_only"
-    assert ablation["rel L2(a)"] == pytest.approx(0.11)
+    assert ablation["Ablation"] == "sparse_solution_multicondition"
+    assert ablation["rel L2(a)"] == pytest.approx(expected_a)
+    if expected_a_std is None:
+        assert ablation["rel L2(a) std"] is None
+    else:
+        assert ablation["rel L2(a) std"] == pytest.approx(expected_a_std)
     assert ablation["rel L2(u)"] == pytest.approx(0.22)
+    assert ablation["rel L2(u) std"] == pytest.approx(0.022)
     assert ablation["joint rel L2"] == pytest.approx(0.33)
-    assert ablation["Namespace"] == "evaluations"
-    assert ablation["Result Source"] == "explicit_evaluation"
-    assert ablation["Fallback Used"] is False
-    assert ablation["Source Run"] == "train_ablation"
+    assert ablation["joint rel L2 std"] == pytest.approx(0.033)
+    assert ablation["pde L"] == pytest.approx(0.044)
+    assert ablation["pde L std"] == pytest.approx(0.0044)
 
 
 def test_summary_uses_out_root_environment_variable(

@@ -9,6 +9,8 @@ that fallback because its historical unsuffixed test set is ID-like.
 
 Successful ablation evaluations stored below an ``ablation=*`` directory in
 ``runs/evaluations/{smooth,id,rough}`` are appended to the same workbook.
+The workbook contains task settings and metric means with their stored
+standard deviations; unavailable metrics or statistics are left blank.
 """
 
 from __future__ import annotations
@@ -33,17 +35,16 @@ SUMMARY_COLUMNS = [
     "DIST",
     "CONDITION",
     "SENSOR",
-    "rel L2(a)",
-    "rel L2(u)",
-    "joint rel L2",
-    "pde L",
-    "Namespace",
+    "SEED",
     "Ablation",
-    "Result Source",
-    "Fallback Used",
-    "Test File",
-    "Source Run",
-    "Remark",
+    "rel L2(a)",
+    "rel L2(a) std",
+    "rel L2(u)",
+    "rel L2(u) std",
+    "joint rel L2",
+    "joint rel L2 std",
+    "pde L",
+    "pde L std",
 ]
 
 _DISTRIBUTIONS = ("smooth", "id", "rough")
@@ -52,12 +53,12 @@ _CONDITION_ORDER = {"a_only": 0, "u_only": 1, "both": 2}
 _IGNORED_RESULT_DIRECTORIES = {"archive", "historical", "quarantine"}
 _SMOOTH_FALLBACK_PDES = {"poisson", "helmholtz", "darcy", "nsnonbounded"}
 _METRIC_FIELDS = {
-    "a": "relative_l2_input_or_coeff_mean",
-    "u": "relative_l2_solution_mean",
+    "a": "relative_l2_input_or_coeff",
+    "u": "relative_l2_solution",
 }
 _MULTICONDITION_METRIC_FIELDS = {
-    "a": "rel_l2_a_mean",
-    "u": "rel_l2_u_mean",
+    "a": "rel_l2_a",
+    "u": "rel_l2_u",
 }
 _SUMMARY_IDENTITY_FIELDS = ("task_group", "pde", "baseline", "seed")
 _TASK_LABELS = {
@@ -201,17 +202,20 @@ def _load_result(
     return item
 
 
-def _relative_l2(item: Mapping[str, Any] | None, metric: str) -> float | str:
+def _relative_l2_stats(
+    item: Mapping[str, Any] | None, metric: str
+) -> tuple[float | str, float | str]:
+    """Read the mean and standard deviation from the same metric family."""
     if item is None:
-        return ""
+        return "", ""
     fields = [_METRIC_FIELDS[metric]]
     if item.get("task") == "sparse_solution_multicondition":
         fields.insert(0, _MULTICONDITION_METRIC_FIELDS[metric])
     for field in fields:
-        value = _finite_value(item, field)
-        if value != "":
-            return value
-    return ""
+        mean = _finite_value(item, f"{field}_mean")
+        if mean != "":
+            return mean, _finite_value(item, f"{field}_std")
+    return "", ""
 
 
 def _finite_value(item: Mapping[str, Any] | None, field: str) -> float | str:
@@ -232,10 +236,6 @@ def _task_label(row: Mapping[str, Any]) -> str:
         raise RuntimeError(f"unsupported task in main-results matrix: {task!r}") from exc
 
 
-def _joint_relative_l2(item: Mapping[str, Any] | None) -> float | str:
-    return _finite_value(item, "joint_rel_l2_mean")
-
-
 def _sensor_label(item: Mapping[str, Any]) -> str:
     mode = str(item.get("sensor_mode", item.get("requested_sensor_mode", ""))).lower()
     if mode in {"", "none"}:
@@ -250,33 +250,6 @@ def _display_label(value: Any, labels: Mapping[str, str]) -> str:
     return labels.get(text.lower(), text)
 
 
-def _relative_folder(root: Path, summary_path: Path) -> str:
-    folder = summary_path.parent
-    try:
-        return str(folder.relative_to(root))
-    except ValueError:
-        return str(folder)
-
-
-def _test_file(item: Mapping[str, Any] | None) -> str:
-    if item is None:
-        return ""
-    raw = item.get("data_files_json")
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            return ""
-    if not isinstance(raw, Mapping):
-        return ""
-    test = raw.get("test")
-    if isinstance(test, str):
-        return test
-    if isinstance(test, Sequence) and not isinstance(test, (str, bytes)):
-        return str(test[0]) if test else ""
-    return ""
-
-
 def _distribution_label(distribution: str) -> str:
     return "ID" if distribution == "id" else distribution.title()
 
@@ -287,19 +260,12 @@ def _result_row(
     distribution: str,
     result: Mapping[str, Any] | None,
     sensor_fallback: Mapping[str, Any] | None,
-    namespace: str,
     ablation: str,
     condition: str,
-    result_source: str,
-    fallback_used: bool,
-    source_path: str,
 ) -> dict[str, Any]:
     task = _task_label(identity)
-    source_run = ""
-    if result is not None:
-        source_run = str(
-            result.get("source_train_run_id") or result.get("run_id") or ""
-        )
+    rel_a, rel_a_std = _relative_l2_stats(result, "a")
+    rel_u, rel_u_std = _relative_l2_stats(result, "u")
     return {
         "PDE": _display_label(identity.get("pde", ""), _PDE_LABELS),
         "Method": _display_label(identity.get("baseline", ""), _METHOD_LABELS),
@@ -307,17 +273,16 @@ def _result_row(
         "DIST": _distribution_label(distribution),
         "CONDITION": condition,
         "SENSOR": _sensor_label(result or sensor_fallback or {}),
-        "rel L2(a)": _relative_l2(result, "a"),
-        "rel L2(u)": _relative_l2(result, "u"),
-        "joint rel L2": _joint_relative_l2(result),
-        "pde L": _finite_value(result, "pde_residual_mean") if task == "both" else "",
-        "Namespace": namespace,
+        "SEED": identity.get("seed", ""),
         "Ablation": ablation,
-        "Result Source": result_source,
-        "Fallback Used": fallback_used,
-        "Test File": _test_file(result),
-        "Source Run": source_run,
-        "Remark": source_path if result is not None else f"missing: {source_path}",
+        "rel L2(a)": rel_a,
+        "rel L2(a) std": rel_a_std,
+        "rel L2(u)": rel_u,
+        "rel L2(u) std": rel_u_std,
+        "joint rel L2": _finite_value(result, "joint_rel_l2_mean"),
+        "joint rel L2 std": _finite_value(result, "joint_rel_l2_std"),
+        "pde L": _finite_value(result, "pde_residual_mean") if task == "both" else "",
+        "pde L std": _finite_value(result, "pde_residual_std") if task == "both" else "",
     }
 
 
@@ -354,18 +319,13 @@ def _evaluation_ablation_rows(root: Path) -> list[dict[str, Any]]:
                 or result.get("condition_mode")
                 or ""
             )
-            relative_path = _relative_folder(root, summary_path)
             item = _result_row(
                 identity=result,
                 distribution=distribution,
                 result=result,
                 sensor_fallback=None,
-                namespace="evaluations",
                 ablation=ablation,
                 condition=condition,
-                result_source="explicit_evaluation",
-                fallback_used=False,
-                source_path=relative_path,
             )
             sort_key = (
                 _DISTRIBUTION_ORDER[distribution],
@@ -403,34 +363,20 @@ def collect_summary_rows(out_root: str | Path | None = None) -> list[dict[str, A
                 expected_run_id=f"eval_{distribution}_{run_id}",
                 required=False,
             )
-            fallback_used = False
-            namespace = "evaluations"
-            result_source = (
-                "explicit_evaluation" if result is not None else "missing_evaluation"
-            )
-            source_path = _relative_folder(root, evaluation_path)
             if (
                 distribution == "smooth"
                 and result is None
                 and str(row.get("pde", "")).lower() in _SMOOTH_FALLBACK_PDES
             ):
                 result = main
-                fallback_used = True
-                namespace = "main_results"
-                result_source = "main_legacy_smooth_fallback"
-                source_path = _relative_folder(root, main_path)
             rows.append(
                 _result_row(
                     identity=row,
                     distribution=distribution,
                     result=result,
                     sensor_fallback=main,
-                    namespace=namespace,
                     ablation="",
                     condition="",
-                    result_source=result_source,
-                    fallback_used=fallback_used,
-                    source_path=source_path,
                 )
             )
     rows.extend(_evaluation_ablation_rows(root))
@@ -462,39 +408,25 @@ def summary(out_root: str | Path | None = None) -> Path:
         worksheet.freeze_panes = "A2"
         last_column = get_column_letter(len(SUMMARY_COLUMNS))
         worksheet.auto_filter.ref = f"A1:{last_column}{len(rows) + 1}"
-        widths = (
-            14,
-            16,
-            10,
-            10,
-            14,
-            12,
-            14,
-            14,
-            14,
-            14,
-            16,
-            34,
-            30,
-            14,
-            52,
-            38,
-            72,
-        )
-        for index, width in enumerate(widths, start=1):
-            worksheet.column_dimensions[get_column_letter(index)].width = width
-        numeric_columns = {
-            SUMMARY_COLUMNS.index("rel L2(a)") + 1,
-            SUMMARY_COLUMNS.index("rel L2(u)") + 1,
-            SUMMARY_COLUMNS.index("joint rel L2") + 1,
+        setting_widths = {
+            "PDE": 14,
+            "Method": 16,
+            "TASK": 10,
+            "DIST": 10,
+            "CONDITION": 14,
+            "SENSOR": 12,
+            "SEED": 8,
+            "Ablation": 34,
         }
-        pde_loss_column = SUMMARY_COLUMNS.index("pde L") + 1
-        for row_number in range(2, len(rows) + 2):
-            for column in numeric_columns:
-                worksheet.cell(row_number, column).number_format = "0.000000"
-            worksheet.cell(
-                row_number, pde_loss_column
-            ).number_format = "0.000000E+00"
+        for index, column in enumerate(SUMMARY_COLUMNS, start=1):
+            worksheet.column_dimensions[get_column_letter(index)].width = (
+                setting_widths.get(column, max(14, len(column) + 2))
+            )
+            if column in setting_widths:
+                continue
+            number_format = "0.000000E+00" if column.startswith("pde L") else "0.000000"
+            for row_number in range(2, len(rows) + 2):
+                worksheet.cell(row_number, index).number_format = number_format
         table = Table(
             displayName="ResultsTable",
             ref=f"A1:{last_column}{len(rows) + 1}",
