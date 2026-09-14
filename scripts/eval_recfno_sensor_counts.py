@@ -44,6 +44,8 @@ def evaluate_cell(model, dataset, *, device, batch_size, output, identity):
             raise ValueError(f"existing evaluation has a different identity: {output}")
         if sha256(errors_path) != summary.get("per_sample_sha256"):
             raise ValueError(f"existing per-sample data failed its checksum: {output}")
+        if sha256(output / "example_predictions.pt") != summary.get("example_predictions_sha256"):
+            raise ValueError(f"existing example predictions failed their checksum: {output}")
         return summary
     dataset.set_condition_mode(identity["condition"])
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=pde_collate,
