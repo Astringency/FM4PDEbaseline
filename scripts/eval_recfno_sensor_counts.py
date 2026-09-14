@@ -29,6 +29,7 @@ from scripts.experiments.provenance import repository_revision
 from scripts.recfno_sensor_count_study import sha256
 from scripts.run_eval import DISTRIBUTION_TEST_FILES
 from scripts.run_recfno_variable_sensors import parse_counts
+from scripts.recfno_study_lock import output_lock
 
 METRICS = ("rel_l2_a", "rel_l2_u", "joint_rel_l2")
 CONDITIONS = ("a_only", "u_only", "both")
@@ -99,6 +100,11 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
+    with output_lock(args.output_dir, "evaluation"):
+        _run_locked(args)
+
+
+def _run_locked(args):
     source = json.loads(args.train_summary.read_text())
     if source.get("status") != "success" or source.get("task") != "sparse_solution_multicondition":
         raise ValueError("source must be a successful multicondition training run")

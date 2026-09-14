@@ -86,12 +86,16 @@ def main():
     parser.add_argument("--pilot", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--queue-tag", default="", help="Separate status file for a cooperating PDE queue.")
     args = parser.parse_args()
     if not args.study_root.is_absolute():
         raise ValueError("study-root must be an explicit absolute output path")
     design = yaml.safe_load(DESIGN.read_text())
     args.study_root.mkdir(parents=True, exist_ok=True)
-    queue_status = args.study_root / f"queue_{args.regime}{'_pilot' if args.pilot else ''}.json"
+    if args.queue_tag and not args.queue_tag.replace("_", "").isalnum():
+        raise ValueError("queue-tag must contain only letters, digits, and underscores")
+    suffix = f"_{args.queue_tag}" if args.queue_tag else ""
+    queue_status = args.study_root / f"queue_{args.regime}{'_pilot' if args.pilot else ''}{suffix}.json"
     status = dict(pid=os.getpid(), phase="running", args={k:str(v) for k,v in vars(args).items()},
                   start_time=time.time(), code_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip())
     queue_status.write_text(json.dumps(status, indent=2) + "\n")

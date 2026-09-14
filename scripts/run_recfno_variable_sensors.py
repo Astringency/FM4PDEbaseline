@@ -25,6 +25,8 @@ from torch.utils.data import DataLoader
 
 from baselines.common.data_adapter import PDEBatchDataset, pde_collate
 from baselines import run as runner
+from scripts.recfno_sensor_count_study import sha256
+from scripts.recfno_study_lock import output_lock
 
 PROTOCOL = "recfno-batch-sensor-count-v1"
 
@@ -146,6 +148,11 @@ def main(argv=None):
         raise ValueError("the experiment requires random_per_sample locations")
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    with output_lock(output, "training"):
+        _run_locked(extra, remaining, counts, args, output)
+
+
+def _run_locked(extra, remaining, counts, args, output):
     extension_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     contract = dict(protocol=PROTOCOL, train_sensor_counts=counts, count_seed=extra.count_seed,
                     sampling="uniform_per_batch", validation_sensor_count=args.num_sensors,
@@ -153,6 +160,18 @@ def main(argv=None):
     contract_path = output / "sensor_count_experiment.json"
     if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
         raise ValueError("output directory already contains a different sensor-count experiment")
+    summary_path = output / "summary.json"
+    if args.train_only and summary_path.exists():
+        summary = json.loads(summary_path.read_text())
+        checkpoint = Path(summary.get("checkpoint_path", ""))
+        expected_config = runner._config_content_sha256(args.config, runner.load_yaml(args.config))
+        if (summary.get("status") != "success" or not checkpoint.is_file()
+                or sha256(checkpoint) != summary.get("checkpoint_sha256")
+                or summary.get("config_content_sha256") != expected_config
+                or summary.get("baseline_code_sha256") != runner.baseline_code_sha256("recfno", root=ROOT)):
+            raise ValueError("existing completed training result failed identity/checksum validation")
+        print(f"[training] reuse checksum-validated completed result {summary_path}", flush=True)
+        return
     contract_path.write_text(json.dumps(contract, indent=2) + "\n")
     for key, value in dict(train_sensor_counts=list(counts), sensor_count_seed=extra.count_seed,
                            sensor_count_protocol=PROTOCOL, sensor_count_code_sha256=extension_hash).items():

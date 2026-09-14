@@ -66,6 +66,15 @@ historical outputs nor the original server checkout are changed. Training
 resumes at completed PDE boundaries; an interrupted partial training run must
 be inspected explicitly before starting another attempt.
 
+Cooperating queues can use `--queue-tag parallel` to keep distinct status
+records. Training and evaluation entry points lock their output directories;
+an identical training request waits for the owner and then validates and reuses
+the completed checkpoint. This lets different PDEs share a GPU when measured
+resource headroom permits, without training the same output concurrently.
+The original queue visits Poisson/Helmholtz/Darcy/NS; a cooperating queue can
+visit Helmholtz/NS/Darcy to advance the remaining work. This affects scheduling,
+not the batch size, seed, epoch budget, or sensor-count distribution.
+
 Uncertainty intervals use paired bootstrap resampling of test samples (2,000
 replicates). One training seed does not quantify variation across training
 initializations. Mixed training has a mean requested budget of 380 locations;
