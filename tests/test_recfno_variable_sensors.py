@@ -57,6 +57,16 @@ def test_fixed_count_exactly_matches_original_inputs_and_shuffle():
         assert torch.equal(left.metadata["voronoi_grid"], right.metadata["voronoi_grid"])
 
 
+def test_count_sampling_does_not_change_sample_order_or_conditions():
+    fixed = make_training_loader(source_loader(shuffle=True), (5,), seed=1)
+    mixed = make_training_loader(source_loader(shuffle=True), (2, 5, 11), seed=1)
+    torch.manual_seed(71)
+    first = snapshot(fixed, 4)
+    torch.manual_seed(71)
+    second = snapshot(mixed, 4)
+    assert [(x[0], x[1]) for x in first] == [(x[0], x[1]) for x in second]
+
+
 def test_batch_budget_presence_normalization_and_model_gradients():
     original = source_loader()
     loader = make_training_loader(original, (2, 5, 11), seed=1)
