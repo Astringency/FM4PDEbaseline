@@ -3,9 +3,9 @@ set -Eeuo pipefail
 
 # One-command workflow for sparse_solution_multicondition.
 # Override values as environment variables, for example:
-#   DATA_ROOT=/data/PDEdata GPUS=0,1 JOBS_PER_GPU=1 bash scripts/run_baseline_ablations.sh
+#   DATA_ROOT=/data/PDEdata GPUS=0,1 JOBS_PER_GPU=1 bash scripts/sampling/ablations/run.sh
 # Run a PDE subset with, for example:
-#   PDE_LIST=poisson bash scripts/run_baseline_ablations.sh
+#   PDE_LIST=poisson bash scripts/sampling/ablations/run.sh
 DATA_ROOT="${DATA_ROOT:-${HOME}/share/PDEdata}"
 CONFIG="${CONFIG:-configs/experiments/sparse_solution_multicondition_ablation.yaml}"
 MATRIX_NAME="${MATRIX_NAME:-sparse_solution_multicondition_ablation}"
@@ -14,11 +14,11 @@ JOBS_PER_GPU="${JOBS_PER_GPU:-1}"
 VERIFY_DATA="${VERIFY_DATA:-1}"
 RERUN_RUNNING="${RERUN_RUNNING:-1}"
 DRY_RUN="${DRY_RUN:-0}"
-PYTHON_BIN="${PYTHON:-python}"
+PYTHON_BIN="${PYTHON_BIN:-${PYTHON:-python}}"
 
 PDE_SELECTOR_ACTIVE=0
-PDE_LIST_RAW="${PDE_LIST:-}"
-SELECTED_PDES=(poisson helmholtz darcy nsnonbounded)
+PDE_LIST_RAW="${PDE_LIST:-poisson}"
+SELECTED_PDES=(poisson)
 if [ -n "${PDE_LIST_RAW//[[:space:],]/}" ]; then
   PDE_SELECTOR_ACTIVE=1
   PDE_LIST_NORMALIZED="${PDE_LIST_RAW//,/ }"
@@ -61,12 +61,12 @@ export PDE_LIST
 if [ -n "${OUT_ROOT:-}" ]; then
   OUT_ROOT="$OUT_ROOT"
 elif [ "$PDE_SELECTOR_ACTIVE" = "1" ]; then
-  OUT_ROOT="results/ablations/sparse_solution_multicondition/$PDE_TAG"
+  OUT_ROOT="outputs/ablations/sparse_solution_multicondition/$PDE_TAG"
 else
-  OUT_ROOT="results/ablations/sparse_solution_multicondition"
+  OUT_ROOT="outputs/ablations/sparse_solution_multicondition"
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
 DATA_REPORT="${DATA_REPORT:-$OUT_ROOT/data_protocol/$MATRIX_NAME/full/data_protocol_report.json}"
@@ -117,7 +117,9 @@ show_status_on_exit() {
 }
 trap show_status_on_exit EXIT
 
-[ -d "$DATA_ROOT" ] || { log "DATA_ROOT does not exist: $DATA_ROOT"; exit 2; }
+if [ "$DRY_RUN" != "1" ]; then
+  [ -d "$DATA_ROOT" ] || { log "DATA_ROOT does not exist: $DATA_ROOT"; exit 2; }
+fi
 [ -f "$CONFIG" ] || { log "CONFIG does not exist: $CONFIG"; exit 2; }
 [[ "$JOBS_PER_GPU" =~ ^[1-9][0-9]*$ ]] || {
   log "JOBS_PER_GPU must be a positive integer: $JOBS_PER_GPU"
@@ -137,7 +139,7 @@ if [ "$DRY_RUN" != "1" ]; then
   command -v flock >/dev/null || { log "flock is required"; exit 2; }
   exec 9>"$OUT_ROOT/.run_baseline_ablations.lock"
   flock -n 9 || {
-    log "another run_baseline_ablations.sh is already active for $OUT_ROOT"
+    log "another scripts/sampling/ablations/run.sh is already active for $OUT_ROOT"
     exit 2
   }
 fi

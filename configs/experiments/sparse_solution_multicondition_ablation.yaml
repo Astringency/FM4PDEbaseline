@@ -10,9 +10,6 @@ data_files_config: configs/data_files/formal_128.yaml
 
 pdes:
   - poisson
-  - helmholtz
-  - darcy
-  - nsnonbounded
 
 baselines:
   - recfno

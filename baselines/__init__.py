@@ -1,2 +1,1 @@
-"""Unified baseline experiment framework for FM4PDE revision experiments."""
-
+"""Baseline experiment framework for the FM4PDE comparisons."""

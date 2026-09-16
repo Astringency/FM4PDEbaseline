@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # ---------------------------------------------------------------------------
 # User configuration. Every value can also be overridden as an environment
-# variable, e.g. GPUS=0 JOBS_PER_GPU=1 bash scripts/run_baseline.sh.
+# variable, e.g. GPUS=0 JOBS_PER_GPU=1 bash scripts/training/run.sh.
 # ---------------------------------------------------------------------------
 DATA_ROOT="${DATA_ROOT:-${HOME}/share/PDEdata}"
 OUT_ROOT="${OUT_ROOT:-outputs/main_results}"
@@ -25,9 +25,9 @@ PLOT_SAMPLES="${PLOT_SAMPLES:-${REDRAW_SAMPLES:-1}}"
 # Maximum PDFs per experiment. Set to 0 to draw every evaluated sample.
 PLOT_LIMIT="${PLOT_LIMIT:-100}"
 DRY_RUN="${DRY_RUN:-0}"
-PYTHON_BIN="${PYTHON:-python}"
+PYTHON_BIN="${PYTHON_BIN:-${PYTHON:-python}}"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 DATA_REPORT="${DATA_REPORT:-$OUT_ROOT/data_protocol/$MATRIX_NAME/full/data_protocol_report.json}"
@@ -64,7 +64,9 @@ show_status_on_exit() {
 }
 trap show_status_on_exit EXIT
 
-[ -d "$DATA_ROOT" ] || { log "DATA_ROOT does not exist: $DATA_ROOT"; exit 2; }
+if [ "$DRY_RUN" != "1" ]; then
+  [ -d "$DATA_ROOT" ] || { log "DATA_ROOT does not exist: $DATA_ROOT"; exit 2; }
+fi
 [ -f "$CONFIG" ] || { log "CONFIG does not exist: $CONFIG"; exit 2; }
 [[ "$JOBS_PER_GPU" =~ ^[1-9][0-9]*$ ]] || {
   log "JOBS_PER_GPU must be a positive integer: $JOBS_PER_GPU"
@@ -87,7 +89,7 @@ if [ "$DRY_RUN" != "1" ]; then
   mkdir -p "$OUT_ROOT"
   command -v flock >/dev/null || { log "flock is required"; exit 2; }
   exec 9>"$OUT_ROOT/.run_baseline.lock"
-  flock -n 9 || { log "another run_baseline.sh is already active for $OUT_ROOT"; exit 2; }
+  flock -n 9 || { log "another scripts/training/run.sh is already active for $OUT_ROOT"; exit 2; }
 fi
 
 if [ "$VERIFY_DATA" = "1" ]; then

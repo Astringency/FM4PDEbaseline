@@ -27,6 +27,7 @@ Official-aligned or official-architecture reimplementations must remain labeled
 as reimplementations in result metadata; they are not direct official code.
 
 The current Burgers Var4D/VIVID implementations are more distant local
-adaptations and are not official-aligned reimplementations. Their audited
-differences and disabled official/native eligibility are recorded in
-`docs/var4d_vivid_official_audit.md`.
+adaptations and are not official-aligned reimplementations. Their implementation
+metadata and official/native eligibility are defined in
+`baselines/methods/var4d.py`, `baselines/methods/vivid.py`, and
+`baselines/capabilities.py`.
