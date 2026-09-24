@@ -92,9 +92,6 @@ OPTIONAL_FINGERPRINT_FIELDS = (
 
 SUMMARY_IDENTITY_FIELDS = ("task_group", "task", "pde", "baseline", "seed")
 AMORTIZED_CHECKPOINT_BASELINES = {
-    "fno",
-    "deeponet",
-    "ifno",
     "recfno",
     "senseiver",
     "voronoicnn",
@@ -109,9 +106,6 @@ COHORT_FIELDS = (
 )
 
 _BASELINE_IMPLEMENTATION_FILES = {
-    "fno": ("baselines/methods/fno.py",),
-    "deeponet": ("baselines/methods/deeponet.py",),
-    "ifno": ("baselines/methods/ifno.py", "baselines/methods/ifno_official_aligned.py"),
     "recfno": ("baselines/methods/recfno.py",),
     "senseiver": ("baselines/methods/senseiver.py", "baselines/methods/senseiver_positional.py"),
     "voronoicnn": ("baselines/methods/voronoicnn.py",),
@@ -123,9 +117,6 @@ _BASELINE_IMPLEMENTATION_FILES = {
 }
 
 _BASELINE_OFFICIAL_CODE_DIRS = {
-    "fno": ("offical/neuraloperator/neuralop",),
-    "deeponet": ("offical/deepxde/deepxde",),
-    "ifno": ("offical/iFNO", "offical/neuraloperator/neuralop"),
     "recfno": ("offical/RecFNO/model",),
     "senseiver": ("offical/Senseiver",),
     "voronoicnn": ("offical/Voronoi-CNN",),

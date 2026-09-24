@@ -8,12 +8,21 @@ __pycache__/
 outputs/
 /results/
 
-# Local documentation, tests, and development settings.
+# Local working documentation and development settings.
 /docs/
 /test/
-/tests/
 /AGENTS.md
-/pytest.ini
 
 # Local copies of earlier experiments and development scripts.
 /bak/
+
+*.bundle
+__pycache__/
+.pytest_cache/
+outputs/
+
+# Development tests are retained outside the published repository.
+tests/
+/test/
+test_*.py
+pytest.ini

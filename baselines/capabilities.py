@@ -40,9 +40,6 @@ TIME_VARYING_DA_PDES = {"nsnonbounded", "burger", "reaction_diffusion", "shallow
 VAR4D_VIVID_PDES = {"burger"}
 
 ALL_BASELINES = [
-    "deeponet",
-    "fno",
-    "ifno",
     "pc_bnn",
     "pde_opt",
     "pinn_sparse",
@@ -57,9 +54,6 @@ SUPPORT_STATUSES = {"native", "official_adapter", "adapted", "unsupported"}
 IMPLEMENTATION_REQUIREMENTS = {"official", "canonical_math", "adapted_allowed", "unsupported"}
 
 SOURCE_KEYS = {
-    "fno": "fno",
-    "deeponet": "deeponet",
-    "ifno": "ifno",
     "recfno": "recfno",
     "senseiver": "senseiver",
     "voronoicnn": "voronoicnn",
@@ -71,9 +65,6 @@ SOURCE_KEYS = {
 }
 
 CITATION_KEYS = {
-    "fno": "li2021fno",
-    "deeponet": "lu2021deeponet",
-    "ifno": "long2025ifno",
     "recfno": "zhao2023recfno",
     "senseiver": "santos2023senseiver",
     "voronoicnn": "fukami2021voronoicnn",
@@ -264,122 +255,8 @@ def resolve_capability(
             uses_official_inverse_observation_operator=uses_official_inverse_observation_operator,
         )
 
-    if baseline == "fno":
-        if family == "full_forward":
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "adapted",
-                "adapted_allowed",
-                family,
-                "NeuralOperator 2.0 supplies the FNO component, while this repository supplies unified data, normalization, loss, and training",
-                "Report as NeuralOperator FNO component + unified adapted training, not a classic-paper end-to-end reproduction.",
-                eligible=False,
-            )
-        if family == "full_inverse":
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "adapted",
-                "adapted_allowed",
-                family,
-                "FNO inverse is a supervised inverse-operator adaptation, not a native FNO claim",
-                "Report explicitly as an FNO-inverse adaptation.",
-                eligible=False,
-            )
-        if family in {"sparse_reconstruction", "sparse_inverse"}:
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "unsupported",
-                "unsupported",
-                family,
-                "vanilla FNO has no native sparse-sensor reconstruction/inverse interface",
-                "A masked-grid FNO can be run only as an explicitly named adaptation.",
-            )
 
-    if baseline == "deeponet":
-        if family == "full_forward":
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "adapted",
-                "adapted_allowed",
-                family,
-                "DeepXDE supplies the CartesianProd network component, while this repository supplies unified training and data",
-                "Report as DeepXDE component + unified adapted training, not an official example reproduction.",
-                eligible=False,
-            )
-        if family == "full_inverse":
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "adapted",
-                "adapted_allowed",
-                family,
-                "DeepONet inverse is a supervised inverse-operator adaptation",
-                "Report as an adaptation, not native DeepONet inverse ability.",
-                eligible=False,
-            )
-        if family == "sparse_reconstruction":
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "adapted",
-                "adapted_allowed",
-                family,
-                "sensor values as branch input are a DeepONet-sensor adaptation",
-                "Do not mix this adapted result into the native sparse reconstruction main table.",
-                eligible=False,
-            )
-        if family == "sparse_inverse":
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "unsupported",
-                "unsupported",
-                family,
-                "DeepONet sparse inverse is not a standard native baseline in this matrix",
-            )
 
-    if baseline == "ifno":
-        if family in {"full_forward", "full_inverse"}:
-            return _cap(
-                baseline,
-                pde,
-                task,
-                sensor_mode,
-                "adapted",
-                "adapted_allowed",
-                family,
-                "The iFNO adapter preserves vendored FNOBlocks inside bidirectional coupling, the official VAE topology, posterior-mean inverse inference, and iFNO/VAE/joint training on FM4PDE fields",
-                "Report as an official-training-aligned iFNO task adaptation; it is not a native official dataset run.",
-                eligible=False,
-            )
-        return _cap(
-            baseline,
-            pde,
-            task,
-            sensor_mode,
-            "unsupported",
-            "unsupported",
-            family,
-            "iFNO sparse reconstruction/inverse is not native without an official posterior/sparse inference path",
-        )
 
     if baseline == "recfno":
         if family in {"sparse_reconstruction", "sparse_forward"}:

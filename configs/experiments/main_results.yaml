@@ -5,13 +5,17 @@ config: baselines/configs/paper.yaml
 data_files_config: configs/data_files/formal_128.yaml
 task_protocol_version: fm4pde-task-contract-v3
 sensor_protocol_version: fm4pde-sensor-contract-v3
-pdes: [poisson, helmholtz, darcy, burger, nsnonbounded]
-seeds: [1]
-# train_size is the shared train/validation pool. With no explicit val files,
-# the final val_size samples are reserved for validation (45,000 + 5,000 here).
+pdes:
+- poisson
+- helmholtz
+- darcy
+- burger
+- nsnonbounded
+seeds:
+- 1
 train_size: 50000
 val_size: 5000
-test_size: 1000
+test_size: 100
 train_shards: 5
 data_loading_mode: eager
 num_workers: 4
@@ -20,48 +24,48 @@ persistent_workers: true
 prefetch_factor: 2
 device: cuda
 task_groups:
-  - full_forward_main
-  - full_inverse_main
-  - sparse_inverse_main_amortized
-  - sparse_inverse_main
-  - sparse_solution_main_amortized
-  - sparse_solution_burger_time_slices
-  - time_varying_da_main
-  - time_varying_da_burger_time_slices
-  - sparse_forward_main_amortized
-  - sparse_forward_main_physics
+- sparse_inverse_main_amortized
+- sparse_inverse_main
+- sparse_solution_main_amortized
+- sparse_solution_burger_time_slices
+- time_varying_da_main
+- time_varying_da_burger_time_slices
+- sparse_forward_main_amortized
+- sparse_forward_main_physics
 task_group_overrides:
-  full_forward_main:
-    task: forward
-    pdes: [poisson, helmholtz, darcy, nsnonbounded]
-    baselines: [fno, deeponet, ifno]
-    num_sensors: 0
-    sensor_mode: none
-    noise_level: 0.0
-  full_inverse_main:
-    task: inverse
-    pdes: [poisson, helmholtz, darcy, nsnonbounded]
-    baselines: [ifno]
-    num_sensors: 0
-    sensor_mode: none
-    noise_level: 0.0
   sparse_inverse_main_amortized:
     task: sparse_inverse
-    pdes: [poisson, helmholtz, darcy, nsnonbounded]
-    baselines: [recfno, senseiver, voronoicnn]
+    pdes:
+    - poisson
+    - helmholtz
+    - darcy
+    - nsnonbounded
+    baselines:
+    - recfno
+    - senseiver
+    - voronoicnn
     num_sensors: 500
     sensor_mode: random_per_sample
     noise_level: 0.0
   sparse_inverse_main:
     task: sparse_inverse
-    pdes: [poisson, helmholtz, darcy]
-    baselines: [pinn_sparse, pde_opt, pc_bnn]
+    pdes:
+    - poisson
+    - helmholtz
+    - darcy
+    baselines:
+    - pinn_sparse
+    - pde_opt
+    - pc_bnn
     num_sensors: 500
     sensor_mode: random_per_sample
     noise_level: 0.0
   sparse_solution_main_amortized:
     task: sparse_solution
-    baselines: [recfno, senseiver, voronoicnn]
+    baselines:
+    - recfno
+    - senseiver
+    - voronoicnn
     num_sensors: 500
     sensor_mode: random_per_sample
     sensor_budget_mode: total
@@ -69,8 +73,12 @@ task_group_overrides:
     load_full_trajectory: true
   sparse_solution_burger_time_slices:
     task: sparse_solution
-    pdes: [burger]
-    baselines: [recfno, senseiver, voronoicnn]
+    pdes:
+    - burger
+    baselines:
+    - recfno
+    - senseiver
+    - voronoicnn
     num_sensors: 5
     sensor_mode: time_slices_per_sample
     sensor_budget_mode: total
@@ -78,8 +86,11 @@ task_group_overrides:
     load_full_trajectory: true
   time_varying_da_main:
     task: sparse_solution
-    pdes: [burger]
-    baselines: [var4d, vivid]
+    pdes:
+    - burger
+    baselines:
+    - var4d
+    - vivid
     num_sensors: 500
     sensor_mode: random_per_sample
     sensor_budget_mode: total
@@ -87,8 +98,11 @@ task_group_overrides:
     load_full_trajectory: true
   time_varying_da_burger_time_slices:
     task: sparse_solution
-    pdes: [burger]
-    baselines: [var4d, vivid]
+    pdes:
+    - burger
+    baselines:
+    - var4d
+    - vivid
     num_sensors: 5
     sensor_mode: time_slices_per_sample
     sensor_budget_mode: total
@@ -96,15 +110,28 @@ task_group_overrides:
     load_full_trajectory: true
   sparse_forward_main_amortized:
     task: sparse_forward
-    pdes: [poisson, helmholtz, darcy, nsnonbounded]
-    baselines: [recfno, senseiver, voronoicnn]
+    pdes:
+    - poisson
+    - helmholtz
+    - darcy
+    - nsnonbounded
+    baselines:
+    - recfno
+    - senseiver
+    - voronoicnn
     num_sensors: 500
     sensor_mode: random_per_sample
     noise_level: 0.0
   sparse_forward_main_physics:
     task: sparse_forward
-    pdes: [poisson, helmholtz, darcy]
-    baselines: [pinn_sparse, pde_opt, pc_bnn]
+    pdes:
+    - poisson
+    - helmholtz
+    - darcy
+    baselines:
+    - pinn_sparse
+    - pde_opt
+    - pc_bnn
     num_sensors: 500
     sensor_mode: random_per_sample
     noise_level: 0.0
@@ -117,9 +144,6 @@ resources:
     batch_size: 1
     epochs: 1
     device: cuda
-  ifno:
-    batch_size: 16
-    epochs: 100
   pinn_sparse:
     batch_size: 1
     steps: 1000

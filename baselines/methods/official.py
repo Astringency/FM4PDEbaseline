@@ -38,7 +38,6 @@ OFFICIAL_SOURCE_INFO: dict[str, dict[str, str]] = {
     "recfno": _source("https://github.com/zhaoxiaoyu1995/recfno", OFFICIAL_ROOT / "RecFNO"),
     "senseiver": _source("https://github.com/OrchardLANL/Senseiver", OFFICIAL_ROOT / "Senseiver"),
     "pc_bnn": _source("https://github.com/Jianxun-Wang/Physics-constrained-Bayesian-deep-learning", OFFICIAL_ROOT / "PC-BNN"),
-    "ifno": _source("https://github.com/BayesianAIGroup/iFNO", OFFICIAL_ROOT / "iFNO"),
     "vivid": _source("https://github.com/DL-WG/VIVID", OFFICIAL_ROOT / "VIVID"),
     "invobs": _source("https://github.com/googleinterns/invobs-data-assimilation", OFFICIAL_ROOT / "invobs-data-assimilation"),
     "vivid_invobs": {
@@ -77,7 +76,7 @@ def requested_implementation_mode(config: dict[str, Any]) -> str:
     backend = str(config.get("official_backend", "auto")).lower()
     if backend in {"local", "none", "adapted"}:
         return "adapted"
-    if backend in {"official", "neuraloperator", "deepxde", "recfno", "senseiver", "pc_bnn", "ifno"}:
+    if backend in {"official", "neuraloperator", "deepxde", "recfno", "senseiver", "pc_bnn"}:
         return "official"
     return backend or "auto"
 
@@ -226,30 +225,8 @@ def get_pc_bnn_net_class() -> type[Any]:
             raise OfficialImportError(str(exc)) from exc
 
 
-def get_ifno_official_status() -> None:
-    """Validate whether vendored iFNO can be imported as a library component.
-
-    The current upstream snapshot is organized as executable scripts that parse
-    command-line globals at import time. The wrapper therefore refuses to claim
-    official code reuse until a stable importable module adapter is added.
-    """
-
-    path = OFFICIAL_ROOT / "iFNO"
-    if not path.exists():
-        raise OfficialImportError(f"iFNO source tree not found: {path}")
-    raise OfficialImportError("vendored iFNO scripts are not safely importable model components")
 
 
-def get_ifno_official_aligned_status() -> None:
-    """Validate local availability of the iFNO official-aligned adapter."""
-
-    path = OFFICIAL_ROOT / "iFNO"
-    if not path.exists():
-        raise OfficialImportError(f"iFNO source tree not found: {path}")
-    try:
-        import baselines.methods.ifno_official_aligned  # noqa: F401
-    except Exception as exc:
-        raise OfficialImportError(f"iFNO official-aligned adapter unavailable: {exc}") from exc
 
 
 def get_vivid_official_status() -> None:

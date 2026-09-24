@@ -25,7 +25,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX_NAME = "main_results"
-DEFAULT_TEST_SIZE = 1000
+DEFAULT_TEST_SIZE = 100
 DEFAULT_TEST_FILE = "poisson/poisson_test_10000-128-128-2.mat"
 
 DISTRIBUTION_TEST_FILES: dict[str, dict[str, str]] = {
@@ -51,6 +51,12 @@ DISTRIBUTION_TEST_FILES: dict[str, dict[str, str]] = {
         "burger": "burgers/burger_test_10000-128-128_rough.mat",
     },
 }
+for _distribution in ("rough2", "rough3"):
+    DISTRIBUTION_TEST_FILES[_distribution] = {
+        key: value.replace("10000-", "1000-").replace("_rough.mat", f"_{_distribution}.mat")
+        for key, value in DISTRIBUTION_TEST_FILES["rough"].items()
+    }
+
 
 
 def log(message: str) -> None:

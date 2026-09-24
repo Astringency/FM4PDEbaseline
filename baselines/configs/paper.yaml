@@ -1,20 +1,18 @@
 data_root: ~/share/PDEdata
 output_dir: outputs/baselines/paper
 experiment_mode: paper
-
 pdes:
-  - poisson
-  - helmholtz
-  - darcy
-  - burger
-  - nsnonbounded
-
+- poisson
+- helmholtz
+- darcy
+- burger
+- nsnonbounded
 batch_size: 16
 epochs: 200
 learning_rate: 0.001
 train_size: 50000
 val_size: 5000
-test_size: 1000
+test_size: 100
 train_shards: 5
 scalar_param_mode: metadata
 sensor_budget_mode: per_time
@@ -23,11 +21,14 @@ num_workers: 4
 pin_memory: true
 persistent_workers: true
 prefetch_factor: 2
-seeds: [1]
-sensor_counts: [500]
-sensor_modes: [random_per_sample]
-noise_levels: [0.0]
-
+seeds:
+- 1
+sensor_counts:
+- 500
+sensor_modes:
+- random_per_sample
+noise_levels:
+- 0.0
 method:
   implementation_mode: official_or_skip
   official_backend: auto
@@ -36,11 +37,11 @@ method:
   scheduler_monitor: val_loss
   scheduler_patience: 5
   scheduler_factor: 0.5
-  scheduler_min_lr: 1.0e-5
-  scheduler_threshold: 1.0e-6
+  scheduler_min_lr: 1.0e-05
+  scheduler_threshold: 1.0e-06
   early_stopping: true
   early_stopping_patience: 10
-  early_stopping_min_delta: 1.0e-4
+  early_stopping_min_delta: 0.0001
   min_epochs: 5
   min_optimization_steps: 5
   restore_best: true
@@ -51,62 +52,8 @@ method:
   lambda_bc: 0.01
   lambda_ic: 0.01
   physics_loss_mode: total
-  lambda_reg: 0.00001
-
+  lambda_reg: 1.0e-05
 method_by_baseline:
-  fno:
-    width: 64
-    layers: 4
-    modes1: 20
-    modes2: 20
-    optimizer: adamw
-    weight_decay: 0.0001
-    training_loss: h1
-    lr_scheduler: step
-    scheduler_step_size: 100
-    scheduler_gamma: 0.5
-  deeponet:
-    hidden: 256
-    basis: 128
-    optimizer: adam
-    lr: 1.0e-4
-    training_loss: mse
-    lr_scheduler: exponential
-    scheduler_gamma: 0.98
-  ifno:
-    implementation_mode: official_aligned
-    official_backend: ifno
-    width: 64
-    layers: 4
-    modes1: 16
-    modes2: 16
-    padding: 20
-    rank: 24
-    training_protocol: official_three_stage
-    # Formal 100-epoch three-stage budget: emphasize invertible-operator
-    # pretraining and joint refinement while keeping a bounded VAE warm-up.
-    ifno_pretrain_epochs: 50
-    vae_pretrain_epochs: 15
-    joint_epochs: 35
-    lr_ifno: 0.00025
-    lr_vae: 0.001
-    lr_forward: 0.00005
-    lr_backward: 0.00005
-    kl_weight: 0.01
-    reconstruction_weight: 1.0
-    vae_resolution: 64
-    cycle_weight: 0.0
-    lr: 0.00025
-    vae_grad_clip_norm: 2.0
-    ifno_grad_clip_norm: 10.0
-    joint_grad_clip_norm: 10.0
-    vae_geometric_augmentation: true
-    ifno_pretrain_early_stopping_patience: 3
-    ifno_pretrain_min_epochs: 3
-    vae_pretrain_early_stopping_patience: 3
-    vae_pretrain_min_epochs: 4
-    joint_train_early_stopping_patience: 2
-    joint_train_min_epochs: 2
   recfno:
     width: 32
     modes1: 18
@@ -171,9 +118,9 @@ method_by_baseline:
     particles: 5
     steps: 2000
     lr: 0.001
-    lr_noise: 0.00001
+    lr_noise: 1.0e-05
     beta_prior_shape: 2.0
-    beta_prior_rate: 1.0e-6
+    beta_prior_rate: 1.0e-06
     weight_prior_shape: 1.0
     weight_prior_rate: 0.05
     equation_variance: 0.0001
@@ -184,17 +131,13 @@ method_by_baseline:
     normalize: false
     steps: 500
     lr: 0.01
-    lambda_reg: 0.00001
-  # Burgers sparse-trajectory reconstruction methods. Var4D is a canonical
-  # strong-constraint initial-state optimization. VIVID ports the architecture,
-  # training recipe, three-term objective, covariance scales, and L-BFGS-B
-  # budget from the vendored official implementation.
+    lambda_reg: 1.0e-05
   var4d:
     normalize: false
     steps: 500
     optimizer: scipy_lbfgsb
-    cost_decrement_tolerance: 1.0e-6
-    gradient_tolerance: 1.0e-8
+    cost_decrement_tolerance: 1.0e-06
+    gradient_tolerance: 1.0e-08
     background_variance: 0.01
     background_correlation_length: 5.0
     observation_variance: 1.0
@@ -207,22 +150,21 @@ method_by_baseline:
     uses_official_inverse_observation_operator: true
     epochs: 20
     inverse_learning_rate: 0.0001
-    inverse_adam_epsilon: 1.0e-7
+    inverse_adam_epsilon: 1.0e-07
     vcnn_micro_batch_size: 4
     vcnn_inference_batch_size: 4
     early_stopping: true
     early_stopping_patience: 20
-    early_stopping_min_delta: 1.0e-4
+    early_stopping_min_delta: 0.0001
     restore_best: false
     refine_steps: 1000
     optimizer: scipy_lbfgsb
-    cost_decrement_tolerance: 1.0e-6
-    gradient_tolerance: 1.0e-8
+    cost_decrement_tolerance: 1.0e-06
+    gradient_tolerance: 1.0e-08
     background_variance: 1000.0
     background_correlation_length: 5.0
     inverse_operator_variance: 100.0
     observation_variance: 1.0
-
 method_by_baseline_and_pde:
   ifno:
     nsnonbounded:

@@ -33,13 +33,8 @@ from baselines.common.metrics import (
 )
 from baselines.common.sensors import validate_condition_probabilities
 from baselines.common.sample_artifacts import EvaluationArtifactWriter
-from baselines.methods.deeponet import DeepONetBaseline
-from baselines.methods.fno import FNOBaseline
-from baselines.methods.ifno import IFNOBaseline
 from baselines.methods.official import OfficialImportError
 from baselines.methods.official import (
-    get_ifno_official_aligned_status,
-    get_ifno_official_status,
     get_pc_bnn_net_class,
     get_pc_bnn_official_aligned_status,
     get_vivid_official_architecture_status,
@@ -74,9 +69,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 BASELINES = {
-    "fno": FNOBaseline,
-    "deeponet": DeepONetBaseline,
-    "ifno": IFNOBaseline,
     "recfno": RecFNOBaseline,
     "senseiver": SenseiverBaseline,
     "voronoicnn": VoronoiCNNBaseline,
@@ -3138,19 +3130,6 @@ def _preflight_backend_availability(
     if mode not in {"official", "official_or_skip", "official_architecture", "official_aligned"}:
         return None
     try:
-        if args.baseline == "ifno" and capability.task_family in {"full_forward", "full_inverse"}:
-            if mode == "official":
-                get_ifno_official_status()
-            elif mode == "official_aligned":
-                get_ifno_official_aligned_status()
-            else:
-                try:
-                    get_ifno_official_status()
-                except OfficialImportError:
-                    if not bool(getattr(capability, "official_aligned_allowed", False)):
-                        raise
-                    get_ifno_official_aligned_status()
-            return None
         if args.baseline == "pc_bnn" and capability.task_family == "sparse_reconstruction":
             if args.pde.lower() != "shallow_water":
                 raise OfficialImportError("official-aligned PC-BNN is only enabled for 2D three-channel shallow-water fields")

@@ -1,62 +1,54 @@
-# FM4PDE baselines
+# FM4PDE baseline experiment: RecFNO, Senseiver, VoronoiCNN, PINN-Sparse, PDE-Opt, PC-BNN, B-PINNs, 4D-Var, VIVID
 
-Baseline experiments used in the FM4PDE paper:
+Sparse reconstruction and physics-based baselines for the revised FM4PDE paper.
 
-| Experiment | Methods | PDEs |
-| --- | --- | --- |
-| Full-field forward / inverse | FNO, DeepONet, iFNO (inverse: iFNO) | Poisson, Helmholtz, Darcy, Navier–Stokes |
-| Sparse forward, inverse, and joint reconstruction | RecFNO, Senseiver, VoronoiCNN | Poisson, Helmholtz, Darcy, Navier–Stokes |
-| Physics-based sparse forward / inverse | PINN-Sparse, PDE-Opt, PC-BNN | Poisson, Helmholtz, Darcy |
-| Trajectory reconstruction: random / structured observations | RecFNO, Senseiver, VoronoiCNN, 4D-Var, VIVID | Burgers |
-| Separate-task vs. shared-model reconstruction | RecFNO, Senseiver, VoronoiCNN | Poisson |
+| Method | Approach and source |
+| --- | --- |
+| RecFNO | Voronoi embedding and a Fourier operator; [official implementation](https://github.com/zhaoxiaoyu1995/recfno). |
+| Senseiver | Attention-based field reconstruction; [official implementation](https://github.com/OrchardLANL/Senseiver). |
+| VoronoiCNN | Convolutions on a Voronoi representation; [official implementation](https://github.com/kfukami/Voronoi-CNN). |
+| PINN-Sparse | Neural fields optimized against observations and PDE residuals; adapted from [PINNs](https://github.com/maziarraissi/PINNs) and [DeepXDE](https://github.com/lululxvi/deepxde). |
+| PDE-Opt | Local grid optimization with observation, PDE, and regularization terms; appendix baseline, implemented here. |
+| PC-BNN | Physics-constrained Bayesian particles; [official implementation](https://github.com/Jianxun-Wang/Physics-constrained-Bayesian-deep-learning). |
+| B-PINNs | HMC over neural-field parameters; local adaptation of the [public PyTorch reference](https://github.com/obok13/B-PINNs), which is a third-party implementation. |
+| 4D-Var | Variational trajectory assimilation; local Burgers adaptation with [reference assimilation code](https://github.com/googleinterns/invobs-data-assimilation). |
+| VIVID | Learned inverse observations and variational refinement; local Burgers adaptation of [VIVID](https://github.com/DL-WG/VIVID). |
 
-Spatial-frequency and timing comparisons reuse these models through the analysis
-scripts in the companion FM4PDE repository. Upstream source code and licenses are
-retained in `offical/`.
+## Structure
 
-## Setup
+- `baselines/`: adapters, common data/sensor/physics code, metrics, and provenance.
+- `configs/`: manuscript experiment matrix and five-shard data filenames.
+- `offical/`: retained upstream sources and notices (historical directory spelling).
+- `scripts/`: training, distribution evaluation, aggregation, and B-PINNs HMC.
 
-Use the `fm4pdebaseline` environment specified in `environment.yml`.
-Keep datasets outside the repository; filenames are listed in
-`configs/data_files/formal_128.yaml`.
+## Setup and examples
+
+Use `environment.yml`; keep datasets outside Git.
 
 ```bash
 export DATA_ROOT=/path/to/PDEdata
-export PYTHON_BIN=python
-export OUT_ROOT=outputs/main_results  # use an absolute result path on a server
-```
-
-## Main experiments
-
-```bash
+export OUT_ROOT=/path/to/baseline-results
 DRY_RUN=1 bash scripts/training/run.sh
-GPUS=0,1 JOBS_PER_GPU=1 bash scripts/training/run.sh
-for distribution in id smooth rough; do
-  bash scripts/sampling/main/run.sh --output-root "$OUT_ROOT" --distribution "$distribution"
+BASELINES=recfno,senseiver,voronoicnn GPUS=0,1 JOBS_PER_GPU=1 bash scripts/training/run.sh
+for split in id smooth rough; do
+  bash scripts/sampling/main/run.sh --output-root "$OUT_ROOT" --distribution "$split"
 done
 ```
 
-`configs/experiments/main_results.yaml` defines the main comparisons. The workflow
-validates data, trains models, evaluates, and collects results. Training uses
-45,000 samples plus 5,000 validation samples; each evaluation uses 1,000 inputs.
-Set `BASELINES` to a comma-separated method subset. The paper's physics-based
-sparse comparisons use Smooth data; the other comparisons use all three distributions.
+[configs/experiments/main_results.yaml](configs/experiments/main_results.yaml)
+uses 45,000 training / 5,000 validation samples and 100 evaluation inputs per
+setting. Physics-based comparisons use Smooth; Burgers includes random points
+and five complete physical-time levels, evaluated over the full trajectory.
 
-## Poisson multi-task ablation
+B-PINNs uses the hashed physical inputs and training normalization exported by
+`FunDPS_DDIS_ECI_OFM/adapters/prepare_shared_prior_assets.py`:
 
 ```bash
-ABLATION_ROOT=outputs/ablations/sparse_solution_multicondition/poisson
-OUT_ROOT="$ABLATION_ROOT" GPUS=0,1 bash scripts/sampling/ablations/run.sh
-for distribution in id smooth rough; do
-  bash scripts/sampling/main/run.sh --output-root "$ABLATION_ROOT" \
-    --matrix "$ABLATION_ROOT/matrices/sparse_solution_multicondition_ablation.jsonl" \
-    --train-root "$ABLATION_ROOT/runs/sparse_solution_multicondition_ablation" \
-    --task-groups "sparse_solution_multicondition_eval_a_only sparse_solution_multicondition_eval_u_only sparse_solution_multicondition_eval_both" \
-    --distribution "$distribution"
-done
+python scripts/run_bpinns.py --assets /path/to/shared_prior_assets \
+  --output "$OUT_ROOT/bpinns" --pdes poisson helmholtz darcy --device cuda:0
 ```
 
-`configs/experiments/sparse_solution_multicondition_ablation.yaml` trains one
-model per method on an equal mixture of input-only, solution-only, and joint
-observations, then evaluates all three modes using 500 shared sensor locations.
-The separate-task models come from the main experiments.
+Its defaults match the appendix: two width-16 tanh networks, 400 HMC transitions
+(200 warmup), and 100 leapfrog steps. `--protocols` optionally verifies masks
+against existing PINN-Sparse receipts. Backend metadata distinguishes direct
+upstream components from local adaptations; see `baselines/methods/official.py`.
