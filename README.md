@@ -1,4 +1,4 @@
-# FM4PDE baseline experiment: RecFNO, Senseiver, VoronoiCNN, PINN-Sparse, PDE-Opt, PC-BNN, B-PINNs, 4D-Var, VIVID
+# FM4PDE baseline experiment: RecFNO, Senseiver, VoronoiCNN, PINN-Sparse, PC-BNN, B-PINNs, 4D-Var, VIVID
 
 Sparse reconstruction and physics-based baselines for the revised FM4PDE paper.
 
@@ -8,7 +8,6 @@ Sparse reconstruction and physics-based baselines for the revised FM4PDE paper.
 | Senseiver | Attention-based field reconstruction; [official implementation](https://github.com/OrchardLANL/Senseiver). |
 | VoronoiCNN | Convolutions on a Voronoi representation; [official implementation](https://github.com/kfukami/Voronoi-CNN). |
 | PINN-Sparse | Neural fields optimized against observations and PDE residuals; adapted from [PINNs](https://github.com/maziarraissi/PINNs) and [DeepXDE](https://github.com/lululxvi/deepxde). |
-| PDE-Opt | Local grid optimization with observation, PDE, and regularization terms; appendix baseline, implemented here. |
 | PC-BNN | Physics-constrained Bayesian particles; [official implementation](https://github.com/Jianxun-Wang/Physics-constrained-Bayesian-deep-learning). |
 | B-PINNs | HMC over neural-field parameters; local adaptation of the [public PyTorch reference](https://github.com/obok13/B-PINNs), which is a third-party implementation. |
 | 4D-Var | Variational trajectory assimilation; local Burgers adaptation with [reference assimilation code](https://github.com/googleinterns/invobs-data-assimilation). |
@@ -47,8 +46,3 @@ B-PINNs uses the hashed physical inputs and training normalization exported by
 python scripts/run_bpinns.py --assets /path/to/shared_prior_assets \
   --output "$OUT_ROOT/bpinns" --pdes poisson helmholtz darcy --device cuda:0
 ```
-
-Its defaults match the appendix: two width-16 tanh networks, 400 HMC transitions
-(200 warmup), and 100 leapfrog steps. `--protocols` optionally verifies masks
-against existing PINN-Sparse receipts. Backend metadata distinguishes direct
-upstream components from local adaptations; see `baselines/methods/official.py`.
